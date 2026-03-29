@@ -15,6 +15,64 @@ We use a **Two-Tiered** system to ensure knowledge routes to the correct place s
 
 ---
 
+## 🗺️ How the Multi-Path Graph Works (Architecture Example)
+
+Kage uses Hierarchical Markdown to create a "Multi-Path Graph." This means a single cross-functional rule is stored securely exactly *once* as a central "Node," but is hyperlinked simultaneously from multiple routing indexes (like the Frontend and Backend maps). 
+
+When your AI is debugging the Frontend, it reads the Frontend index and finds the rule. When it's debugging the Backend, it reads the Backend index and finds the *exact same* rule. This prevents knowledge fragmentation.
+
+### The Scenario: Authentication & WebSockets
+Imagine your team has an AI coding session that formalizes three new engineering rules:
+1. **Node A:** React hydration error fixes for the User profile page. *(Strictly Frontend)*
+2. **Node B:** A new 15-minute JWT Token expiration policy. *(Affects Frontend API calls AND Backend validation).*
+3. **Node C:** A mandatory exponential backoff strategy for dead WebSockets. *(Affects Frontend, Mobile, and Backend socket handlers).*
+
+When Kage extracts these, it creates three central **Nodes**, but constructs a massive, interconnected markdown routing tree to ensure any agent working *anywhere* in the codebase organically discovers them!
+
+### The Indexing Graph (Mermaid)
+
+```mermaid
+graph TD
+    %% Define Styles
+    classDef root fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef index fill:#bbf,stroke:#333,stroke-width:1px;
+    classDef node fill:#bfb,stroke:#333,stroke-width:2px;
+
+    %% Level 0
+    Root[index.md]:::root
+
+    %% Level 1 Indexes
+    Root -->|Level 0 Link| FrontIdx(frontend/index.md):::index
+    Root -->|Level 0 Link| BackIdx(backend/index.md):::index
+    Root -->|Level 0 Link| MobileIdx(mobile/index.md):::index
+
+    %% Level 2 Indexes
+    FrontIdx -->|Level 1 Link| AuthUIIdx(frontend/auth/index.md):::index
+    FrontIdx -->|Level 1 Link| SocketUIIdx(frontend/websockets/index.md):::index
+    
+    BackIdx -->|Level 1 Link| ApiIdx(backend/api/index.md):::index
+    BackIdx -->|Level 1 Link| SocketSrvIdx(backend/websockets/index.md):::index
+
+    MobileIdx -->|Level 1 Link| MobileSocketIdx(mobile/websockets/index.md):::index
+
+    %% The Memory Nodes (The Knowledge Base)
+    Node1[Node: react_hydration.md]:::node
+    Node2[Node: jwt_15_min_policy.md]:::node
+    Node3[Node: socket_backoff.md]:::node
+
+    %% The Multi-Path Edges (Standard Markdown Hyperlinks)
+    AuthUIIdx -->|Reads Link| Node1
+    AuthUIIdx -->|Reads Link| Node2
+    
+    ApiIdx -->|Reads Link| Node2
+    
+    SocketUIIdx -->|Reads Link| Node3
+    SocketSrvIdx -->|Reads Link| Node3
+    MobileSocketIdx -->|Reads Link| Node3
+```
+
+---
+
 ## 🚀 Org-Wide Implementation Steps
 
 ### Phase 1: Create the Global Brain Repository
