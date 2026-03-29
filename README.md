@@ -1,38 +1,70 @@
-# 🧠 Agent Memory System (Memory as Code)
+# 🧠 Agent Memory as Code: Enterprise Setup Guide
 
-Welcome to the shared repository memory. Rather than relying on isolated APIs or black-box vector databases, this repository utilizes a **Markdown File-Based Graph** to synchronize context instantly across AI Agents (Cursor, Claude Code, AntiGravity) and human developers via `git`.
+Welcome to the "Memory as Code" framework. This architecture solves the "Isolated Agent" problem by using Git and Markdown files to synchronize crucial architectural insights, framework bugs, and repository context across an entire engineering team and their AI tools (Cursor, Claude, AntiGravity).
 
-## Architecture (Two-Tier Memory)
-1. **Local Memory (`/.agent_memory/`)**: Repository-specific context (e.g. "Our local test DB runs on port 5433").
-2. **Global Memory (`/.global_memory/`)**: *(Needs to be initialized as a Git Submodule pointing to the company's central memory repo)*. Contains company-wide framework rules and cross-repo API contracts.
+This guide explains how an entire Organization goes from zero to a fully synchronized, two-tiered Memory Hive-Mind.
 
 ---
 
-## 🛠️ How to Connect Your AI Agents (Setup)
+## 🏗️ The Architecture Overview
 
-Because the "Brain" is just plain-text Markdown files, it integrates natively into every coding tool without any complex plugins.
+We use a **Two-Tiered** system to ensure knowledge routes to the correct place safely:
 
-### 1. Cursor IDE
-**Status: Ready.** 
-There is nothing to install. The `.cursorrules` file in the root of this repository handles this automatically. Cursor's Composer is strictly enforced to read `/.agent_memory/index.md` before making any code changes. 
-
-### 2. Claude Code (CLI)
-**Status: Manual Flag Required.**
-When starting Claude Code in your terminal, pass the memory map in the system prompt to grant it context:
-```bash
-claude --system "Before writing code or answering structural questions, strictly read /.agent_memory/index.md for historical architecture context."
-```
-
-### 3. AntiGravity (Native Integration)
-**Status: Ready.**
-AntiGravity has the **Distiller Agent** role built directly into it via a custom slash command workflow.
-*   **To Read Memory:** AntiGravity natively uses `view_file` to navigate the file system if you ask it a repo question.
-*   **To Save a Memory:** Simply type `/save-memory` in the chat. AntiGravity will analyze your chat session, extract the core "Stack Overflow" learning, format the Markdown, and silently run the python script to commit the learning directly to the local or global memory graph!
+1. **Local Memory (`/.agent_memory/`)**: Context strictly tied to a single repository's codebase (e.g., "The local checkout DB schema"). Lives in individual git feature branches.
+2. **Global Memory (`/.global_memory/`)**: Universal knowledge (e.g., "Company-wide Next.js caching rules"). Lives in a central repository, distributed everywhere as a Submodule.
 
 ---
 
-## 📝 How to Manually Add Memories
-You don't need an AI to add memories. It's just a wiki!
-1. Create a markdown file describing the bug/rule in `/.agent_memory/nodes/`.
-2. Open `/.agent_memory/index.md` (or the relevant sub-folder) and add a standard markdown hyperlink pointing to your new node. 
-3. Commit your changes via Git. The entire team's AI tools will now instantly inherit this rule upon their next `git pull`.
+## 🚀 Org-Wide Implementation Steps
+
+### Phase 1: Create the Global Brain Repository
+First, create a brand-new repository on GitHub dedicated *solely* to enterprise agent memory.
+1. Create `github.com/YourOrg/global-agent-memory.git`.
+2. Inside it, create a single map file: `index.md`.
+3. Give your entire engineering team `write` access to this repo.
+
+### Phase 2: Connect the Microservices
+For every single application repository your team actively develops in:
+
+1. **Attach the Global Submodule:**
+   Pull the Global Brain directly into the app repository:
+   ```bash
+   git submodule add https://github.com/YourOrg/global-agent-memory.git .global_memory
+   ```
+2. **Scaffold the Local Memory:**
+   Create the isolated local tracker for repo-specific rules:
+   ```bash
+   mkdir -p .agent_memory/nodes && touch .agent_memory/index.md
+   ```
+3. **Configure the AI Ecosystem:**
+   Create a `.cursorrules` file at the root of the application repository. This natively forces Cursor IDE (and auto-agents) to read the memory map before treating your code as a blank slate.
+   ```text
+   # .cursorrules
+   You MUST read BOTH `/.agent_memory/index.md` AND `/.global_memory/index.md` before suggesting architectural changes or assuming framework behaviors. Follow any structural warnings found in those nodes exactly.
+   ```
+
+### Phase 3: Activating the Distiller Agent (Automation)
+
+Humans hate writing documentation, so we automate it. This repository includes two background tools in `/.agent_memory/scripts/` to invisibly track agent sessions and write memory.
+
+*   **The Session Watcher (`session_watcher.py`)**: A daemon that permanently runs in the background. It reads the raw chat transcripts from AntiGravity or Claude. When you solve a complex bug with AI, the Watcher realizes it, extracts a "Stack Overflow" style lesson, creates the Markdown file, and seamlessly appends the hyperlink to your `index.md` map.
+*   **The Routing Rules**: The Distiller script asks the LLM: *"Is this highly specific to this app, or a global framework rule?"* 
+    *   If Local: It saves to `.agent_memory/` on the current Git branch.
+    *   If Global: It saves to `.global_memory/` and bypasses the local branch by pushing directly to the `main` branch of the global submodule repo instantly syncing it to every other engineer in the company.
+
+---
+
+## 🔌 How to Enable Different Agent Platforms
+
+Because the Memory is just plain-text Markdown tracked over Git, it integrates anywhere natively.
+
+*   **Cursor IDE:** Fully automatic. `Composer` naturally follows the `.cursorrules` file instructions and hyperlinks.
+*   **AntiGravity:** Included in this repo is a custom workflow (`.agents/workflows/save-memory.md`). Just type `/save-memory` in the chat, and AntiGravity will act as the Distiller Agent, parsing and saving the memory manually.
+*   **Claude Code (CLI):** Start Claude Code by actively passing the memory maps in the system prompt:
+    ```bash
+    claude --system "Before writing code, read /.agent_memory/index.md and /.global_memory/index.md."
+    ```
+*   **GitHub Copilot Workspace:** The Markdown files are natively indexed by GitHub's semantic search. Asking Copilot chat an architectural question will automatically surface the memory nodes.
+
+---
+*Built with anti-hallucination, cross-functional architecture in mind.*
