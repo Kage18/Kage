@@ -1,0 +1,3 @@
+.last_distill_time
+.agent_memory/watcher.log
+.agent_memory/watcher.error.log
