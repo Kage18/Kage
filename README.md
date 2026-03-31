@@ -2,6 +2,66 @@
 
 Welcome to **Kage** (the shared Agent Memory framework). This architecture solves the "Isolated Agent" problem by using Git and Markdown files to synchronize crucial architectural insights, framework bugs, and repository context across an entire engineering team and their AI tools (Cursor, Claude, AntiGravity).
 
+---
+
+## ⚡ Quickstart
+
+**Requirements:** Python 3.8+, an [Anthropic API key](https://console.anthropic.com/settings/api-keys) (`sk-ant-...`)
+
+### macOS / Linux — one command
+
+```bash
+# Run directly from GitHub into any repo:
+cd /path/to/your-repo
+ANTHROPIC_API_KEY=sk-ant-... bash <(curl -fsSL https://raw.githubusercontent.com/Kage18/Kage/master/setup.sh)
+```
+
+Or clone first:
+```bash
+git clone https://github.com/Kage18/Kage.git
+cd /path/to/your-repo
+ANTHROPIC_API_KEY=sk-ant-... bash /path/to/Kage/setup.sh
+```
+
+### Windows — one command
+
+```powershell
+# From your repo directory:
+$env:ANTHROPIC_API_KEY="sk-ant-..."
+git clone https://github.com/Kage18/Kage.git $env:TEMP\Kage
+& "$env:TEMP\Kage\setup.ps1"
+```
+
+### What the setup script does
+
+| Step | What it sets up |
+|------|----------------|
+| 1 | Installs `anthropic` Python SDK |
+| 2 | Scaffolds `.agent_memory/` with indexes and scripts |
+| 3 | Creates `CLAUDE.md` so Claude Code reads memory on every session |
+| 4 | Creates `.cursorrules` for Cursor IDE |
+| 5 | Installs a `.git/hooks/post-commit` hook to auto-distill each commit |
+| 6 | Starts a background daemon that watches Claude Code sessions and auto-saves learnings |
+
+After setup, **everything is automatic** — just code normally and Kage captures the knowledge.
+
+---
+
+## 🛠️ Manual: Save a Memory Node
+
+If you want to save a learning manually at any time:
+
+```bash
+python3 .agent_memory/scripts/distiller_tool.py \
+  --title "Your Rule Title" \
+  --category "architecture" \
+  --tags '["auth", "backend"]' \
+  --content "## Problem\n\nDescribe the issue.\n\n## Solution\n\nDescribe the fix." \
+  --paths "backend,frontend/api"
+```
+
+---
+
 This guide explains how an entire Organization goes from zero to a fully synchronized, two-tiered Memory Hive-Mind.
 
 ---
@@ -159,7 +219,7 @@ For every single application repository your team actively develops in:
 Humans hate writing documentation, so we automate it. This repository includes two background tools in `/.agent_memory/scripts/` to invisibly track agent sessions and write memory.
 
 *   **The Session Watcher (`session_watcher.py`)**: A daemon that permanently runs in the background. It reads the raw chat transcripts from AntiGravity or Claude. When you solve a complex bug with AI, the Watcher realizes it, extracts a "Stack Overflow" style lesson, creates the Markdown file, and seamlessly appends the hyperlink to your `index.md` map.
-    *   **Windows Auto-Start Setup**: Any developer joining the team can simply execute `./.agent_memory/scripts/setup_daemon.ps1`. This dynamically generates a silent VBScript in their local Windows Startup folder. The daemon will now launch invisibly via `pythonw.exe` every time they turn on their computer.
+    *   **Auto-Start Setup**: Run `setup.sh` (macOS/Linux) or `setup.ps1` (Windows) once. The daemon is registered as a LaunchAgent / Scheduled Task and starts automatically on every login.
 *   **The Routing Rules**: The Distiller script asks the LLM: *"Is this highly specific to this app, or a global framework rule?"* 
     *   If Local: It saves to `.agent_memory/` on the current Git branch.
     *   If Global: It saves to `.global_memory/` and bypasses the local branch by pushing directly to the `main` branch of the global submodule repo instantly syncing it to every other engineer in the company.
@@ -172,10 +232,7 @@ Because the Memory is just plain-text Markdown tracked over Git, it integrates a
 
 *   **Cursor IDE:** Fully automatic. `Composer` naturally follows the `.cursorrules` file instructions and hyperlinks.
 *   **AntiGravity:** Included in this repo is a custom workflow (`.agents/workflows/save-memory.md`). Just type `/save-memory` in the chat, and AntiGravity will act as the Distiller Agent, parsing and saving the memory manually.
-*   **Claude Code (CLI):** Start Claude Code by actively passing the memory maps in the system prompt:
-    ```bash
-    claude --system "Before writing code, read /.agent_memory/index.md and /.global_memory/index.md."
-    ```
+*   **Claude Code (CLI):** The `setup.sh` / `setup.ps1` script creates a `CLAUDE.md` at the repo root. Claude Code automatically reads this file at the start of every session, loading the memory indexes before touching any code.
 *   **GitHub Copilot Workspace:** The Markdown files are natively indexed by GitHub's semantic search. Asking Copilot chat an architectural question will automatically surface the memory nodes.
 
 ---

@@ -1,88 +1,111 @@
+"""
+Kage Distiller Hook -- post-commit hook script
+Analyzes the latest git commit diff and, if a real architectural lesson was
+learned, saves it as a memory node via distiller_tool.py.
+"""
+
 import os
 import subprocess
 import json
 import sys
+from pathlib import Path
 
-# Optional: You can use any LLM SDK here. We'll outline standard OpenAI/Gemini logic.
-# import google.generativeai as genai 
-# import openai
+import anthropic
+
+KAGE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
 
 def get_latest_commit_data():
-    """Gets the commit message and the diff of the most recent commit."""
     try:
-        # Get commit message
-        msg = subprocess.check_output(['git', 'log', '-1', '--pretty=%B']).decode('utf-8').strip()
-        # Get the actual code changes
-        diff = subprocess.check_output(['git', 'show', '--stat', '-p']).decode('utf-8')
+        msg = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%B"], cwd=KAGE_ROOT
+        ).decode("utf-8").strip()
+        diff = subprocess.check_output(
+            ["git", "show", "--stat", "-p"], cwd=KAGE_ROOT
+        ).decode("utf-8")
         return msg, diff
     except subprocess.CalledProcessError:
         print("Not inside a git repository or no commits yet.")
         sys.exit(0)
 
-def call_llm_distiller(commit_msg, diff):
-    """
-    Passes the diff to an LLM to check if a architectural, structural, or framework lesson was learned.
-    Returns JSON matching the distiller_tool.py arguments.
-    """
-    prompt = f"""
-    You are an automated Distiller Agent monitoring Git commits.
-    Read the following commit diff and message. 
-    Did this commit solve a complex framework bug, implement an architectural rule, or solve an obscure environment issue?
-    If NO, return an empty string.
-    If YES, formulate a "Stack Overflow" style memory node.
-    Return ONLY a valid JSON object with these exact keys:
-    - title (string)
-    - category (enum: repo_context, framework_bug, architecture, debugging)
-    - tags (stringified JSON array of tags, e.g., '["auth", "backend"]')
-    - content (string: markdown describing problem and solution)
-    - paths (string: comma separated paths, e.g. "frontend,backend/api")
-    
-    Commit Message: {commit_msg}
-    Diff: {diff[:4000]} # Limit to save tokens
-    """
-    
-    print("🤖 Distiller Agent is analyzing the background commit...")
-    
-    # --- MOCK IMPLEMENTATION ---
-    # In production, call your preferred LLM here and parse the JSON response.
-    # response = genai.GenerativeModel('gemini-1.5-pro').generate_content(prompt)
-    # result = json.loads(response.text)
-    
-    # We abort the mock so it doesn't infinite loop your commits while testing.
-    return None 
+
+DISTILL_PROMPT = """\
+You are an automated Distiller Agent monitoring Git commits.
+
+Read the commit message and diff below. Did this commit conclusively solve a non-trivial framework bug, implement an architectural rule, or resolve an obscure environment issue?
+
+Rules:
+- If NO (routine feature, cleanup, dependency bump, etc.), output exactly: SKIP
+- If YES, output ONLY a valid JSON object with these exact keys:
+  - title      : short, descriptive title (string)
+  - category   : one of repo_context | framework_bug | architecture | debugging
+  - tags       : stringified JSON array, e.g. "[\"auth\", \"backend\"]"
+  - content    : clear markdown describing the problem and solution (no fluff)
+  - paths      : comma-separated domain index paths, e.g. "backend,frontend/api"
+
+Commit Message: {msg}
+
+Diff:
+{diff}
+"""
+
+
+def call_llm_distiller(commit_msg: str, diff: str):
+    prompt = DISTILL_PROMPT.format(msg=commit_msg, diff=diff[:4000])
+    print("Distiller Agent analyzing commit...")
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = response.content[0].text.strip()
+
+    if raw == "SKIP" or not raw.startswith("{"):
+        return None
+
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
 
 def commit_memory_updates():
-    """If memory was updated, amend the current commit to include the markdown files."""
     try:
-        subprocess.check_call(['git', 'add', '.agent_memory/'])
-        # Amend the previous commit to invisibly tuck the memory files in
-        subprocess.check_call(['git', 'commit', '--amend', '--no-edit'])
-        print("✅ Distiller updated the Memory Graph in the background.")
+        subprocess.check_call(["git", "add", ".agent_memory/"], cwd=KAGE_ROOT)
+        subprocess.check_call(
+            ["git", "commit", "--amend", "--no-edit"], cwd=KAGE_ROOT
+        )
+        print("Distiller updated the Memory Graph.")
     except subprocess.CalledProcessError as e:
         print(f"Failed to amend commit: {e}")
 
+
 if __name__ == "__main__":
     msg, diff = get_latest_commit_data()
-    
-    # Ignore if this was just an automated Distiller commit to prevent infinite loops
-    if "Distiller Agent" in msg or "Merge " in msg:
+
+    # Prevent infinite loops on automated commits
+    if "Distiller Agent" in msg or msg.startswith("Merge "):
         sys.exit(0)
-        
-    extracted_learning = call_llm_distiller(msg, diff)
-    
-    if extracted_learning:
-        # 1. Call the Distiller Tool to create the files
-        subprocess.run([
-            sys.executable, 
-            os.path.join(os.path.dirname(__file__), "distiller_tool.py"),
-            "--title", extracted_learning['title'],
-            "--category", extracted_learning['category'],
-            "--tags", extracted_learning['tags'],
-            "--content", extracted_learning['content'],
-            "--paths", extracted_learning['paths']
-        ])
-        
-        # 2. Append the newly created files to the git commit we just made
+
+    learning = call_llm_distiller(msg, diff)
+
+    if learning:
+        distiller = str(KAGE_ROOT / ".agent_memory" / "scripts" / "distiller_tool.py")
+        subprocess.run(
+            [
+                sys.executable, distiller,
+                "--title",    learning["title"],
+                "--category", learning["category"],
+                "--tags",     learning["tags"],
+                "--content",  learning["content"],
+                "--paths",    learning["paths"],
+            ],
+            check=True,
+        )
         commit_memory_updates()
     else:
-        print("💤 Distiller Agent found no complex learnings. Sleeping.")
+        print("Distiller found no learnings in this commit.")
