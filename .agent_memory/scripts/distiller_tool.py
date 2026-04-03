@@ -62,8 +62,10 @@ def create_memory_node(title, category, tags, content, relative_paths, pending=F
     with open(node_path, 'w', encoding='utf-8') as f:
         f.write(
             f"---\n"
+            f"title: \"{title}\"\n"
             f"category: \"{category}\"\n"
             f"tags: {tags}\n"
+            f"paths: \"{','.join(relative_paths)}\"\n"
             f"date: \"{datetime.date.today()}\"\n"
             f"---\n\n"
         )

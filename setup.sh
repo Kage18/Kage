@@ -80,14 +80,17 @@ fi
 # ── 4. CLAUDE.md ─────────────────────────────────────────────────────────────
 KAGE_CLAUDE_BLOCK='## Kage Agent Memory
 
-Before suggesting code changes or architectural decisions, read the memory index:
-- [.agent_memory/index.md](.agent_memory/index.md) -- repo-specific context and rules
+Before suggesting code changes or architectural decisions:
+1. Read [.agent_memory/SUMMARY.md](.agent_memory/SUMMARY.md) — compact overview of all rules
+2. For domain-specific detail, follow links to the relevant index (e.g. .agent_memory/backend/index.md)
 
 Use the Kage CLI to manage memory:
-  python3 kage.py save          # save a new learning interactively
-  python3 kage.py review        # approve/reject AI-staged memories
-  python3 kage.py prune         # deprecate stale nodes
-  python3 kage.py check-links   # validate memory graph links'
+  python3 kage.py save            # save a new learning interactively
+  python3 kage.py review          # approve/reject AI-staged memories
+  python3 kage.py prune           # deprecate stale nodes
+  python3 kage.py check-links     # validate memory graph links
+  python3 kage.py digest          # regenerate SUMMARY.md
+  python3 kage.py rebuild-indexes # fix index.md merge conflicts'
 
 if [ ! -f "$TARGET_REPO/CLAUDE.md" ]; then
   echo "$KAGE_CLAUDE_BLOCK" > "$TARGET_REPO/CLAUDE.md"
@@ -170,6 +173,19 @@ launchctl unload "$PLIST_FILE" 2>/dev/null || true
 launchctl load "$PLIST_FILE"
 echo "Started: com.kage.session-watcher (LaunchAgent)"
 
+# ── 7b. Git post-merge hook (auto-rebuild indexes after pulls) ────────────────
+if [ -d "$GIT_DIR" ]; then
+  MERGE_HOOK="$GIT_DIR/hooks/post-merge"
+  cat > "$MERGE_HOOK" << HOOK
+#!/bin/bash
+REPO_DIR=\$(git rev-parse --show-toplevel)
+python3 "\$REPO_DIR/kage.py" rebuild-indexes 2>/dev/null || true
+python3 "\$REPO_DIR/kage.py" digest 2>/dev/null || true
+HOOK
+  chmod +x "$MERGE_HOOK"
+  echo "Installed: .git/hooks/post-merge (auto-rebuilds indexes on git pull)"
+fi
+
 # ── 8. .gitignore entries ─────────────────────────────────────────────────────
 GITIGNORE="$TARGET_REPO/.gitignore"
 touch "$GITIGNORE"
@@ -179,6 +195,9 @@ for entry in ".last_distill_time" ".agent_memory/watcher.log" ".agent_memory/wat
   fi
 done
 echo "Updated: .gitignore"
+
+# ── 9. Generate initial digest ───────────────────────────────────────────────
+"$PYTHON" "$TARGET_REPO/kage.py" digest 2>/dev/null && echo "Generated: .agent_memory/SUMMARY.md" || true
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -198,4 +217,7 @@ echo "  Run: python3 kage.py review  -- to approve them."
 echo ""
 echo "  To change LLM provider, edit kage.config.json:"
 echo "    provider: anthropic | openai | ollama"
+echo ""
+echo "  Conflict resolution: if index.md has merge conflicts after git pull,"
+echo "  run: python3 kage.py rebuild-indexes"
 echo ""

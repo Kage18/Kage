@@ -64,6 +64,12 @@ python3 kage.py prune
 
 # Check all relative markdown links in .agent_memory/
 python3 kage.py check-links
+
+# Regenerate SUMMARY.md (compact, token-efficient overview for AI context)
+python3 kage.py digest
+
+# Rebuild all index.md files from node frontmatter (resolves merge conflicts)
+python3 kage.py rebuild-indexes
 ```
 
 ---
@@ -116,6 +122,28 @@ python3 kage.py check-links
 # OK     backend/index.md -> ../nodes/jwt_policy.md
 # BROKEN frontend/index.md -> ../nodes/missing_file.md
 ```
+
+### Context Window Efficiency
+As the memory graph grows, loading every `index.md` and following all links burns thousands of tokens before the AI can even start coding. `SUMMARY.md` solves this — a flat, one-liner-per-node digest that the AI reads first, only diving into specific domain indexes when relevant:
+
+```bash
+python3 kage.py digest
+# Digest written: .agent_memory/SUMMARY.md (12 nodes)
+```
+
+`CLAUDE.md` and `.cursorrules` are pre-configured to read `SUMMARY.md` first. The digest is regenerated automatically after every `git pull` via the post-merge hook.
+
+### Merge Conflict Resolution
+When multiple developers commit memories simultaneously, `index.md` files can get merge conflicts. Indexes are derived artifacts — never hand-edit them. Instead:
+
+```bash
+# After a git merge conflict in any index.md:
+python3 kage.py rebuild-indexes
+# Rebuilt: backend/index.md (3 links)
+# Rebuilt: frontend/index.md (2 links)
+```
+
+The rebuild reads all node frontmatter and reconstructs every index from scratch. The post-merge Git hook runs this automatically after every `git pull`.
 
 ---
 

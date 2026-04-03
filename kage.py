@@ -3,10 +3,12 @@
 kage — Kage Agent Memory CLI
 
 Commands:
-  review       Review and approve/reject staged memory nodes
-  prune        Deprecate outdated memory nodes
-  check-links  Validate all relative markdown links in .agent_memory/
-  save         Interactively save a new memory node
+  review          Review and approve/reject staged memory nodes
+  prune           Deprecate outdated memory nodes
+  check-links     Validate all relative markdown links in .agent_memory/
+  save            Interactively save a new memory node
+  digest          Generate a compact SUMMARY.md from all active nodes
+  rebuild-indexes Rebuild all index.md files from node frontmatter (resolves merge conflicts)
 
 Usage:
   python3 kage.py <command>
@@ -244,6 +246,110 @@ def cmd_save(_args):
     create_memory_node(title, category, tags_raw, content, paths_list, pending=pending)
 
 
+# ── digest ────────────────────────────────────────────────────────────────────
+
+def cmd_digest(_args):
+    """Generate .agent_memory/SUMMARY.md — a compact, token-efficient index."""
+    nodes = sorted(NODES_DIR.glob("*.md")) if NODES_DIR.exists() else []
+
+    lines = [
+        "# Kage Memory Digest",
+        "",
+        "Compact overview of all active rules. Read this before coding.",
+        "For full details, follow the link to the node.",
+        "",
+        f"_Last updated: {datetime.date.today()} | {len(nodes)} node(s)_",
+        "",
+    ]
+
+    by_category: dict = {}
+    for node_path in nodes:
+        fm, body = _parse_frontmatter(node_path.read_text(encoding="utf-8"))
+        category = fm.get("category", "repo_context")
+        title = fm.get("title") or ""
+        if not title:
+            m = re.search(r"^#\s+(.+)", body, re.MULTILINE)
+            title = m.group(1) if m else node_path.stem
+
+        # First non-empty, non-heading line as one-liner summary
+        summary = ""
+        for line in body.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                summary = line[:120]
+                break
+
+        by_category.setdefault(category, []).append({
+            "title": title,
+            "file": node_path.name,
+            "summary": summary,
+        })
+
+    for category, entries in sorted(by_category.items()):
+        lines.append(f"## {category.replace('_', ' ').title()}")
+        lines.append("")
+        for e in sorted(entries, key=lambda x: x["title"]):
+            rel_link = f"nodes/{e['file']}"
+            lines.append(f"- **[{e['title']}]({rel_link})** — {e['summary']}")
+        lines.append("")
+
+    summary_path = AGENT_MEM / "SUMMARY.md"
+    summary_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Digest written: {summary_path.relative_to(KAGE_ROOT)} ({len(nodes)} nodes)")
+
+
+# ── rebuild-indexes ───────────────────────────────────────────────────────────
+
+def cmd_rebuild_indexes(_args):
+    """
+    Rebuild all domain index.md files from node frontmatter.
+
+    Indexes are treated as derived artifacts. If you get a Git merge conflict
+    in an index.md, resolve it by running this command — it regenerates every
+    index from the source-of-truth (the node files themselves).
+    """
+    nodes = list(NODES_DIR.glob("*.md")) if NODES_DIR.exists() else []
+    if not nodes:
+        print("No nodes found — nothing to rebuild.")
+        return
+
+    # Collect: domain path -> [(title, filename)]
+    path_links: dict = {}
+    for node_path in nodes:
+        fm, body = _parse_frontmatter(node_path.read_text(encoding="utf-8"))
+        paths_str = fm.get("paths", "")
+        title = fm.get("title", "")
+        if not title:
+            m = re.search(r"^#\s+(.+)", body, re.MULTILINE)
+            title = m.group(1) if m else node_path.stem
+        for p in [x.strip() for x in paths_str.split(",") if x.strip()]:
+            path_links.setdefault(p, []).append((title, node_path.name))
+
+    if not path_links:
+        print("No 'paths' found in node frontmatter — nothing to rebuild.")
+        print("Tip: nodes saved before this version don't have paths metadata.")
+        return
+
+    rebuilt = 0
+    for path, links in sorted(path_links.items()):
+        index_dir = AGENT_MEM / path
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index_file = index_dir / "index.md"
+
+        with open(index_file, "w", encoding="utf-8") as f:
+            label = path.replace("/", " / ").title()
+            f.write(f"# {label} Context Index\n\n")
+            for title, filename in sorted(links):
+                depth = len(path.strip("/").split("/"))
+                rel_prefix = "../" * depth
+                f.write(f"*   [{title}]({rel_prefix}nodes/{filename})\n")
+
+        print(f"  Rebuilt: {index_file.relative_to(KAGE_ROOT)} ({len(links)} link(s))")
+        rebuilt += 1
+
+    print(f"\n{rebuilt} index file(s) rebuilt.")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -252,17 +358,21 @@ def main():
         description="Kage Agent Memory CLI",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("review",      help="Review and approve/reject pending memory nodes")
-    sub.add_parser("prune",       help="Deprecate stale memory nodes")
-    sub.add_parser("check-links", help="Validate all relative links in .agent_memory/")
-    sub.add_parser("save",        help="Interactively save a new memory node")
+    sub.add_parser("review",          help="Review and approve/reject pending memory nodes")
+    sub.add_parser("prune",           help="Deprecate stale memory nodes")
+    sub.add_parser("check-links",     help="Validate all relative links in .agent_memory/")
+    sub.add_parser("save",            help="Interactively save a new memory node")
+    sub.add_parser("digest",          help="Generate SUMMARY.md — token-efficient node overview")
+    sub.add_parser("rebuild-indexes", help="Rebuild index.md files from node frontmatter (resolves merge conflicts)")
 
     args = parser.parse_args()
     {
-        "review":      cmd_review,
-        "prune":       cmd_prune,
-        "check-links": cmd_check_links,
-        "save":        cmd_save,
+        "review":          cmd_review,
+        "prune":           cmd_prune,
+        "check-links":     cmd_check_links,
+        "save":            cmd_save,
+        "digest":          cmd_digest,
+        "rebuild-indexes": cmd_rebuild_indexes,
     }[args.command](args)
 
 
