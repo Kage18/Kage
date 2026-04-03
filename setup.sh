@@ -44,6 +44,8 @@ echo "Dependencies: installed"
 echo ""
 echo "Target repository: $TARGET_REPO"
 mkdir -p "$TARGET_REPO/.agent_memory/nodes"
+mkdir -p "$TARGET_REPO/.agent_memory/pending"
+mkdir -p "$TARGET_REPO/.agent_memory/deprecated"
 mkdir -p "$TARGET_REPO/.agent_memory/scripts"
 
 # Copy scripts
@@ -51,6 +53,15 @@ cp "$SCRIPT_DIR/.agent_memory/scripts/distiller_tool.py"  "$TARGET_REPO/.agent_m
 cp "$SCRIPT_DIR/.agent_memory/scripts/distiller_hook.py"  "$TARGET_REPO/.agent_memory/scripts/"
 cp "$SCRIPT_DIR/.agent_memory/scripts/session_watcher.py" "$TARGET_REPO/.agent_memory/scripts/"
 cp "$SCRIPT_DIR/.agent_memory/scripts/post-commit.sh"     "$TARGET_REPO/.agent_memory/scripts/"
+cp "$SCRIPT_DIR/.agent_memory/scripts/pii_scrubber.py"    "$TARGET_REPO/.agent_memory/scripts/"
+cp "$SCRIPT_DIR/.agent_memory/scripts/llm_client.py"      "$TARGET_REPO/.agent_memory/scripts/"
+
+# Copy CLI and config to target repo root
+cp "$SCRIPT_DIR/kage.py" "$TARGET_REPO/kage.py"
+if [ ! -f "$TARGET_REPO/kage.config.json" ]; then
+  cp "$SCRIPT_DIR/kage.config.json" "$TARGET_REPO/kage.config.json"
+  echo "Created: kage.config.json (edit to change provider/model)"
+fi
 
 # Create root index if it doesn't exist
 if [ ! -f "$TARGET_REPO/.agent_memory/index.md" ]; then
@@ -67,48 +78,25 @@ EOF
 fi
 
 # ── 4. CLAUDE.md ─────────────────────────────────────────────────────────────
+KAGE_CLAUDE_BLOCK='## Kage Agent Memory
+
+Before suggesting code changes or architectural decisions, read the memory index:
+- [.agent_memory/index.md](.agent_memory/index.md) -- repo-specific context and rules
+
+Use the Kage CLI to manage memory:
+  python3 kage.py save          # save a new learning interactively
+  python3 kage.py review        # approve/reject AI-staged memories
+  python3 kage.py prune         # deprecate stale nodes
+  python3 kage.py check-links   # validate memory graph links'
+
 if [ ! -f "$TARGET_REPO/CLAUDE.md" ]; then
-  cat > "$TARGET_REPO/CLAUDE.md" << 'EOF'
-## Kage Agent Memory
-
-Before suggesting code changes or architectural decisions, read the memory index:
-- [.agent_memory/index.md](.agent_memory/index.md) — repo-specific context and rules
-
-To save a new learning after a session:
-```bash
-python3 .agent_memory/scripts/distiller_tool.py \
-  --title "Short Title" \
-  --category "architecture|framework_bug|repo_context|debugging" \
-  --tags '["tag1", "tag2"]' \
-  --content "Markdown description of problem and solution." \
-  --paths "backend,frontend/api"
-```
-EOF
+  echo "$KAGE_CLAUDE_BLOCK" > "$TARGET_REPO/CLAUDE.md"
   echo "Created: CLAUDE.md"
+elif ! grep -q "Kage Agent Memory" "$TARGET_REPO/CLAUDE.md"; then
+  { echo ""; echo "$KAGE_CLAUDE_BLOCK"; } >> "$TARGET_REPO/CLAUDE.md"
+  echo "Updated: CLAUDE.md (Kage block appended)"
 else
-  # Append if not already present
-  if ! grep -q "Kage Agent Memory" "$TARGET_REPO/CLAUDE.md"; then
-    cat >> "$TARGET_REPO/CLAUDE.md" << 'EOF'
-
-## Kage Agent Memory
-
-Before suggesting code changes or architectural decisions, read the memory index:
-- [.agent_memory/index.md](.agent_memory/index.md) — repo-specific context and rules
-
-To save a new learning after a session:
-```bash
-python3 .agent_memory/scripts/distiller_tool.py \
-  --title "Short Title" \
-  --category "architecture|framework_bug|repo_context|debugging" \
-  --tags '["tag1", "tag2"]' \
-  --content "Markdown description of problem and solution." \
-  --paths "backend,frontend/api"
-```
-EOF
-    echo "Updated: CLAUDE.md (Kage block appended)"
-  else
-    echo "Skipped: CLAUDE.md already has Kage block"
-  fi
+  echo "Skipped: CLAUDE.md already has Kage block"
 fi
 
 # ── 5. .cursorrules ──────────────────────────────────────────────────────────
@@ -198,10 +186,16 @@ echo "======================================"
 echo "  Kage setup complete!"
 echo "======================================"
 echo ""
-echo "  Memory index : $TARGET_REPO/.agent_memory/index.md"
-echo "  Watcher log  : $LOG_DIR/watcher.log"
-echo "  Post-commit  : $GIT_DIR/hooks/post-commit"
+echo "  Memory index  : $TARGET_REPO/.agent_memory/index.md"
+echo "  Config        : $TARGET_REPO/kage.config.json"
+echo "  CLI           : python3 $TARGET_REPO/kage.py <command>"
+echo "  Watcher log   : $LOG_DIR/watcher.log"
+echo "  Post-commit   : $GIT_DIR/hooks/post-commit"
 echo ""
-echo "  The session watcher is running in the background."
-echo "  It will auto-distill Claude Code sessions every 5 minutes."
+echo "  Sessions are distilled every 5 minutes."
+echo "  Memories go to .agent_memory/pending/ for review."
+echo "  Run: python3 kage.py review  -- to approve them."
+echo ""
+echo "  To change LLM provider, edit kage.config.json:"
+echo "    provider: anthropic | openai | ollama"
 echo ""

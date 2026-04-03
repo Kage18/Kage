@@ -1,7 +1,7 @@
 """
 Kage Session Watcher -- macOS / Claude Code edition
 Monitors ~/.claude/projects/ for new conversation turns, then uses the
-Anthropic API to distill learnings into .agent_memory/ nodes.
+configured LLM to distill learnings into .agent_memory/ nodes.
 """
 
 import os
@@ -11,13 +11,23 @@ import subprocess
 import glob
 from pathlib import Path
 
-import anthropic
+# Allow running as a script from any directory
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from pii_scrubber import scrub, has_secrets
+import llm_client
 
 KAGE_ROOT = Path(__file__).resolve().parent.parent.parent  # repo root
 LAST_CHECKED_FILE = KAGE_ROOT / ".last_distill_time"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
+def _load_config() -> dict:
+    cfg_path = KAGE_ROOT / "kage.config.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            return json.load(f)
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +49,6 @@ def update_last_run_time():
 # ---------------------------------------------------------------------------
 
 def extract_text(content) -> str:
-    """Flatten a Claude message content field to plain text."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -57,11 +66,6 @@ def extract_text(content) -> str:
 
 
 def get_claude_code_logs(last_run: float) -> list:
-    """
-    Scan every project session JSONL under ~/.claude/projects/ for files
-    modified since last_run. Returns a list of:
-        { "session_id": str, "project": str, "transcript": str }
-    """
     results = []
     pattern = str(CLAUDE_PROJECTS_DIR / "*" / "*.jsonl")
     for jsonl_path in glob.glob(pattern):
@@ -88,7 +92,7 @@ def get_claude_code_logs(last_run: float) -> list:
 
             project_dir = Path(jsonl_path).parent.name.replace("-", "/")
             session_id = Path(jsonl_path).stem
-            transcript = "\n\n".join(messages[-60:])  # last ~60 turns
+            transcript = "\n\n".join(messages[-60:])
             results.append({
                 "session_id": session_id,
                 "project": project_dir,
@@ -124,20 +128,16 @@ Transcript:
 
 
 def distill_session(session: dict):
-    prompt = DISTILL_PROMPT.format(transcript=session["transcript"])
+    # Scrub secrets from transcript before sending to LLM
+    safe_transcript = scrub(session["transcript"])
+    prompt = DISTILL_PROMPT.format(transcript=safe_transcript)
     print(f"  Distilling session {session['session_id']} ...")
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = response.content[0].text.strip()
+    raw = llm_client.complete(prompt)
 
     if raw == "SKIP" or not raw.startswith("{"):
         return None
 
-    # Strip possible markdown fences
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -149,19 +149,19 @@ def distill_session(session: dict):
 # Save to memory graph
 # ---------------------------------------------------------------------------
 
-def save_memory(learning: dict):
+def save_memory(learning: dict, pending: bool):
     distiller = str(KAGE_ROOT / ".agent_memory" / "scripts" / "distiller_tool.py")
-    subprocess.run(
-        [
-            "python3", distiller,
-            "--title",    learning["title"],
-            "--category", learning["category"],
-            "--tags",     learning["tags"],
-            "--content",  learning["content"],
-            "--paths",    learning["paths"],
-        ],
-        check=True,
-    )
+    cmd = [
+        "python3", distiller,
+        "--title",    learning["title"],
+        "--category", learning["category"],
+        "--tags",     learning["tags"],
+        "--content",  learning["content"],
+        "--paths",    learning["paths"],
+    ]
+    if pending:
+        cmd.append("--pending")
+    subprocess.run(cmd, check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +169,13 @@ def save_memory(learning: dict):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    cfg = _load_config()
+    pending_review = cfg.get("pending_review", True)
+    pii_scrub = cfg.get("pii_scrub", True)
+
     print(f"Kage Session Watcher started. Repo: {KAGE_ROOT}")
     print(f"Watching: {CLAUDE_PROJECTS_DIR}")
+    print(f"Mode: {'pending review queue' if pending_review else 'direct write'} | PII scrub: {pii_scrub}")
 
     while True:
         last_run = get_last_run_time()
@@ -180,10 +185,14 @@ if __name__ == "__main__":
             print(f"Found {len(sessions)} updated session(s).")
             for session in sessions:
                 try:
+                    # Warn if raw transcript has secrets (belt-and-suspenders)
+                    if pii_scrub and has_secrets(session["transcript"]):
+                        print(f"  Warning: secrets detected in session {session['session_id']}, scrubbing.")
+
                     learning = distill_session(session)
                     if learning:
                         print(f"  Saving: {learning['title']}")
-                        save_memory(learning)
+                        save_memory(learning, pending=pending_review)
                     else:
                         print(f"  Nothing to save in {session['session_id']}.")
                 except Exception as e:

@@ -6,7 +6,7 @@ Welcome to **Kage** (the shared Agent Memory framework). This architecture solve
 
 ## ⚡ Quickstart
 
-**Requirements:** Python 3.8+, an [Anthropic API key](https://console.anthropic.com/settings/api-keys) (`sk-ant-...`)
+**Requirements:** Python 3.8+, an API key for your chosen LLM provider (Anthropic, OpenAI, or local Ollama)
 
 ### macOS / Linux — one command
 
@@ -36,28 +36,85 @@ git clone https://github.com/Kage18/Kage.git $env:TEMP\Kage
 
 | Step | What it sets up |
 |------|----------------|
-| 1 | Installs `anthropic` Python SDK |
-| 2 | Scaffolds `.agent_memory/` with indexes and scripts |
-| 3 | Creates `CLAUDE.md` so Claude Code reads memory on every session |
-| 4 | Creates `.cursorrules` for Cursor IDE |
-| 5 | Installs a `.git/hooks/post-commit` hook to auto-distill each commit |
-| 6 | Starts a background daemon that watches Claude Code sessions and auto-saves learnings |
+| 1 | Installs Python SDK for your chosen provider |
+| 2 | Scaffolds `.agent_memory/` with indexes, scripts, pending/, deprecated/ |
+| 3 | Copies `kage.py` CLI and `kage.config.json` to repo root |
+| 4 | Creates `CLAUDE.md` so Claude Code reads memory on every session |
+| 5 | Creates `.cursorrules` for Cursor IDE |
+| 6 | Installs a `.git/hooks/post-commit` hook to auto-distill each commit |
+| 7 | Starts a background daemon that watches Claude Code sessions every 5 minutes |
 
 After setup, **everything is automatic** — just code normally and Kage captures the knowledge.
 
 ---
 
-## 🛠️ Manual: Save a Memory Node
+## 🛠️ The `kage` CLI
 
-If you want to save a learning manually at any time:
+All memory operations go through `kage.py` at your repo root:
 
 ```bash
-python3 .agent_memory/scripts/distiller_tool.py \
-  --title "Your Rule Title" \
-  --category "architecture" \
-  --tags '["auth", "backend"]' \
-  --content "## Problem\n\nDescribe the issue.\n\n## Solution\n\nDescribe the fix." \
-  --paths "backend,frontend/api"
+# Review AI-staged memories before they become rules
+python3 kage.py review
+
+# Interactively save a new learning
+python3 kage.py save
+
+# Deprecate a stale/outdated node
+python3 kage.py prune
+
+# Check all relative markdown links in .agent_memory/
+python3 kage.py check-links
+```
+
+---
+
+## 🔒 Enterprise Features
+
+### PII & Secret Scrubbing
+Every transcript and commit diff is automatically scrubbed for API keys, tokens, private keys, and passwords before being sent to an LLM or written to disk. Detected patterns include `sk-ant-*`, `sk-*`, `ghp_*`, `AIza*`, AWS keys, PEM blocks, and generic `password=` / `token=` pairs.
+
+### Human-in-the-Loop Review
+By default (`pending_review: true` in `kage.config.json`), all automatically distilled memories are staged in `.agent_memory/pending/` instead of being written directly. No AI hallucination can become a permanent rule without a human approving it:
+
+```bash
+python3 kage.py review
+# [1/2] JWT Expiration Policy
+# Category: architecture | Tags: ["auth"] | Paths: backend
+# ...
+# (a)pprove / (r)eject / (s)kip:
+```
+
+To disable review and write directly, set `"pending_review": false` in `kage.config.json`.
+
+### Multi-Model Support
+Kage is not locked to Anthropic. Edit `kage.config.json` to switch providers:
+
+```json
+{ "provider": "openai",    "model": "gpt-4o" }
+{ "provider": "ollama",    "model": "llama3" }
+{ "provider": "anthropic", "model": "claude-sonnet-4-6" }
+```
+
+Install the matching SDK: `pip install openai` or run Ollama locally — no code changes needed.
+
+### Memory Pruning
+Deprecate outdated nodes without deleting history:
+
+```bash
+python3 kage.py prune
+# [1] jwt_15_min_policy  architecture  2024-01-15
+# Enter node number to deprecate: 1
+```
+
+Deprecated nodes move to `.agent_memory/deprecated/` and their links are removed from all indexes automatically.
+
+### Link Validation
+Catch broken relative paths before they silently break the memory graph:
+
+```bash
+python3 kage.py check-links
+# OK     backend/index.md -> ../nodes/jwt_policy.md
+# BROKEN frontend/index.md -> ../nodes/missing_file.md
 ```
 
 ---

@@ -1,0 +1,7 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "ollama_url": "http://localhost:11434",
+  "pending_review": true,
+  "pii_scrub": true
+}
