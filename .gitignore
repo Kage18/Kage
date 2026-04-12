@@ -2,3 +2,4 @@
 .agent_memory/watcher.log
 .agent_memory/watcher.error.log
 __pycache__/
+.agent_memory/.processed_sessions

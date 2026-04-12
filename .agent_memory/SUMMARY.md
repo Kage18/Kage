@@ -3,7 +3,7 @@
 Compact overview of all active rules. Read this before coding.
 For full details, follow the link to the node.
 
-_Last updated: 2026-04-03 | 1 node(s)_
+_Last updated: 2026-04-06 | 1 node(s)_
 
 ## Repo Context
 

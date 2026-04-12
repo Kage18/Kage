@@ -19,6 +19,7 @@ import llm_client
 
 KAGE_ROOT = Path(__file__).resolve().parent.parent.parent  # repo root
 LAST_CHECKED_FILE = KAGE_ROOT / ".last_distill_time"
+PROCESSED_IDS_FILE = KAGE_ROOT / ".agent_memory" / ".processed_sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
@@ -44,6 +45,17 @@ def update_last_run_time():
     LAST_CHECKED_FILE.write_text(str(time.time()))
 
 
+def load_processed_ids() -> set:
+    if PROCESSED_IDS_FILE.exists():
+        return set(PROCESSED_IDS_FILE.read_text().splitlines())
+    return set()
+
+
+def mark_session_processed(session_id: str):
+    with open(PROCESSED_IDS_FILE, "a") as f:
+        f.write(session_id + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Claude Code log harvesting
 # ---------------------------------------------------------------------------
@@ -65,10 +77,15 @@ def extract_text(content) -> str:
     return ""
 
 
-def get_claude_code_logs(last_run: float) -> list:
+def get_claude_code_logs(last_run: float, processed_ids: set) -> list:
     results = []
     pattern = str(CLAUDE_PROJECTS_DIR / "*" / "*.jsonl")
     for jsonl_path in glob.glob(pattern):
+        session_id = Path(jsonl_path).stem
+        # Skip sessions already successfully processed
+        if session_id in processed_ids:
+            continue
+        # Skip sessions older than last run that we haven't seen before
         if os.path.getmtime(jsonl_path) <= last_run:
             continue
         try:
@@ -89,6 +106,25 @@ def get_claude_code_logs(last_run: float) -> list:
 
             if len(messages) < 4:
                 continue
+
+            # Filter out noise messages before building transcript
+            _NOISE_PREFIXES = (
+                "Base directory for this skill:",
+                "[Request interrupted",
+                "This session is being continued from a previous conversation",
+                "Implement tasks from an OpenSpec change",
+                "Fast-forward through artifact creation",
+                "Sync delta specs from a change",
+                "Start a new change using the experimental",
+                "Enter explore mode. Think deeply",
+            )
+            def _is_noise(text: str) -> bool:
+                return (
+                    text.startswith(_NOISE_PREFIXES)
+                    or "<local-command-" in text[:80]
+                    or (len(text) > 10000)  # session summaries / huge context blobs
+                )
+            messages = [m for m in messages if not _is_noise(m.split("] ", 1)[-1] if "] " in m else m)]
 
             project_dir = Path(jsonl_path).parent.name.replace("-", "/")
             session_id = Path(jsonl_path).stem
@@ -111,15 +147,20 @@ def get_claude_code_logs(last_run: float) -> list:
 DISTILL_PROMPT = """\
 You are a background Distiller Agent reviewing an AI coding session transcript.
 
-Read the conversation below and decide: did the human and AI agent conclusively solve a non-trivial framework bug, establish an architectural rule, or uncover a hidden requirement?
+Read the conversation below and decide: does this session contain a concrete, reusable engineering insight worth saving? Save it if ANY of these are true:
+- A bug was diagnosed and fixed (even in newly written code)
+- A codebase pattern or API convention was discovered (e.g. "use X not Y to call this API")
+- An architectural or design decision was made and explained
+- A non-obvious requirement or constraint was uncovered
+- A workflow, data structure, or integration was mapped out in detail
 
-Rules:
-- If NO (just chatting, exploratory, or incomplete), output exactly: SKIP
-- If YES, output ONLY a valid JSON object with these exact keys:
+Output exactly: SKIP if the session is purely exploratory/Q&A with no concrete resolution, or incomplete.
+
+If there IS something worth saving, output ONLY a valid JSON object with these exact keys:
   - title      : short, descriptive title (string)
   - category   : one of repo_context | framework_bug | architecture | debugging
   - tags       : stringified JSON array, e.g. "[\"auth\", \"backend\"]"
-  - content    : clear markdown describing the problem and solution (no fluff)
+  - content    : clear markdown describing the problem, pattern, or decision (be specific — include actual method names, types, config keys, etc.)
   - paths      : comma-separated domain index paths, e.g. "backend,frontend/api"
 
 Transcript:
@@ -127,9 +168,27 @@ Transcript:
 """
 
 
+_NOISE_PATTERNS = [
+    r'<thinking>.*?</thinking>',                         # Claude's internal reasoning
+    r'<ide_(?:selection|opened_file)[^>]*>.*?</ide_(?:selection|opened_file)>',  # IDE context
+    r'<command-(?:message|name|args)>.*?</command-(?:message|name|args)>',       # slash-command metadata
+    r'<local-command-(?:stdout|stderr|caveat)>.*?</local-command-(?:stdout|stderr|caveat)>',
+    r'Base directory for this skill:.*?(?=\n\n|\Z)',     # skill invocation preamble (can be 5k chars)
+]
+
+def _clean_transcript(transcript: str) -> str:
+    """Strip internal reasoning and IDE noise before sending to LLM."""
+    import re
+    for pattern in _NOISE_PATTERNS:
+        transcript = re.sub(pattern, '', transcript, flags=re.DOTALL)
+    transcript = re.sub(r'\n{3,}', '\n\n', transcript)
+    return transcript.strip()
+
+
 def distill_session(session: dict):
     # Scrub secrets from transcript before sending to LLM
     safe_transcript = scrub(session["transcript"])
+    safe_transcript = _clean_transcript(safe_transcript)
     prompt = DISTILL_PROMPT.format(transcript=safe_transcript)
     print(f"  Distilling session {session['session_id']} ...")
 
@@ -179,7 +238,8 @@ if __name__ == "__main__":
 
     while True:
         last_run = get_last_run_time()
-        sessions = get_claude_code_logs(last_run)
+        processed_ids = load_processed_ids()
+        sessions = get_claude_code_logs(last_run, processed_ids)
 
         if sessions:
             print(f"Found {len(sessions)} updated session(s).")
@@ -195,8 +255,11 @@ if __name__ == "__main__":
                         save_memory(learning, pending=pending_review)
                     else:
                         print(f"  Nothing to save in {session['session_id']}.")
+                    # Only mark as processed on success (no exception)
+                    mark_session_processed(session["session_id"])
                 except Exception as e:
                     print(f"  Error processing session {session['session_id']}: {e}")
+                    # Do NOT mark as processed — will retry next cycle
 
         update_last_run_time()
         print("Sleeping 5 minutes...")
