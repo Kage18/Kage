@@ -11,7 +11,7 @@ GLOBAL_MEM="$HOME/.agent_memory"
 
 HAS_PROJECT=""
 HAS_GLOBAL=""
-PACK_INFO=""
+GRAPH_STATUS=""
 
 # Check project memory
 if [[ -f "$CWD/.agent_memory/index.md" ]]; then
@@ -25,19 +25,20 @@ if [[ -f "$GLOBAL_MEM/index.md" ]]; then
   HAS_GLOBAL="Personal memory: ~/.agent_memory/ ($GLOBAL_COUNT nodes)."
 fi
 
-# Check installed packs
-if [[ -d "$GLOBAL_MEM/packs" ]]; then
-  PACK_COUNT="$(ls -d "$GLOBAL_MEM/packs/"*/ 2>/dev/null | wc -l | tr -d ' ')"
-  if [[ "$PACK_COUNT" -gt 0 ]]; then
-    PACK_INFO="Packs installed: $PACK_COUNT."
-  fi
+# Check global graph reachability (lightweight HEAD request, 3s timeout)
+if curl -s --head --max-time 3 \
+  "https://raw.githubusercontent.com/kage-memory/graph/main/catalog.json" \
+  > /dev/null 2>&1; then
+  GRAPH_STATUS="Global knowledge graph: available."
+else
+  GRAPH_STATUS="Global knowledge graph: offline (no network or graph unreachable)."
 fi
 
-# Only emit if at least one tier has memory
-if [[ -z "$HAS_PROJECT$HAS_GLOBAL" ]]; then
+# Only emit if at least one tier is available
+if [[ -z "$HAS_PROJECT$HAS_GLOBAL" && "$GRAPH_STATUS" == *"offline"* ]]; then
   exit 0
 fi
 
-MSG="Kage memory active. $HAS_PROJECT $HAS_GLOBAL $PACK_INFO Use the kage-memory sub-agent before making architectural decisions, implementing patterns, or working in a specific domain."
+MSG="Kage memory active. $HAS_PROJECT $HAS_GLOBAL $GRAPH_STATUS Use the kage-memory sub-agent before making architectural decisions, implementing patterns, or working in a specific domain."
 
-python3 -c "import json, sys; print(json.dumps({'systemMessage': '$MSG'}))" 2>/dev/null || exit 0
+python3 -c "import json; print(json.dumps({'systemMessage': '$MSG'}))" 2>/dev/null || exit 0

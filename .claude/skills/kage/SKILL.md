@@ -1,7 +1,7 @@
 ---
 name: kage
-description: Manage the Kage v2 agent memory system. Subcommands: review (approve/reject pending nodes), prune (deprecate old nodes), digest (regenerate SUMMARY.md), add (install a memory pack), publish (create a shareable pack), search (find community packs).
-allowed-tools: Read, Write, Glob, Grep, Bash
+description: Manage the Kage v2 agent memory system. Subcommands: review (approve/reject pending nodes), prune (deprecate old nodes), digest (regenerate SUMMARY.md), submit (contribute a node to the global graph), search (search the global graph), publish (prepare project as a shareable pack), rebuild-indexes.
+allowed-tools: Read, Write, Glob, Grep, Bash, WebFetch
 ---
 
 You are managing the **Kage v2** agent memory system. Parse the user's subcommand from `$ARGUMENTS` and execute it.
@@ -104,9 +104,6 @@ Regenerate `SUMMARY.md` compact overview at each tier.
    ## repo_context
    - **[Title]** `tags` — _date_
    ...
-
-   ## architecture
-   ...
    ```
 
 4. Do the same for personal tier: Bash `ls $HOME/.agent_memory/nodes/*.md 2>/dev/null` — if nodes exist, regenerate `$HOME/.agent_memory/SUMMARY.md`. (Use Bash, not Glob, for `$HOME` paths.)
@@ -115,97 +112,120 @@ Regenerate `SUMMARY.md` compact overview at each tier.
 
 ---
 
-## `/kage add <org/repo-or-url>`
+## `/kage submit <node-file>`
 
-Install a community memory pack.
+Contribute an approved local node to the global Kage Knowledge Graph.
 
-1. Parse the argument — accept:
-   - `org/repo` → treated as `https://github.com/org/repo`
-   - Full git URL
+1. Read the node file at the given path.
 
-2. Determine pack slug from repo name (last path segment)
+2. Validate required fields for global submission:
+   - `title`, `tags`, `date` — required
+   - `domain` — must match one of: `auth`, `database`, `deployment`, `frontend`, `testing`, `api-design`, `ai-agents`, `payments`, `storage`, `email`
+   - If `domain` is missing: ask the user to choose one
+   - `stack` — recommended (specific versions this applies to); warn if missing
+   - `related` — recommended; ask if there are related nodes in the graph
 
-3. Check `~/.agent_memory/packs/<slug>/` — if exists: "Pack already installed. Run `/kage update <slug>` to update."
-
-4. Clone: `git clone <url> ~/.agent_memory/packs/<slug>/`
-
-5. Read `~/.agent_memory/packs/<slug>/kage-pack.json` to validate it's a Kage pack
-
-6. Update `~/.claude/kage.json`:
-   - Read existing file (or create `{"version":"2.0.0","packs":[]}`)
-   - Append pack entry: `{"name": slug, "source": url, "installed_at": "..."}`
-   - Write back
-
-7. Add a link to the pack in `~/.agent_memory/index.md`:
-   - Append: `- [<name>](packs/<slug>/index.md) — <description>`
-
-8. Report: "Pack `<name>` installed. N nodes across domains: [list from kage-pack.json]"
-
----
-
-## `/kage update <pack-name>`
-
-Update an installed pack to the latest version.
-
-1. Find pack at `~/.agent_memory/packs/<pack-name>/`
-2. Run `git pull` inside it
-3. Report what changed (new nodes, updated nodes)
-
----
-
-## `/kage publish`
-
-Prepare this project's approved nodes as a shareable memory pack.
-
-1. Check if `kage-pack.json` exists in CWD — if not, guide creation:
-   - Ask: name, description, tags (comma-separated)
-   - Write `kage-pack.json` with those fields + node_count + date
-
-2. Validate all approved nodes have required frontmatter (title, category, tags, paths, date)
-   - Report any missing fields
-
-3. Run link validation: check all links in index files point to existing nodes
-
-4. Generate/update `SUMMARY.md`
-
-5. Add `scope: "global"` to nodes that don't have it (marks them as shareable)
-
-6. Report:
+3. Check the graph catalog to see if a similar node already exists:
    ```
-   Pack ready: <name>
-   Nodes: N
-   Domains: [list]
-
-   Next steps:
-   1. Push this repo to GitHub (if not already)
-   2. Others can install with: /kage add <your-github-org>/<repo-name>
-   3. To list in the community registry: submit a PR to github.com/kage-memory/registry
+   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/catalog.json
+   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/index.json
    ```
+   If a very similar node exists: show it and ask "Update existing or submit as new?"
+
+4. Add global fields to a copy of the node (do not modify the local file):
+   - `id: "{domain}/{slug}"` — slug from title
+   - `score: 0` — will be computed on merge
+   - `uses: 0`
+   - `fresh: true`
+   - `supersedes: null`
+   - `superseded_by: null`
+   - `ttl_days: 365`
+
+5. Create a GitHub PR using `gh pr create`:
+   ```bash
+   gh pr create \
+     --repo kage-memory/graph \
+     --title "Add: {title}" \
+     --body "$(cat <<'EOF'
+   ## Node Submission
+
+   **Domain:** {domain}
+   **Tags:** {tags}
+   **Stack:** {stack}
+
+   ## Validation Checklist
+   - [ ] Tested against specified stack versions
+   - [ ] No PII or secrets
+   - [ ] Related nodes checked and linked
+   - [ ] Gotchas section complete
+
+   ## Node Content
+   {node content}
+   EOF
+   )"
+   ```
+
+6. Report the PR URL. Remind: "Two approvals from community contributors needed to merge."
 
 ---
 
 ## `/kage search <query>`
 
-Search the community registry for memory packs.
+Search the live global knowledge graph.
 
-1. Fetch `https://raw.githubusercontent.com/kage-memory/registry/main/registry/index.json`
-   - If fetch fails: "Registry unavailable. Try again later or install directly with /kage add <github-url>"
-
-2. Filter packs by query (match against name, description, tags — case-insensitive)
-
-3. Display results:
+1. Fetch the catalog:
    ```
-   Found N packs matching "<query>":
+   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/catalog.json
+   ```
 
-   [1] nextjs-patterns — Next.js App Router patterns and gotchas
-       Tags: nextjs, react, frontend | Nodes: 12 | ★ 42
-       Install: /kage add kage-registry/nextjs-patterns
+2. Match query against domain `top_tags` to identify relevant domains.
+
+3. For each matched domain (max 2), fetch its index:
+   ```
+   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/index.json
+   ```
+
+4. Filter nodes by tag overlap with query terms. Show top 5:
+   ```
+   Found N nodes matching "{query}":
+
+   [1] OAuth with Supabase in Next.js App Router
+       Domain: auth | Score: 94 | Uses: 847 | Updated: 2026-03-15
+       Tags: oauth, supabase, nextjs, app-router
+       Fetch with: kage-memory (auto) or /kage fetch auth/oauth-supabase-nextjs
 
    [2] ...
    ```
 
-4. Ask: "Install any? Enter number or 'n':"
-   - If number chosen: proceed with `/kage add` flow for that pack
+5. Ask: "Fetch any node? Enter number or 'n':"
+   - If number: fetch and display full node content
+
+---
+
+## `/kage fetch <domain/node-id>`
+
+Fetch and display a specific node from the global graph.
+
+```
+WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/nodes/{id}.md
+```
+
+Display the full node content.
+
+---
+
+## `/kage publish`
+
+Prepare this project's approved nodes as a contribution batch for the global graph.
+
+1. Check if `kage-pack.json` exists in CWD — if not, guide creation.
+
+2. Validate all approved nodes have required frontmatter (title, category, tags, paths, date).
+
+3. For each node, ask: "Submit to global graph? (y/n/skip-all)"
+   - If yes: run the `/kage submit` flow for that node
+
+4. Report how many were submitted.
 
 ---
 
@@ -230,17 +250,17 @@ Kage v2 — Agent Memory System
 
 Usage: /kage <subcommand>
 
-  review          Review and approve pending memory nodes
-  prune           Deprecate outdated nodes
-  digest          Regenerate SUMMARY.md overview
-  add <org/repo>  Install a community memory pack
-  update <name>   Update an installed pack
-  publish         Prepare this project as a shareable pack
-  search <query>  Search the community pack registry
-  rebuild-indexes Reconstruct indexes from node frontmatter
+  review               Review and approve pending memory nodes
+  prune                Deprecate outdated nodes
+  digest               Regenerate SUMMARY.md overview
+  submit <node-file>   Contribute a node to the global knowledge graph
+  search <query>       Search the global knowledge graph
+  fetch <domain/id>    Fetch a specific node from the global graph
+  publish              Submit this project's nodes to the global graph
+  rebuild-indexes      Reconstruct indexes from node frontmatter
 
 Memory tiers:
-  Project:  .agent_memory/          (committed to git, team-visible)
-  Personal: ~/.agent_memory/        (your machine only)
-  Packs:    ~/.agent_memory/packs/  (installed community packs)
+  Project:  .agent_memory/     (committed to git, team-visible)
+  Personal: ~/.agent_memory/   (your machine only)
+  Global:   kage-memory/graph  (live, community-validated, zero-install)
 ```
