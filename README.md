@@ -182,7 +182,7 @@ The filter: *would a new team member need to know this to work effectively?* Def
 
 **Step 1 — Bootstrap** (one-time, in your terminal):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kage-core/Kage/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kage-core/Kage/master/install.sh | bash
 ```
 
 **Step 2 — Complete setup** (inside Claude Code):
