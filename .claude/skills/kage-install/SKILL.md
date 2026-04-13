@@ -35,7 +35,6 @@ mkdir -p ~/.claude/kage/hooks
 mkdir -p ~/.agent_memory/nodes
 mkdir -p ~/.agent_memory/pending
 mkdir -p ~/.agent_memory/deprecated
-mkdir -p ~/.agent_memory/packs
 ```
 
 ### Step 3 — Write Core Agent Files
@@ -44,7 +43,7 @@ Write `~/.claude/agents/kage-distiller.md` — the inline memory writer sub-agen
 Write `~/.claude/agents/kage-memory.md` — the 3-tier retrieval sub-agent.
 Write `~/.claude/agents/kage-graph.md` — the live community graph fetcher sub-agent.
 
-Use the canonical content from the Kage repository.
+Use the canonical content from the Kage repository at `kage-core/Kage`.
 
 ### Step 4 — Write Hook Scripts
 
@@ -55,7 +54,7 @@ Write `~/.claude/kage/hooks/stop.sh`:
 - Launches: `nohup claude --agent kage-distiller --print "$TASK" --permission-mode bypassPermissions --no-session-persistence >> ~/.claude/kage/distill.log 2>&1 &`
 
 Write `~/.claude/kage/hooks/session-start.sh`:
-- Detects available memory tiers (project, personal, community graph)
+- Detects available memory tiers (project, personal, global graph)
 - Outputs `systemMessage` JSON telling Claude which tiers are available
 
 ```bash
@@ -88,7 +87,7 @@ Read the current settings.json. Add Kage hooks to the `Stop` and `SessionStart` 
 
 If `settings.json` doesn't exist, create it with just the Kage hooks.
 
-### Step 6 — Initialize Global Personal Memory
+### Step 6 — Initialize Personal Memory
 
 Write `~/.agent_memory/index.md` if it doesn't exist:
 
@@ -101,24 +100,13 @@ Project-specific knowledge lives in each project's `.agent_memory/`.
 ## Domains
 
 <!-- Domain indexes added here as nodes are approved -->
-
-## Installed Packs
-
-<!-- Community packs added here via /kage add -->
 ```
 
 Write `~/.agent_memory/SUMMARY.md` if it doesn't exist:
 ```markdown
 # Personal Memory Summary
 
-*No nodes yet. Memory will be distilled automatically after sessions.*
-```
-
-Write `~/.claude/kage.json` if it doesn't exist:
-```json
-{
-  "packs": []
-}
+*No nodes yet. Memory will be captured automatically during sessions.*
 ```
 
 ### Step 7 — Per-Project Setup (if in a git repo)
@@ -129,7 +117,6 @@ If yes:
 - Create `.agent_memory/{nodes,pending,deprecated}/`
 - Write `.agent_memory/index.md` (project root index)
 - Write `.agent_memory/SUMMARY.md` (empty digest)
-- Create `.claude/kage.json` with `{"packs":[]}`
 - Append to `CLAUDE.md` (or create it):
 
 ```markdown
@@ -160,20 +147,21 @@ Print a summary:
 
   Agents:  ~/.claude/agents/kage-distiller.md   ← inline memory writer
            ~/.claude/agents/kage-memory.md       ← 3-tier retrieval
-           ~/.claude/agents/kage-graph.md        ← community graph
+           ~/.claude/agents/kage-graph.md        ← global graph fetcher
 
   Hooks:   Stop → safety-net distillation at session end
            SessionStart → injects memory context
 
-  Skills:  /kage review | prune | digest | add | publish | search
+  Skills:  /kage review | prune | digest | submit | search | fetch
 
   Memory:  Personal: ~/.agent_memory/
            Project:  .agent_memory/  [if in git repo]
+           Global:   kage-core/kage-graph (live, no install needed)
 
 How it works:
-  1. You work normally in Claude Code
-  2. Claude captures insights inline as they happen → pending/
-  3. Run /kage review to approve — approved nodes commit with your project
+  1. Work normally in Claude Code
+  2. Claude captures insights inline the moment they happen → pending/
+  3. /kage review → approve → nodes committed with your project
   4. Teammates get your knowledge on git pull
-  5. Share patterns globally with /kage publish → /kage add
+  5. Contribute to the global graph with /kage submit
 ```

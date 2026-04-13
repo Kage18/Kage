@@ -98,7 +98,7 @@ Result: 3 reads for any project query, regardless of how many nodes exist. Claud
 |---|---|---|---|
 | **Project** | `.agent_memory/` (committed to git) | Whole team on `git pull` | This project's files, APIs, bugs, conventions, decisions |
 | **Personal** | `~/.agent_memory/` (your machine only) | You, across all projects | Framework patterns, tool behavior, cross-project lessons |
-| **Global** | `kage-core/kage-graph` (GitHub CDN) | Everyone | Community-validated patterns any Claude agent can use |
+| **Global** | `kage-core/kage-graph` (live HTTP, no install) | Everyone | Community-validated patterns any Claude agent fetches on demand |
 
 **Decision rule — "Does this knowledge expire when I leave the project?"**
 - Yes → project tier
@@ -211,8 +211,7 @@ Claude installs everything using its own auth — agents, hooks, memory director
 ~/.agent_memory/               ← personal memory root
     ├── index.md
     ├── nodes/
-    ├── pending/
-    └── packs/                 ← community memory packs
+    └── pending/
 ```
 
 Plus per-project `.agent_memory/` setup if you're in a git repo, and hooks registered in `~/.claude/settings.json`.
@@ -227,9 +226,9 @@ Claude handles distillation and retrieval automatically. You manage the review c
 /kage review          — approve or reject pending nodes
 /kage prune           — deprecate outdated nodes
 /kage digest          — regenerate SUMMARY.md
-/kage add <org/repo>  — install a community memory pack
-/kage publish         — bundle your nodes as a shareable pack
-/kage search <query>  — search the community knowledge graph
+/kage submit <file>   — contribute a node to the global graph
+/kage search <query>  — search the global knowledge graph
+/kage fetch <id>      — fetch a specific node from the global graph
 ```
 
 ---
@@ -245,22 +244,17 @@ Sharing is automatic through git — no extra infrastructure:
 
 ---
 
-## Community Packs
+## Contributing to the Global Graph
 
-Packs are plain git repos containing approved nodes. Install community knowledge:
+When a node you've approved locally is generic enough to help others, contribute it:
 
 ```
-/kage add org/nextjs-patterns
-/kage add org/postgres-gotchas
-/kage add your-company/internal-runbooks
+/kage submit .agent_memory/nodes/my-node.md
 ```
 
-Publish your project's nodes:
-```
-/kage publish
-```
+This validates the node against the global schema, adds the required fields (`type`, `id`, `score`, `ttl_days`), and opens a PR to `kage-core/kage-graph`. Once merged, any Claude Code agent running Kage anywhere in the world can find it via `kage-memory`.
 
-This guides you through creating a `kage-pack.json` and pushing to GitHub. Others can then `/kage add your-org/your-repo`.
+No install needed on the consumer side. The global graph is fetched live over HTTP — there's nothing to clone or sync.
 
 ---
 

@@ -15,12 +15,12 @@ This project uses Kage for persistent agent memory.
 |---|---|---|
 | Project | `.agent_memory/` (committed) | Whole team via git |
 | Personal | `~/.agent_memory/` | You only, across all projects |
-| Community | `~/.agent_memory/packs/` | Anyone who installs the pack |
+| Global | `kage-core/kage-graph` (live HTTP) | Everyone, no install needed |
 
 **Decision rule:** Does this knowledge expire when you leave the project?
 - Yes → project tier
 - No → personal tier
-- Generic enough for strangers → publish as a pack
+- Generic enough for strangers → `/kage submit` to the global graph
 
 ## Commands
 
@@ -28,7 +28,7 @@ This project uses Kage for persistent agent memory.
 /kage review          — approve/reject pending nodes
 /kage prune           — deprecate outdated nodes
 /kage digest          — regenerate SUMMARY.md
-/kage add <org/repo>  — install a community memory pack
-/kage publish         — prepare this project as a shareable pack
-/kage search <query>  — search the community knowledge graph
+/kage submit <file>   — contribute a node to the global graph
+/kage search <query>  — search the global knowledge graph
+/kage fetch <id>      — fetch a specific node from the global graph
 ```

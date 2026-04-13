@@ -1,6 +1,6 @@
 ---
 name: kage
-description: Manage the Kage agent memory system. Subcommands: review (approve/reject pending nodes), prune (deprecate old nodes), digest (regenerate SUMMARY.md), submit (contribute a node to the global graph), search (search the global graph), publish (prepare project as a shareable pack), rebuild-indexes.
+description: Manage the Kage agent memory system. Subcommands: review (approve/reject pending nodes), prune (deprecate old nodes), digest (regenerate SUMMARY.md), submit (contribute a node to the global graph), search (search the global graph), fetch (fetch a specific global node), rebuild-indexes.
 allowed-tools: Read, Write, Glob, Grep, Bash, WebFetch
 ---
 
@@ -114,7 +114,7 @@ Regenerate `SUMMARY.md` compact overview at each tier.
 
 ## `/kage submit <node-file>`
 
-Contribute an approved local node to the global Kage Knowledge Graph.
+Contribute an approved local node to the global Kage Knowledge Graph at `kage-core/kage-graph`.
 
 1. Read the node file at the given path.
 
@@ -123,49 +123,34 @@ Contribute an approved local node to the global Kage Knowledge Graph.
    - `domain` — must match one of: `auth`, `database`, `deployment`, `frontend`, `testing`, `api-design`, `ai-agents`, `payments`, `storage`, `email`
    - If `domain` is missing: ask the user to choose one
    - `stack` — recommended (specific versions this applies to); warn if missing
-   - `related` — recommended; ask if there are related nodes in the graph
 
 3. Check the graph catalog to see if a similar node already exists:
    ```
-   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/catalog.json
-   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/index.json
+   WebFetch: https://raw.githubusercontent.com/kage-core/kage-graph/main/catalog.json
+   WebFetch: https://raw.githubusercontent.com/kage-core/kage-graph/main/domains/{domain}/index.json
    ```
    If a very similar node exists: show it and ask "Update existing or submit as new?"
 
 4. Add global fields to a copy of the node (do not modify the local file):
-   - `id: "{domain}/{slug}"` — slug from title
-   - `score: 0` — will be computed on merge
+   - `type` — ask user: gotcha / pattern / config / decision / reference
+   - `id: "{domain}/{slug}"` — slug from title, kebab-case
+   - `score: 50`
    - `uses: 0`
+   - `votes: {up: 0, down: 0}`
    - `fresh: true`
    - `supersedes: null`
    - `superseded_by: null`
-   - `ttl_days: 365`
+   - `ttl_days` — default per type (gotcha: 730, pattern: 365, config: 180, decision: 180, reference: 365)
 
 5. Create a GitHub PR using `gh pr create`:
    ```bash
    gh pr create \
-     --repo kage-memory/graph \
-     --title "Add: {title}" \
-     --body "$(cat <<'EOF'
-   ## Node Submission
-
-   **Domain:** {domain}
-   **Tags:** {tags}
-   **Stack:** {stack}
-
-   ## Validation Checklist
-   - [ ] Tested against specified stack versions
-   - [ ] No PII or secrets
-   - [ ] Related nodes checked and linked
-   - [ ] Gotchas section complete
-
-   ## Node Content
-   {node content}
-   EOF
-   )"
+     --repo kage-core/kage-graph \
+     --title "[{type}] {domain}: {title}" \
+     --body "..."
    ```
 
-6. Report the PR URL. Remind: "Two approvals from community contributors needed to merge."
+6. Report the PR URL.
 
 ---
 
@@ -175,24 +160,24 @@ Search the live global knowledge graph.
 
 1. Fetch the catalog:
    ```
-   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/catalog.json
+   WebFetch: https://raw.githubusercontent.com/kage-core/kage-graph/main/catalog.json
    ```
 
 2. Match query against domain `top_tags` to identify relevant domains.
 
 3. For each matched domain (max 2), fetch its index:
    ```
-   WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/index.json
+   WebFetch: https://raw.githubusercontent.com/kage-core/kage-graph/main/domains/{domain}/index.json
    ```
 
 4. Filter nodes by tag overlap with query terms. Show top 5:
    ```
    Found N nodes matching "{query}":
 
-   [1] OAuth with Supabase in Next.js App Router
-       Domain: auth | Score: 94 | Uses: 847 | Updated: 2026-03-15
-       Tags: oauth, supabase, nextjs, app-router
-       Fetch with: kage-memory (auto) or /kage fetch auth/oauth-supabase-nextjs
+   [1] Claude Code hooks hang without bypassPermissions
+       Domain: ai-agents | Type: gotcha | Score: 90 | Updated: 2026-04-12
+       Tags: claude-code, hooks, permissions
+       Fetch: /kage fetch ai-agents/claude-code-hooks-bypass-permissions
 
    [2] ...
    ```
@@ -207,25 +192,10 @@ Search the live global knowledge graph.
 Fetch and display a specific node from the global graph.
 
 ```
-WebFetch: https://raw.githubusercontent.com/kage-memory/graph/main/domains/{domain}/nodes/{id}.md
+WebFetch: https://raw.githubusercontent.com/kage-core/kage-graph/main/domains/{domain}/nodes/{id}.md
 ```
 
 Display the full node content.
-
----
-
-## `/kage publish`
-
-Prepare this project's approved nodes as a contribution batch for the global graph.
-
-1. Check if `kage-pack.json` exists in CWD — if not, guide creation.
-
-2. Validate all approved nodes have required frontmatter (title, category, tags, paths, date).
-
-3. For each node, ask: "Submit to global graph? (y/n/skip-all)"
-   - If yes: run the `/kage submit` flow for that node
-
-4. Report how many were submitted.
 
 ---
 
@@ -256,11 +226,10 @@ Usage: /kage <subcommand>
   submit <node-file>   Contribute a node to the global knowledge graph
   search <query>       Search the global knowledge graph
   fetch <domain/id>    Fetch a specific node from the global graph
-  publish              Submit this project's nodes to the global graph
   rebuild-indexes      Reconstruct indexes from node frontmatter
 
 Memory tiers:
-  Project:  .agent_memory/     (committed to git, team-visible)
-  Personal: ~/.agent_memory/   (your machine only)
-  Global:   kage-memory/graph  (live, community-validated, zero-install)
+  Project:  .agent_memory/          (committed to git, team-visible)
+  Personal: ~/.agent_memory/        (your machine only)
+  Global:   kage-core/kage-graph    (live, community-validated, zero-install)
 ```
