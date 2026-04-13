@@ -142,15 +142,29 @@ Contribute an approved local node to the global Kage Knowledge Graph at `kage-co
    - `superseded_by: null`
    - `ttl_days` — default per type (gotcha: 730, pattern: 365, config: 180, decision: 180, reference: 365)
 
-5. Create a GitHub PR using `gh pr create`:
+5. Write the prepared node to a temp file, then attempt to open a PR:
+
+   **Path A — user has fork or write access:**
    ```bash
    gh pr create \
      --repo kage-core/kage-graph \
      --title "[{type}] {domain}: {title}" \
      --body "..."
    ```
+   Report the PR URL.
 
-6. Report the PR URL.
+   **Path B — no fork/access (gh returns 403/422):**
+   - Write the prepared node content to `.agent_memory/pending/kage-graph-submission-{slug}.md`
+   - Print instructions:
+     ```
+     Could not open PR automatically (no fork access).
+
+     To submit manually:
+     1. Fork https://github.com/kage-core/kage-graph
+     2. Create file: domains/{domain}/nodes/{slug}.md
+     3. Paste the content saved to: .agent_memory/pending/kage-graph-submission-{slug}.md
+     4. Open a PR with title: [{type}] {domain}: {title}
+     ```
 
 ---
 
