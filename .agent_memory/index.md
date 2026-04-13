@@ -6,3 +6,4 @@ Welcome to the shared team brain. This directory contains curated, Stack Overflo
 ## Domains
 *   [Frontend Context](./frontend/index.md)
 *   [Backend Context](./backend/index.md)
+*   [DevOps / Hooks](./devops/index.md)
