@@ -279,6 +279,39 @@ Parse arguments:
 
 ---
 
+## `/kage update`
+
+Update Kage to the latest version.
+
+1. Check installed version:
+   ```bash
+   cat ~/.claude/kage/version 2>/dev/null || echo "unknown"
+   ```
+
+2. Fetch latest version from GitHub:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/kage-core/Kage/master/VERSION
+   ```
+
+3. If already on latest: "Kage is up to date (v<version>). Nothing to do."
+
+4. If update available, show what will change and confirm:
+   ```
+   Kage update: v<installed> → v<latest>
+   This re-downloads all agents, hooks, and skills.
+   Your memory nodes and settings customizations are preserved.
+   Proceed? (y/n)
+   ```
+
+5. If confirmed:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/kage-core/Kage/master/install.sh | bash
+   ```
+
+6. Confirm: "✓ Kage updated to v<latest>"
+
+---
+
 ## `/kage rebuild-indexes`
 
 Reconstruct all `index.md` files from node frontmatter (resolves merge conflicts).
@@ -300,6 +333,7 @@ Kage — Agent Memory System
 
 Usage: /kage <subcommand>
 
+  update               Update Kage to the latest version
   review               Review and approve pending memory nodes
   prune                Deprecate outdated nodes
   digest               Regenerate SUMMARY.md overview

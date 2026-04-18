@@ -10,11 +10,30 @@ CWD="$(echo "$HOOK_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); 
 
 GLOBAL_MEM="$HOME/.agent_memory"
 REINDEX_QUEUE="$HOME/.claude/kage/reindex-queue.txt"
+VERSION_FILE="$HOME/.claude/kage/version"
+LAST_CHECK_FILE="$HOME/.claude/kage/last_update_check"
 
 HAS_PROJECT=""
 HAS_GLOBAL=""
 GRAPH_STATUS=""
 REINDEX_MSG=""
+UPDATE_MSG=""
+
+# Check for updates weekly (background, non-blocking)
+if [[ -f "$VERSION_FILE" ]]; then
+  NOW="$(date +%s)"
+  LAST_CHECK="$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)"
+  WEEK_SECS=604800
+  if (( NOW - LAST_CHECK > WEEK_SECS )); then
+    INSTALLED="$(tr -d '[:space:]' < "$VERSION_FILE")"
+    LATEST="$(curl -fsSL --max-time 3 \
+      "https://raw.githubusercontent.com/kage-core/Kage/master/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "")"
+    echo "$NOW" > "$LAST_CHECK_FILE"
+    if [[ -n "$LATEST" && "$LATEST" != "$INSTALLED" ]]; then
+      UPDATE_MSG=" Kage update available: $INSTALLED → $LATEST. Run /kage update to upgrade."
+    fi
+  fi
+fi
 
 # Process reindex queue — if files were written last session that need re-indexing,
 # note it in the system message so Claude knows to run /kage index --force
@@ -57,7 +76,7 @@ if [[ -z "$HAS_PROJECT$HAS_GLOBAL" && "$GRAPH_STATUS" == *"offline"* && -z "$REI
   exit 0
 fi
 
-MSG="Kage memory active. $HAS_PROJECT $HAS_GLOBAL $GRAPH_STATUS$REINDEX_MSG Use the kage-memory sub-agent before making architectural decisions, implementing patterns, or working in a specific domain."
+MSG="Kage memory active. $HAS_PROJECT $HAS_GLOBAL $GRAPH_STATUS$REINDEX_MSG$UPDATE_MSG Use the kage-memory sub-agent before making architectural decisions, implementing patterns, or working in a specific domain."
 
 # Use env variable to pass MSG into Python — avoids shell quoting bugs when MSG contains single quotes
 KAGE_MSG="$MSG" python3 -c "import json,os; print(json.dumps({'systemMessage': os.environ['KAGE_MSG']}))" 2>/dev/null || exit 0

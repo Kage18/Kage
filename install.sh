@@ -214,6 +214,10 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   fi
 fi
 
+# Save installed version
+curl -fsSL "$REPO/VERSION" -o ~/.claude/kage/version 2>/dev/null || true
+date +%s > ~/.claude/kage/last_update_check
+
 echo ""
 echo "✓ Kage installed!"
 echo ""
@@ -221,5 +225,6 @@ echo "  Agents:  kage-distiller · kage-memory · kage-graph · kage-indexer"
 echo "  Hooks:   Stop · SessionStart · PostToolUse · UserPromptSubmit"
 echo "  Skills:  /kage · /kage-install"
 echo "  Memory:  ~/.agent_memory/  +  .agent_memory/ (this repo)"
+echo "  Version: $(cat ~/.claude/kage/version 2>/dev/null | tr -d '\n')"
 echo ""
 echo "Memory is active immediately. Run /kage index to index this codebase."
