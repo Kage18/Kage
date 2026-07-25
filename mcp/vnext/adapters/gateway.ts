@@ -24,6 +24,7 @@ import {
   injectLastUserTurn,
   isCompletionsRequest,
   lastUserText,
+  parseResponseText,
   parseResponseToolUses,
   requestModel,
   systemToText,
@@ -118,6 +119,18 @@ export interface ProviderGateway {
 // so a duplicated or retried post deduplicates in the store. This is byte-identical to the
 // construction claude.ts uses for the hook adapter, which is what lets the two paths dedupe against
 // each other. Only the PAYLOAD is provider-specific; the frame around it is not.
+/**
+ * Cap on a captured stated-intent. The prose is evidence, not a transcript: one verbose turn must not
+ * be able to bloat the event store, and the leading sentences are where the expectation lives. A turn
+ * longer than this is truncated, never dropped — a partial intent still beats none.
+ */
+export const INTENT_MAX_CHARS = 600;
+
+function truncateIntent(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length <= INTENT_MAX_CHARS ? trimmed : trimmed.slice(0, INTENT_MAX_CHARS);
+}
+
 export function assembleEvidenceEvent(options: {
   event_type: EvidenceEvent["event_type"];
   repository: RepositoryIdentity;
@@ -200,6 +213,13 @@ export const anthropicGateway: ProviderGateway = {
       }));
     }
 
+    // The assistant's prose for this turn — its STATED INTENT. Carried on each tool_result below so
+    // the store can answer "what did the agent expect before it ran this?", which is the signal that
+    // makes a surprising result recognizable and therefore worth remembering. Without it the store
+    // held only {tool, outcome} and could not distinguish a learning from a routine call.
+    // Tool ARGUMENTS remain excluded, unchanged; this is the turn's reasoning, not its parameters.
+    const intent = truncateIntent(parseResponseText(context.responseBody));
+
     // One tool_result per assistant tool-use block the provider returned. Only the tool NAME is
     // carried — the tool's arguments are never turned into evidence. Each block's own signal makes
     // the fingerprint stable, so a duplicate post of the same exchange deduplicates.
@@ -207,9 +227,12 @@ export const anthropicGateway: ProviderGateway = {
       // block.index disambiguates two same-named blocks that both lack an id, so their signals — and
       // therefore their fingerprints — stay distinct and neither is dropped as a false duplicate.
       // Real provider responses always populate id; this guards a malformed/truncated body.
-      const payload = block.id
+      const payload: Record<string, unknown> = block.id
         ? { tool: block.name, tool_use_id: block.id }
         : { tool: block.name, block_index: index };
+      // Absent rather than empty when the turn had no prose, so a consumer can trust the field's
+      // presence instead of testing for "".
+      if (intent) payload.intent = intent;
       events.push(assembleEvidenceEvent({
         event_type: "tool_result",
         repository: context.repository,
