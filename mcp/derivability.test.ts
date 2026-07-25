@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { capture, evaluateMemoryAdmission } from "./kernel.js";
+import { capture, evaluateMemoryAdmission, hasRationaleLanguage } from "./kernel.js";
 import type { MemoryPacket } from "./kernel.js";
 
 // T2 — derivability-aware capture scoring.
@@ -131,4 +131,82 @@ test("capture routes a derivable restatement away from auto-approval", () => {
   }) as unknown as { packet?: { status?: string } };
   const status = result.packet?.status ?? "unknown";
   assert.notEqual(status, "approved", `a derivable restatement must not auto-approve (status ${status})`);
+});
+
+// ── The guard that disabled the gate, and the type exemption that made it safe ────────────────
+//
+// Measured on a 228-packet store: the restatement check was reached by only 7% of packets, because
+// the language guard exempting a body from the check matched `when|after|before|fix|issue|must` —
+// words in almost any technical prose (top offenders: `fix` 59, `when` 40, `must` 16, `after` 14).
+// The gate existed and was effectively off.
+//
+// Narrowing that guard to real rationale markers raised its reach to 35.5%, but then flagged 74
+// packets as restatements — and 56 were `decision`, the highest-value type. A decision necessarily
+// quotes the thing it decided about, so term overlap is not evidence of restatement for it. Types
+// whose whole purpose is knowledge the code cannot state are therefore exempt BY TYPE, which brought
+// the flagged set to 18/228 (7.9%) — all of them types that describe code.
+
+test("the rationale guard matches cause and contrast, not bare temporal or bug words", () => {
+  // This predicate decides whether the derivable-restatement check runs at all, so its precision IS
+  // the gate. Tested directly rather than through a packet fixture: the check's containment threshold
+  // sits close enough to real bodies that changing a word also changes containment, so an end-to-end
+  // assertion would move two variables at once and prove nothing.
+  //
+  // Every string below used to return true. Measured consequence: 88.6% of a 228-packet store matched,
+  // so the check it guards ran on only 7% of packets — the gate existed and was off.
+  for (const bland of [
+    "The handler runs when the queue drains.",
+    "Restart the daemon after the migration.",
+    "Validate the payload before writing.",
+    "This is the fix for the upload issue.",
+    "The policy must be applied to every request.",
+    "A decision was recorded for the convention.",
+  ]) {
+    assert.equal(hasRationaleLanguage(bland), false, `must not count as rationale: ${bland}`);
+  }
+
+  // Genuine rationale — cause, contrast, rejected paths, invariants — must still exempt a body.
+  for (const reasoned of [
+    "We batch writes because the gateway rate-limits per connection.",
+    "Absolute base instead of relative, which breaks at depth.",
+    "Chose polling rather than webhooks for the firewall case.",
+    "The root cause was a stale fingerprint.",
+    "Must not run twice; the migration is not idempotent.",
+    "Avoid the shared client: it is a known gotcha.",
+    "Turns out the SDK retries internally.",
+  ]) {
+    assert.equal(hasRationaleLanguage(reasoned), true, `must count as rationale: ${reasoned}`);
+  }
+});
+
+test("a decision is never penalized as a restatement, even quoting the code it decided about", () => {
+  // REGRESSION: this is the false-positive storm the type exemption prevents — 56 of 74 flags.
+  const dir = projectWithFile("src/retry.ts", RETRY_SOURCE);
+  const admission = evaluateMemoryAdmission(dir, packetShell({
+    type: "decision",
+    title: "Exponential backoff over fixed delay",
+    body: "We use retryWithBackoff with exponential delay and jitter rather than a fixed delay, since a fixed delay synchronised every client into the same retry window during an outage.",
+    paths: ["src/retry.ts"],
+  }));
+  assert.ok(
+    !admission.risks.some((r) => r.includes("restates what the cited code already says")),
+    `a decision must never be flagged derivable; risks=${JSON.stringify(admission.risks)}`,
+  );
+});
+
+test("rationale, constraint, and issue_context are exempt by type alongside gotcha", () => {
+  const dir = projectWithFile("src/retry.ts", RETRY_SOURCE);
+  for (const type of ["rationale", "constraint", "issue_context", "gotcha", "negative_result"]) {
+    const admission = evaluateMemoryAdmission(dir, packetShell({
+      type: type as MemoryPacket["type"],
+      title: "retryWithBackoff attempts delay jitter",
+      // Deliberately near-verbatim vocabulary from the cited source.
+      body: "retryWithBackoff loops attempts times, doubles delay, and adds random jitter before sleeping.",
+      paths: ["src/retry.ts"],
+    }));
+    assert.ok(
+      !admission.risks.some((r) => r.includes("restates what the cited code already says")),
+      `${type} must be exempt by type; risks=${JSON.stringify(admission.risks)}`,
+    );
+  }
 });

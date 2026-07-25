@@ -7,28 +7,54 @@ Kage helps agents stop rediscovering the same project context. It stores
 reviewable repo memory, builds generated recall/code indexes, and exposes the
 result through an MCP server plus a CLI.
 
-- Website: https://kage-core.github.io/Kage/
-- Docs: https://kage-core.github.io/Kage/guide.html
-- Hosted viewer: https://kage-core.github.io/Kage/viewer/
+- Website: https://kage-core.com/
+- Docs: https://kage-core.com/guide.html
+- Using Kage (full manual): https://github.com/kage-core/Kage/blob/master/docs/USING_KAGE.md
 
-## Install
+## Install — one command
 
-Requires Node.js 18 or newer. The package installs two binaries: `kage` and
-`kage-graph-mcp`.
+Run this inside your repo, then restart your agent. That is the whole setup.
+Node.js 18+. No account, no API key, no config file to write.
 
 ```bash
-npm install -g @kage-core/kage-graph-mcp
-cd your-repo
-kage init --project .
-kage setup codex --project . --write
-# or: kage setup claude-code --project . --write
-# restart the agent once
-kage setup verify-agent --agent codex --project .
-kage context "how do I run tests" --project .
+npx -y @kage-core/kage-graph-mcp install
 ```
 
-Other supported targets: Cursor, Windsurf, Gemini CLI, OpenCode, Cline, Goose,
-Roo Code, Kilo Code, Claude Desktop, Aider, generic MCP (`kage setup list`).
+It creates `.agent_memory/`, builds the code and recall indexes, writes the
+`AGENTS.md` / `CLAUDE.md` policy so your agents know to use Kage, auto-detects and
+wires the agents on your machine, and configures `.gitignore` plus the packet
+merge driver.
+
+It also captures one starter memory from your repo immediately, so there is
+something to recall before you have run a single session. `install` prints the
+exact command to try — on a fresh repo it looks like this:
+
+```bash
+kage context "how do I run the tests" --project .
+#   1. Team memory: How to run, build and test <your-repo>
+#      Verified commands from package.json: npm run test
+```
+
+### Confirm your agent really picked it up
+
+"Installed" and "live in your agent session" are different states, and only one of
+them helps you. After restarting the agent:
+
+```bash
+kage setup verify-agent --agent claude-code --project .
+```
+
+Supported targets include Claude Code, Codex, Cursor, Windsurf, Gemini CLI,
+OpenCode, Cline, Goose, Roo Code, Kilo Code, Claude Desktop, Aider, and generic
+MCP — run `kage setup list` for the full set, or `kage setup <agent> --project .
+--write` to wire one by hand.
+
+### Prefer a global install
+
+```bash
+npm install -g @kage-core/kage-graph-mcp   # installs the `kage` and `kage-graph-mcp` binaries
+cd your-repo && kage install
+```
 
 ## What you get
 

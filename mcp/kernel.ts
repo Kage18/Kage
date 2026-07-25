@@ -4831,6 +4831,22 @@ function citedCodeContainment(projectDir: string, packet: MemoryPacket): number 
   return contained / terms.length;
 }
 
+/**
+ * Does this body carry language the CODE CANNOT express — cause, contrast, decision? Only such a body
+ * is exempt from the derivable-restatement check, so this predicate decides whether that check runs at
+ * all. Exported so it can be tested directly: the check's own threshold sits close enough to real
+ * bodies that varying a word and varying containment cannot be separated inside a fixture.
+ *
+ * It previously matched bare temporal and bug words (`when`, `after`, `before`, `fix`, `issue`,
+ * `must`), which occur in nearly all technical prose. Measured on a 228-packet store, 88.6% of
+ * packets matched and the restatement check therefore ran on only 7% of them — the gate was
+ * effectively off. Narrowed to genuine rationale markers it reaches 35.5%. `must not` / `should not`
+ * are kept where bare `must` is not: the negation is the part code cannot state.
+ */
+export function hasRationaleLanguage(body: string): boolean {
+  return /(because|instead of|rather than|root cause|rationale|trade-?off|we tried|rejected|dead[- ]?end|must not|should not|avoid|workaround|gotcha|caveat|invariant|constraint|counter-?intuitive|surprising|turns out|the reason|so that|requires)/i.test(body);
+}
+
 export function evaluateMemoryAdmission(projectDir: string, packet: MemoryPacket): MemoryAdmissionResult {
   const reasons: string[] = [];
   const risks: string[] = [];
@@ -4886,15 +4902,34 @@ export function evaluateMemoryAdmission(projectDir: string, packet: MemoryPacket
   // (reference dumps 0.00 uses/packet, code explanations 0.12, vs rationale/gotcha/ops carrying all
   // demand). So admission BOOSTS knowledge the code cannot express and PENALIZES a body that merely
   // restates its cited code.
-  const nonDerivable =
+  // Non-derivable BY TYPE, before any word heuristic. These types exist to carry what code cannot
+  // state — a trap, a rejected path, a reason, an invariant — so term overlap with the cited code is
+  // not evidence of restatement for them. Measured why this matters: narrowing the word guard below
+  // without this list flagged 74 packets as restatements, and 56 of them were `decision` — the single
+  // highest-value type. A decision that quotes the config it decided about ("chose base:'/app/' over
+  // './'") necessarily shares vocabulary with that config; penalising it inverts the product's intent.
+  const nonDerivableType =
     packet.type === "gotcha" ||
     packet.type === "negative_result" ||
+    packet.type === "decision" ||
+    packet.type === "rationale" ||
+    packet.type === "constraint" ||
+    packet.type === "issue_context";
+  const nonDerivable =
+    nonDerivableType ||
     /\b(instead of|rejected|rather than|dead[- ]?ends?|does not work|external|upstream|rate[- ]?limits?|incident|postmortem|stampede|tribal)\b/i.test(text);
   if (nonDerivable) {
     score += 10;
     reasons.push("non-derivable knowledge the code cannot express");
   }
-  const hasTriggerLanguage = /(when|after|before|because|requires|must|avoid|prefer|use this|run this|root cause|rationale|decision|convention|gotcha|workaround|fix|policy|issue|hypothesis|unresolved|data flow|invariant|coupling|constraint)/i.test(packet.body);
+  // This guard exempts a body from the restatement check, so it must match language the code CANNOT
+  // express — cause, contrast, decision. The original list included bare temporal and bug words
+  // (`when`, `after`, `before`, `fix`, `issue`, `policy`) that occur in almost any technical prose,
+  // which disabled the check it guards: measured on a 228-packet store, 88.6% of packets matched and
+  // the containment check therefore ran on only 7% of them (top offenders `fix` 59, `when` 40,
+  // `must` 16, `after` 14). Narrowed to genuine rationale markers, the check reaches 35.5%. `must not`
+  // and `should not` are kept where bare `must` is not: the negation is the part code cannot state.
+  const hasTriggerLanguage = hasRationaleLanguage(packet.body);
   if (!nonDerivable && !hasTriggerLanguage && packet.paths.length) {
     const containment = citedCodeContainment(projectDir, packet);
     if (containment >= 0.65) {

@@ -175,6 +175,61 @@ export function parseResponseToolUses(raw: string): Array<{ name: string; id: st
   return blocks;
 }
 
+// Parse the assistant's PROSE from the same body `parseResponseToolUses` reads for tool blocks. The
+// text was always on the wire and always discarded, which is why the store could never answer "what
+// did the agent expect here?" — the one signal that says whether a result was surprising, and so
+// whether anything was learned. Read from either a non-streamed JSON body or a streamed SSE
+// transcript. Never throws: a malformed or truncated body yields "", not an error.
+//
+// Blocks are returned newline-joined in wire order. In SSE a text block arrives as a
+// `content_block_start` (sometimes carrying an initial `text`) followed by `text_delta` fragments, so
+// deltas accumulate into the open block and any non-text block boundary closes it.
+export function parseResponseText(raw: string): string {
+  const blocks: string[] = [];
+  let open: string | null = null;
+  const close = (): void => {
+    if (open !== null && open.trim()) blocks.push(open.trim());
+    open = null;
+  };
+
+  const trimmed = raw.trimStart();
+  if (trimmed.startsWith("{")) {
+    try {
+      const json: unknown = JSON.parse(raw);
+      if (isRecord(json) && Array.isArray(json.content)) {
+        for (const block of json.content) {
+          if (isRecord(block) && block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+            blocks.push(block.text.trim());
+          }
+        }
+      }
+    } catch { /* not JSON we understand — no prose */ }
+    return blocks.join("\n");
+  }
+
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      const event: unknown = JSON.parse(payload);
+      if (!isRecord(event)) continue;
+      if (event.type === "content_block_start") {
+        close(); // a new block of any kind ends the one before it
+        const block = event.content_block;
+        if (isRecord(block) && block.type === "text") open = typeof block.text === "string" ? block.text : "";
+      } else if (event.type === "content_block_delta" && open !== null) {
+        const delta = event.delta;
+        if (isRecord(delta) && delta.type === "text_delta" && typeof delta.text === "string") open += delta.text;
+      } else if (event.type === "content_block_stop" || event.type === "message_stop") {
+        close();
+      }
+    } catch { /* skip a malformed event rather than losing the whole transcript */ }
+  }
+  close();
+  return blocks.join("\n");
+}
+
 // Stable per-(repo, session) task id, in the same shape the Claude adapter uses, so proxy receipts
 // and hook events can be attributed to the same task later.
 export function proxyTaskId(projectRoot: string, sessionId: string): string {
