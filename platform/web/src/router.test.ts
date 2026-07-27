@@ -22,8 +22,9 @@ describe("portal base mounting", () => {
 });
 
 describe("parseRoute", () => {
-  test("maps the overview root", () => {
-    expect(parseRoute("/")).toEqual({ page: "overview" });
+  test("the root is Attention — the app opens on decisions, not a dashboard", () => {
+    expect(parseRoute("/")).toEqual({ page: "attention" });
+    expect(parseRoute("/attention")).toEqual({ page: "attention" });
     expect(parseRoute("/overview")).toEqual({ page: "overview" });
   });
 
@@ -79,7 +80,11 @@ describe("parseRoute", () => {
 
 describe("navLinks", () => {
   test("declares the full information architecture in order", () => {
+    // Attention leads; the five knowledge kinds the model always stored are browsable;
+    // Costs/Integrations/Settings/Billing left the nav because they rendered no live data
+    // (routes still resolve for bookmarks).
     expect(navLinks.map((l) => l.label)).toEqual([
+      "Attention",
       "Overview",
       "System Map",
       "Features",
@@ -87,12 +92,13 @@ describe("navLinks", () => {
       "Flows",
       "Runbooks",
       "Decisions",
+      "Contracts",
+      "Data Models",
+      "Invariants",
+      "Incidents",
+      "Documents",
       "Review Queue",
       "Agent Tasks",
-      "Costs and Outcomes",
-      "Integrations",
-      "Settings",
-      "Billing",
     ]);
   });
 

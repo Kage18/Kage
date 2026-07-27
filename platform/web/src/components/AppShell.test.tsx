@@ -12,6 +12,7 @@ describe("AppShell", () => {
       </AppShell>,
     );
     for (const label of [
+      "Attention",
       "Overview",
       "System Map",
       "Features",
@@ -19,11 +20,13 @@ describe("AppShell", () => {
       "Flows",
       "Runbooks",
       "Decisions",
+      "Contracts",
+      "Data Models",
+      "Invariants",
+      "Incidents",
+      "Documents",
       "Review Queue",
       "Agent Tasks",
-      "Costs and Outcomes",
-      "Integrations",
-      "Settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
