@@ -3684,6 +3684,26 @@ test("project validation ignores retired packet quality warnings", () => {
   assert.equal(validation.warnings.some((warning) => warning.includes("none of the referenced paths exist")), false);
 });
 
+test("change memory grounds only to git-tracked paths, never untracked local dirs", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  writeFileSync(join(project, "tracked.ts"), "export const tracked = true;\n", "utf8");
+  execFileSync("git", ["add", "tracked.ts"], { cwd: project, stdio: "ignore" });
+  // Untracked local tooling — present in a working tree, absent from every clean checkout.
+  // Citing it made the packet hard-stale in CI ("none of the referenced paths exist").
+  mkdirSync(join(project, ".superpowers", "scratch"), { recursive: true });
+  writeFileSync(join(project, ".superpowers", "scratch", "state.html"), "<p>local</p>", "utf8");
+
+  const result = proposeFromDiff(project);
+  assert.equal(result.ok, true);
+  assert.ok(result.packet!.paths.includes("tracked.ts"), "tracked changes ground the packet");
+  assert.equal(
+    result.packet!.paths.some((path) => path.startsWith(".superpowers/")),
+    false,
+    "untracked paths must never be grounding — they do not exist in a clean checkout",
+  );
+});
+
 test("project validation ignores duplicate warnings between generated branch change memories", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
@@ -3883,6 +3903,10 @@ test("diff proposal from a package directory stores project-relative paths", () 
   commitAll(root, "initial");
   const project = join(root, "packages", "ai");
   writeFileSync(join(project, "src", "client.ts"), "export const client = true;\n", "utf8");
+  // Grounding is commit-adjacent: a new file grounds the proposal once it is staged to
+  // travel with the commit. A never-added file is exactly the phantom-path class that
+  // made a shipped packet hard-stale in CI.
+  execFileSync("git", ["add", "-A"], { cwd: root, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
 
@@ -3913,12 +3937,17 @@ test("diff proposal includes repo memory packet-only changes", () => {
     paths: ["README.md"],
   });
   assert.equal(learned.ok, true);
+  // Stage the new packet so it is commit-adjacent — unstaged brand-new files no longer
+  // ground a proposal (they would not exist in the checkout the packet ships with).
+  execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
   assert.equal(result.ok, true);
   assert.equal(result.changedFiles.some((path) => path.startsWith(".agent_memory/packets/")), true);
   assert.equal(result.packet?.paths.some((path) => path.startsWith(".agent_memory/packets/")), true);
-  assert.match(result.summary?.diff_stat ?? "", /\.agent_memory\/packets\//);
+  // git --stat abbreviates long staged paths (".../gotcha-release-…md"), so match the
+  // packet's filename rather than the directory prefix.
+  assert.match(result.summary?.diff_stat ?? "", /gotcha-release-workflow-gotcha/);
 });
 
 test("diff proposal stat includes untracked files alongside tracked diffs", () => {

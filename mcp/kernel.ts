@@ -20816,6 +20816,24 @@ export function kageResume(projectDir: string): ResumeReport {
   };
 }
 
+// The subset of `paths` git tracks (committed or staged). One `git ls-files` call, set
+// membership after — never a per-file subprocess. On any git failure, returns the input
+// unchanged: degrading to the old behavior beats dropping grounding entirely.
+function gitTrackedSubset(projectDir: string, paths: string[]): string[] {
+  try {
+    const tracked = new Set(
+      execFileSync("git", ["ls-files", "-z"], { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .split("\0")
+        .filter(Boolean),
+    );
+    // An all-untracked change set grounds to nothing — an empty list is the honest answer,
+    // and the packet then routes as ungrounded rather than citing phantom paths.
+    return paths.filter((path) => tracked.has(path));
+  } catch {
+    return paths;
+  }
+}
+
 function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary): { packet: MemoryPacket; path: string } {
   const branch = summary.branch ?? "detached";
   const head = summary.head ?? "unknown";
@@ -20900,7 +20918,11 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     status: "approved",
     confidence: 0.62,
     tags: unique(["change-memory", "diff-proposal", "repo-local", branch ? `branch:${slugify(branch)}` : "branch:detached"]),
-    paths: listedChanged.slice(0, 40),
+    // Grounding paths must exist in a CLEAN CHECKOUT, or the packet goes hard-stale the
+    // moment CI validates it: `git status -uall` includes untracked local tooling
+    // (scratch dirs, editor state) that only this working tree has. The body may still
+    // mention them as context; the packet's verifiable grounding is tracked files only.
+    paths: gitTrackedSubset(projectDir, listedChanged).slice(0, 40),
     stack: inferStack(projectDir),
     source_refs: [
       {
