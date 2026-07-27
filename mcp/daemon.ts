@@ -257,6 +257,45 @@ function patchGitIdentity(body: unknown, projectDir: string): void {
 // viewer. The model is opened per request and closed immediately — it never takes the runtime's writer
 // lock (openRepositoryModel just opens + migrates), so these reads run alongside a live `kage up`
 // runtime under SQLite WAL without contending for it.
+// The write half of the portal API, mounted on the SAME server that serves the SPA — for exactly the
+// reason the read half is (a same-origin fetch reaches the origin it was served from, and nowhere
+// else). Symmetrical with servePortalApi: always ends `res`, never rejects, opens and closes the model
+// per request so it never holds the runtime's writer lock.
+export async function servePortalMutation(
+  projectDir: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const { handleReviewMutation, REVIEW_ACTIONS } = await import("./vnext/api/review.js");
+    type ReviewAction = Parameters<typeof handleReviewMutation>[2];
+    // POST /v2/review-items/:id/:action — the one authorized write surface.
+    const match = /^\/v2\/review-items\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    const reviewItemId = match ? decodeURIComponent(match[1]) : "";
+    const action = match ? match[2] : "";
+    if (!match || !reviewItemId || reviewItemId.includes("/") || !REVIEW_ACTIONS.has(action)) {
+      json(res, 404, { ok: false, error: "not_found" });
+      return;
+    }
+    const body = await readBody(req);
+    const { openRepositoryModel } = await import("./vnext/migration/model-store.js");
+    const opened = openRepositoryModel(projectDir);
+    try {
+      const result = handleReviewMutation(opened.model, reviewItemId, action as ReviewAction, body);
+      json(res, result.status, result.body);
+    } finally {
+      opened.close();
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error && /sqlite/i.test(error.message)
+        ? "the knowledge portal API needs a Node build with node:sqlite; memory, recall, and the legacy viewer still work"
+        : "the repository model could not be opened for writing";
+    json(res, 503, { ok: false, error: message });
+  }
+}
+
 export async function servePortalApi(projectDir: string, url: URL, res: ServerResponse): Promise<void> {
   try {
     const { matchPortalRoute, handlePortalRoute } = await import("./vnext/api/router.js");
@@ -1140,8 +1179,25 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     // (main.tsx: `new KageApi("", token)`), so the daemon that serves the portal must also answer its
     // API — otherwise the shell loads and every panel shows "Kage API 404" (the 4.0.1 shell fix
     // exposed exactly this). Reads only, localhost, no token: same trust boundary as /kage/* reports.
+    // The attention queue derives from packets + git + the command log (kernel side), not
+    // from the sqlite model — served directly so it works even where node:sqlite doesn't.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/attention") {
+      import("./vnext/orchestrator/attention.js")
+        .then(({ attentionQueue }) => json(res, 200, { items: attentionQueue(projectRoot) }))
+        .catch(() => json(res, 503, { ok: false, error: "attention derivation failed" }));
+      return;
+    }
     if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/")) {
       void servePortalApi(projectRoot, requestUrl, res);
+      return;
+    }
+    // The portal's ONE write surface. Without this the SPA loads, renders the queue, and every
+    // action 404s: the POST handler lived only on the vNext runtime server, which serves no static
+    // assets, so nothing that opened the portal could ever reach it. Same localhost trust boundary
+    // as the reads above; the acting identity, optimistic version and self-approval gates are all
+    // enforced inside handleReviewMutation.
+    if (req.method === "POST" && requestUrl.pathname.startsWith("/v2/")) {
+      void servePortalMutation(projectRoot, requestUrl, req, res);
       return;
     }
     let filePath: string | null = null;

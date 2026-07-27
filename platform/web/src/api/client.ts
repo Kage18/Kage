@@ -3,7 +3,8 @@
 // machine token as a Bearer header. Every method returns a DTO from the generated `types.ts`, so the
 // wire shape is checked against the backend at build time.
 
-import type { TeamReportDto,
+import type {
+  AttentionQueueDto, TeamReportDto,
   EntityDetailDto,
   EntityListDto,
   FeatureListDto,
@@ -45,6 +46,10 @@ export interface KageApiClient {
   systemMap(view?: SystemMapView, focus?: string | null): Promise<SystemMapDto>;
   features(): Promise<FeatureListDto>;
   components(): Promise<EntityListDto>;
+  attention(): Promise<AttentionQueueDto>;
+  /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
+  knowledgeList(kind: string): Promise<EntityListDto>;
+  knowledgeDetail(kind: string, slug: string): Promise<EntityDetailDto>;
   flows(): Promise<EntityListDto>;
   runbooks(): Promise<EntityListDto>;
   decisions(): Promise<EntityListDto>;
@@ -106,6 +111,18 @@ export class KageApi implements KageApiClient {
 
   components(): Promise<EntityListDto> {
     return this.get<EntityListDto>("/v2/components");
+  }
+
+  attention(): Promise<AttentionQueueDto> {
+    return this.get<AttentionQueueDto>("/v2/attention");
+  }
+
+  knowledgeList(kind: string): Promise<EntityListDto> {
+    return this.get<EntityListDto>(`/v2/${kind}`);
+  }
+
+  knowledgeDetail(kind: string, slug: string): Promise<EntityDetailDto> {
+    return this.get<EntityDetailDto>(`/v2/${kind}/${encodeURIComponent(slug)}`);
   }
 
   flows(): Promise<EntityListDto> {

@@ -5,6 +5,7 @@
 
 // --- Inlined backend enums (string-literal unions, mirrored verbatim) ---
 export type EntityKind =
+  | "document"
   | "repository"
   | "feature"
   | "component"
@@ -596,4 +597,18 @@ export interface TeamReportDto {
     oldest_pending_days: number | null;
     contradictions: number;
   };
+}
+
+// ── Attention (orchestrator §10) ─────────────────────────────────────────────
+// Derived on read from the command log + git evidence + memory health; never stored.
+export interface AttentionItemDto {
+  kind: "unclaimed_building" | "overlap_warning" | "parked" | "contradiction" | "stale_critical";
+  severity: number;
+  ref: string;
+  summary: string;
+  actions: string[];
+}
+
+export interface AttentionQueueDto {
+  items: AttentionItemDto[];
 }

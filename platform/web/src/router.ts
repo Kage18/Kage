@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 
 export type Route =
+  | { page: "attention" }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -20,6 +21,9 @@ export type Route =
   | { page: "runbook"; slug: string }
   | { page: "decisions" }
   | { page: "decision"; slug: string }
+  // Kinds the model always stored but never surfaced, plus `documents` for design docs and PRDs.
+  | { page: "knowledge"; kind: string }
+  | { page: "knowledge-detail"; kind: string; slug: string }
   | { page: "review" }
   | { page: "tasks" }
   | { page: "task"; id: string }
@@ -38,6 +42,7 @@ export interface NavLink {
 // The product information architecture, in a FIXED order. The AppShell renders these as the primary
 // navigation landmark and the router test asserts every href resolves to a real route.
 export const navLinks: NavLink[] = [
+  { label: "Attention", href: "/attention" },
   { label: "Overview", href: "/overview" },
   { label: "System Map", href: "/system-map" },
   { label: "Features", href: "/features" },
@@ -45,13 +50,26 @@ export const navLinks: NavLink[] = [
   { label: "Flows", href: "/flows" },
   { label: "Runbooks", href: "/runbooks" },
   { label: "Decisions", href: "/decisions" },
+  { label: "Contracts", href: "/contracts" },
+  { label: "Data Models", href: "/data-models" },
+  { label: "Invariants", href: "/invariants" },
+  { label: "Incidents", href: "/incidents" },
+  { label: "Documents", href: "/documents" },
   { label: "Review Queue", href: "/review" },
   { label: "Agent Tasks", href: "/tasks" },
-  { label: "Costs and Outcomes", href: "/costs" },
-  { label: "Integrations", href: "/integrations" },
-  { label: "Settings", href: "/settings" },
-  { label: "Billing", href: "/billing" },
 ];
+
+// Deliberately NOT in the nav — a nav item must render live data or not exist:
+//   /costs        rendered AgentTasksContainer verbatim, i.e. the Agent Tasks table under a second
+//                 name. The real cost view (CostBreakdown) lives on a task's receipt page, which is
+//                 reachable from Agent Tasks. A duplicate entry is worse than none.
+//   /integrations the read model returns a hardcoded `integrations: []` (api/router.ts), so the page
+//                 could only ever say "no integrations".
+//   /settings     three paragraphs of static prose; it never reads the real vNext config.
+//   /billing      the local daemon has no workspace-billing feed and passes `billing={null}`, so the
+//                 page is permanently "No workspace connected".
+// The routes themselves still resolve, so nothing breaks for a bookmark; they are simply not
+// advertised as working surfaces until they read something real.
 
 // The daemon serves the portal under `/app/`. Detect that mount from the current pathname so the SPA
 // can strip it before routing and re-add it on every internal link — the portal uses root-absolute
@@ -78,11 +96,16 @@ function splitPath(input: string): { segments: string[]; query: URLSearchParams 
 export function parseRoute(input: string): Route {
   const { segments, query } = splitPath(input);
 
-  if (segments.length === 0) return { page: "overview" };
+  // Attention is the landing page by design: the app opens on what needs a decision,
+  // not on a dashboard to admire.
+  if (segments.length === 0) return { page: "attention" };
 
   const [head, tail] = segments;
 
   switch (head) {
+    case "attention":
+      if (segments.length === 1) return { page: "attention" };
+      break;
     case "overview":
       if (segments.length === 1) return { page: "overview" };
       break;
@@ -110,6 +133,17 @@ export function parseRoute(input: string): Route {
     case "decisions":
       if (segments.length === 1) return { page: "decisions" };
       if (segments.length === 2) return { page: "decision", slug: tail };
+      break;
+    // The knowledge kinds share one list page and one detail page — an entity with its claims,
+    // evidence and relations reads the same whichever kind it is, so five near-identical page
+    // components would be five places for the same bug to hide.
+    case "contracts":
+    case "data-models":
+    case "invariants":
+    case "incidents":
+    case "documents":
+      if (segments.length === 1) return { page: "knowledge", kind: head };
+      if (segments.length === 2) return { page: "knowledge-detail", kind: head, slug: tail };
       break;
     case "review":
       if (segments.length === 1) return { page: "review" };
@@ -142,6 +176,8 @@ export function parseRoute(input: string): Route {
 
 export function routeToPath(route: Route): string {
   switch (route.page) {
+    case "attention":
+      return "/attention";
     case "overview":
       return "/overview";
     case "system-map":
@@ -162,6 +198,10 @@ export function routeToPath(route: Route): string {
       return "/runbooks";
     case "runbook":
       return `/runbooks/${encodeURIComponent(route.slug)}`;
+    case "knowledge":
+      return `/${route.kind}`;
+    case "knowledge-detail":
+      return `/${route.kind}/${encodeURIComponent(route.slug)}`;
     case "decisions":
       return "/decisions";
     case "decision":

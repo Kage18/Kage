@@ -6,6 +6,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { daemonDoctor, readDaemonStatus, startDaemon, startViewer, stopDaemon } from "./daemon.js";
+import { appendCommandEvent } from "./vnext/orchestrator/events.js";
+import { deriveWorkState } from "./vnext/orchestrator/derive.js";
+import { attentionQueue } from "./vnext/orchestrator/attention.js";
+import { planIntent } from "./vnext/plan/plan.js";
 import {
   connectProject,
   downProject,
@@ -114,6 +118,9 @@ import {
   searchDocs,
   docsRecallSection,
   recordFeedback,
+  codeIndexerStatus,
+  workItemBrief,
+  reanchorUnchangedPackets,
   reverifyMemory,
   generateSkills,
   remediationFor,
@@ -328,6 +335,9 @@ Usage:
   kage registry --project <dir> [--json]
   kage changelog --project <dir> [--days <n>] [--json]
   kage review --project <dir>
+  kage plan --intent "<what should become true>" --project <dir> [--json]   intent -> grounded, estimated work items
+  kage work --project <dir> [--json]   derived board: stages from evidence + the attention queue
+  kage brief --packet <id> --project <dir> [--json]   what the team knows + blast radius for a work item
   kage claim --packet <id> --project <dir> [--actor <name>] [--json]
   kage implements --packet <output-id> --proposal <proposal-id> --evidence <text> --project <dir> [--json]
   kage stage --packet <id> --to <proposed|claimed|in_review> --project <dir> [--actor <name>] [--evidence <text>] [--json]
@@ -1061,7 +1071,7 @@ async function main(): Promise<void> {
         console.log(
           `Applied ${result.applied} packet(s); skipped ${result.skipped_fingerprint_mismatch} (drifted), ${result.skipped_missing} (missing).`,
         );
-        console.log("Nothing imported is injectable — every imported claim is proposed/archived until reviewed.");
+        console.log("Grounded packets import as verified and are readable by agents; ungrounded ones stay proposed, and superseded/deprecated ones are archived.");
       } finally {
         opened.close();
       }
@@ -1283,7 +1293,19 @@ async function main(): Promise<void> {
     let vcDone = false;
     try {
       const gitignorePath = join(project, ".gitignore");
-      const want = [".agent_memory/indexes/", ".agent_memory/reports/"];
+      // Deny-then-allow. Listing only indexes/ and reports/ left everything else tracked:
+      // ensureMemoryDirs creates 17 directories, so `git add -A` after install committed the
+      // structural index, the code graph and thousands of raw observation files.
+      //
+      // Two things are deliberately allowed back. `packets/` is the durable memory — the whole
+      // point of storing it in git. `conflicts/` is where the merge driver preserves the side it
+      // did not pick: if that stays ignored, a teammate whose edit lost a merge is never told, and
+      // the "nothing is silently dropped" promise only holds on the machine that did the merge.
+      const want = [
+        ".agent_memory/*",
+        "!.agent_memory/packets/",
+        "!.agent_memory/conflicts/",
+      ];
       const current = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
       const missing = want.filter((line) => !current.split("\n").some((l) => l.trim() === line));
       if (missing.length) {
@@ -1537,6 +1559,19 @@ async function main(): Promise<void> {
     console.log(renderStatus(report));
     console.log("");
     console.log(`Memory: ${memory.ok ? "valid" : "INVALID"} (${memory.errors} errors, ${memory.warnings} warnings)`);
+    // Which languages in THIS repo could have compiler-exact symbols, and which currently fall to a
+    // lower tier. Reported, never acted on: Kage does not install toolchains.
+    const indexers = codeIndexerStatus(project);
+    if (indexers.indexers.length) {
+      console.log("");
+      console.log("Code indexers (compiler-exact symbols; a missing one just falls to the next tier):");
+      for (const entry of indexers.indexers) {
+        const languages = entry.languages.join(", ");
+        console.log(entry.state === "installed"
+          ? `  ${entry.id.padEnd(16)} installed   ${languages}`
+          : `  ${entry.id.padEnd(16)} available   ${languages} — ${entry.install_hint}`);
+      }
+    }
     if (!validation.ok) process.exit(2);
     return;
   }
@@ -2434,6 +2469,24 @@ async function main(): Promise<void> {
   }
 
   if (command === "reverify") {
+    // Bulk grounding refresh for packets that predate an anchor improvement. Safe by
+    // construction: only byte-identical files are touched, so no claim is re-asserted
+    // and no verification clock is reset. Packets whose code moved are reported, not
+    // stamped — those need `--evidence`.
+    if (args.includes("--reanchor-unchanged")) {
+      const result = reanchorUnchangedPackets(projectArg(args));
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Re-anchored ${result.refreshed.length} packet(s) against unchanged code`);
+        if (result.skipped_changed.length) {
+          console.log(`  ${result.skipped_changed.length} skipped — cited code moved, so these need kage reverify --packet <id> --evidence "<what you checked>"`);
+        }
+        for (const error of result.errors) console.log(`  error: ${error}`);
+      }
+      if (!result.ok) process.exit(2);
+      return;
+    }
     const packetId = takeArg(args, "--packet");
     if (!packetId) usage();
     const result = reverifyMemory(projectArg(args), packetId!, {
@@ -2449,6 +2502,91 @@ async function main(): Promise<void> {
       if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
     } else {
       console.log(`Reverify failed: ${result.errors.join("; ")}`);
+    }
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "plan") {
+    // The plan loop's deterministic core: intent -> grounded, clustered, estimated work
+    // items, with the memory that bears on it surfaced BEFORE anyone starts.
+    const project = projectArg(args);
+    const intentText = takeArg(args, "--intent") ?? firstPositional(args);
+    if (!intentText) {
+      console.error("Usage: kage plan --intent \"what should become true\" [--title <t>] [--project <dir>] [--json]");
+      process.exit(2);
+    }
+    const plan = planIntent(project, intentText!, { title: takeArg(args, "--title") });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(plan, null, 2));
+    } else if (plan.ok) {
+      if (plan.bearing_memory.length) {
+        console.log("What the team already knows (bears on this intent):");
+        for (const entry of plan.bearing_memory.slice(0, 5)) console.log(`  · ${entry.title}`);
+        console.log("");
+      }
+      console.log(`Planned ${plan.items.length} work item(s):`);
+      for (const item of plan.items) {
+        const est = item.estimate.confidence === "none"
+          ? "no estimate yet — completes after the first tracked changes"
+          : `~${item.estimate.tokens_p50} tokens (${item.estimate.confidence})`;
+        console.log(`  ${item.title}`);
+        console.log(`    paths: ${item.paths.join(", ") || "(none — ground before claiming)"} · blast +${item.dependents.length} dependents · ${est}`);
+        console.log(`    claim: kage claim --packet ${item.work_id}`);
+      }
+    } else {
+      console.error(plan.errors.join("; "));
+    }
+    if (!plan.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "work") {
+    // The derived board (orchestrator §5-§6): stages computed from commands + git
+    // evidence, never from clicks, with the attention queue on top. Read-only by design.
+    const project = projectArg(args);
+    const state = deriveWorkState(project);
+    const attention = attentionQueue(project);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ ...state, attention }, null, 2));
+      return;
+    }
+    if (attention.length) {
+      console.log(`Attention (${attention.length}):`);
+      for (const item of attention.slice(0, 8)) {
+        console.log(`  [${String(item.severity).padStart(3)}] ${item.kind.padEnd(18)} ${item.summary}`);
+        console.log(`        actions: ${item.actions.join(" · ")}`);
+      }
+      console.log("");
+    }
+    if (!state.items.length) {
+      console.log("No work items. Create one: kage learn --type proposal --title \"…\" --learning \"…\" --paths <files>");
+      return;
+    }
+    console.log("Work (stage derived from evidence):");
+    for (const item of state.items) {
+      const who = item.claimed_by ? ` · ${item.claimed_by}` : "";
+      const evidence = item.correlated_commits.length ? ` · ${item.correlated_commits.length} commit(s)` : "";
+      console.log(`  ${item.derived_stage.padEnd(9)} ${item.title}${who}${evidence}`);
+    }
+    return;
+  }
+
+  if (command === "brief") {
+    // The missing half of the work-item loop: what does the team already know about the code this
+    // task touches, and what does it reach? Assembled from recall + risk, never a stored document.
+    const packetId = takeArg(args, "--packet") ?? firstPositional(args);
+    if (!packetId) {
+      console.error("Usage: kage brief --packet <work-item-id> [--project <dir>] [--json]");
+      process.exit(2);
+    }
+    const result = workItemBrief(projectArg(args), packetId);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log(result.brief);
+    } else {
+      console.error(result.errors.join("; "));
     }
     if (!result.ok) process.exit(2);
     return;
@@ -3424,6 +3562,11 @@ async function main(): Promise<void> {
     const project = projectArg(args);
     const actor = takeArg(args, "--actor") ?? gitUserName(project) ?? "unknown";
     const result = claimWorkItem(project, packetId!, actor);
+    // The claim is also a command EVENT — the derivation engine's evidence. The kernel
+    // write above holds the lock; the event is what `kage work` and attention reduce over.
+    if (result.ok) {
+      try { appendCommandEvent(project, { kind: "task.claimed", work_id: packetId!, actor }); } catch { /* derivation-only; never fails a claim */ }
+    }
     if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
     else if (result.ok) console.log(`Claimed ${packetId} as ${actor}.`);
     else console.log(`Claim failed: ${result.errors.join("; ")}`);

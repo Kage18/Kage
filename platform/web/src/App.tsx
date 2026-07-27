@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { KageApiClient } from "./api/client";
 import type { TeamReportDto,
+  AttentionItemDto,
+  AttentionQueueDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -19,6 +21,7 @@ import { AgentTasksPage } from "./pages/AgentTasksPage";
 import { BillingPage } from "./pages/BillingPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
+import { AttentionPage } from "./pages/AttentionPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -329,6 +332,29 @@ function AgentTasksContainer({ api }: { api: KageApiClient }): React.ReactElemen
 // Loads a browse-list of one entity kind (Components, Flows, Runbooks, Decisions, Features) and renders
 // it. Fetched lazily when its tab opens. `load` picks the right client method; `section` is the URL
 // segment its cards link to. These replace the former "arrives in a later Phase C task" placeholders.
+// Human labels for the knowledge browse tabs, kept beside the dispatch that uses them.
+const KNOWLEDGE_LABELS: Record<string, string> = {
+  contracts: "Contracts",
+  "data-models": "Data Models",
+  invariants: "Invariants",
+  incidents: "Incidents",
+  documents: "Documents",
+};
+
+function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ items: AttentionItemDto[] | null; error: string | null }>({ items: null, error: null });
+  useEffect(() => {
+    let live = true;
+    api.attention()
+      .then((queue: AttentionQueueDto) => { if (live) setState({ items: queue.items, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ items: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api]);
+  if (state.error) return <p className="empty-state">Attention queue unavailable: {state.error}</p>;
+  if (state.items === null) return <p className="empty-state">Deriving…</p>;
+  return <AttentionPage items={state.items} />;
+}
+
 function EntityListContainer({
   api,
   title,
@@ -424,6 +450,8 @@ function RoutedPage({
   api: KageApiClient;
 }): React.ReactElement {
   switch (route.page) {
+    case "attention":
+      return <AttentionContainer api={api} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;
@@ -452,6 +480,26 @@ function RoutedPage({
     case "components":
       return (
         <EntityListContainer api={api} title="Components" section="components" load={(a) => a.components()} />
+      );
+    // One list page and one detail page for every knowledge kind. The label is derived from the
+    // route so adding a kind is a router change, not another near-identical page component.
+    case "knowledge":
+      return (
+        <EntityListContainer
+          api={api}
+          title={KNOWLEDGE_LABELS[route.kind] ?? route.kind}
+          section={route.kind}
+          load={(a) => a.knowledgeList(route.kind)}
+        />
+      );
+    case "knowledge-detail":
+      return (
+        <DetailContainer<EntityDetailDto>
+          slug={route.slug}
+          label={KNOWLEDGE_LABELS[route.kind] ?? route.kind}
+          load={(slug) => api.knowledgeDetail(route.kind, slug)}
+          render={(entity) => <FeaturePage feature={entity} />}
+        />
       );
     case "component":
       return (
