@@ -10,8 +10,8 @@
 //   - Deterministic low-risk facts auto-verify; high-impact facts always route to review.
 //   - New events consolidate rather than accumulate duplicate claims (idempotent replay).
 //   - Staleness invalidates a claim whose ground truth changed, and it drops out of delivery.
-//   - Packet migration is dry-run first, fingerprint-guarded, imports nothing injectable, and is
-//     reversible by OKF export.
+//   - Packet migration is dry-run first, fingerprint-guarded, imports grounded packets as verified
+//     (ungrounded ones stay proposed), and is reversible by OKF export.
 //   - The model source passes shadow comparison against legacy recall (compare delivers legacy; the
 //     progression gate measures the five criteria).
 //   - The repository-model v1 fixture is deterministic (byte-identical across runs), sorted by id,
@@ -505,7 +505,7 @@ function legacyPacket(overrides: Partial<MemoryPacket> = {}): MemoryPacket {
   };
 }
 
-test("Gate B: packet migration is dry-run first, imports nothing injectable, and re-applies idempotently", (t) => {
+test("Gate B: packet migration is dry-run first, gates on grounding, and re-applies idempotently", (t) => {
   if (!supportsVnextRuntime()) {
     t.skip("node:sqlite is unavailable on this runtime");
     return;
@@ -532,7 +532,7 @@ test("Gate B: packet migration is dry-run first, imports nothing injectable, and
       .listEntities(plan.repository_id)
       .flatMap((entity) => model.claimsForEntity(entity.entity_id));
     assert.equal(imported.length, 1);
-    assert.equal(imported[0].trust_state, "proposed", "legacy trust is never laundered into injectable trust");
+    assert.equal(imported[0].trust_state, "verified", "a grounded import is evidence-backed and readable; grounding is the gate, not approval");
 
     // A drifted packet is refused: apply the same plan against changed content and nothing new lands.
     const drifted = [legacyPacket({ body: "The refund worker now retries FIVE times." })];
@@ -552,7 +552,7 @@ test("Gate B: packet migration is dry-run first, imports nothing injectable, and
     const roundTripped = parseModelConcept(markdown);
     assert.ok(roundTripped, "the exported concept parses back");
     assert.equal(roundTripped!.entity_id, entity.entity_id, "the exported concept round-trips its entity id");
-    assert.equal(roundTripped!.claims[0].trust_state, "proposed", "export never invents trust");
+    assert.equal(roundTripped!.claims[0].trust_state, "verified", "export round-trips trust faithfully, neither inventing nor losing it");
   } finally {
     opened.close();
   }

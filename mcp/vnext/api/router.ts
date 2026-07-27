@@ -26,6 +26,7 @@ export type PortalRouteKind =
   | "system_map"
   | "features"
   | "entity_list"
+  | "entity_detail"
   | "feature"
   | "component"
   | "flow"
@@ -57,12 +58,25 @@ export function matchPortalRoute(pathname: string): PortalRoute | undefined {
   if (pathname === "/v2/flows") return { kind: "entity_list", entityKind: "flow" };
   if (pathname === "/v2/runbooks") return { kind: "entity_list", entityKind: "runbook" };
   if (pathname === "/v2/decisions") return { kind: "entity_list", entityKind: "decision" };
+  // The knowledge-bearing kinds the model has always stored but never surfaced: they existed in the
+  // database and appeared as plain text on other pages, so a contract or an invariant was
+  // unreachable from the UI. `document` is new — design docs and PRDs, anchored to symbols like
+  // everything else, so a document goes stale when what it describes changes.
+  //
+  // The remaining kinds (repository, owner, dependency, test_surface) stay off the browse surface
+  // deliberately: they are relations between things, best read on the detail page of the thing they
+  // relate to, not as top-level lists a person scrolls.
+  if (pathname === "/v2/contracts") return { kind: "entity_list", entityKind: "contract" };
+  if (pathname === "/v2/data-models") return { kind: "entity_list", entityKind: "data_model" };
+  if (pathname === "/v2/invariants") return { kind: "entity_list", entityKind: "invariant" };
+  if (pathname === "/v2/incidents") return { kind: "entity_list", entityKind: "incident" };
+  if (pathname === "/v2/documents") return { kind: "entity_list", entityKind: "document" };
   if (pathname === "/v2/review-items") return { kind: "review_items" };
   if (pathname === "/v2/tasks") return { kind: "tasks" };
   if (pathname === "/v2/integrations") return { kind: "integrations" };
   if (pathname === "/v2/team-report") return { kind: "team_report" };
 
-  const entity = /^\/v2\/(features|components|flows|runbooks|decisions)\/([^/]+)$/.exec(pathname);
+  const entity = /^\/v2\/(features|components|flows|runbooks|decisions|contracts|data-models|invariants|incidents|documents)\/([^/]+)$/.exec(pathname);
   if (entity) {
     const slug = decodeSlug(entity[2]);
     if (slug === undefined) return undefined;
@@ -77,6 +91,18 @@ export function matchPortalRoute(pathname: string): PortalRoute | undefined {
         return { kind: "runbook", slug };
       case "decisions":
         return { kind: "decision", slug };
+      // The newly-surfaced kinds reuse the generic entity detail shape: an entity with its claims,
+      // evidence and relations is the same page regardless of which kind it is.
+      case "contracts":
+        return { kind: "entity_detail", slug, entityKind: "contract" };
+      case "data-models":
+        return { kind: "entity_detail", slug, entityKind: "data_model" };
+      case "invariants":
+        return { kind: "entity_detail", slug, entityKind: "invariant" };
+      case "incidents":
+        return { kind: "entity_detail", slug, entityKind: "incident" };
+      case "documents":
+        return { kind: "entity_detail", slug, entityKind: "document" };
     }
   }
 
@@ -183,6 +209,13 @@ export function handlePortalRoute(
     case "entity_list": {
       const kind = route.entityKind!;
       return { status: 200, body: repoId ? entityList(model, repoId, kind) : { kind, entities: [] } };
+    }
+
+    case "entity_detail": {
+      if (!repoId) return notFound();
+      const entity = model.findEntity(repoId, route.entityKind!, route.slug!);
+      if (!entity) return notFound();
+      return { status: 200, body: entityDetail(model, entity) };
     }
 
     case "feature":

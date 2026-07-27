@@ -3,6 +3,7 @@ import type { PrivacyClass, TrustState } from "../protocol/types.js";
 export type { PrivacyClass, TrustState } from "../protocol/types.js";
 
 export type EntityKind =
+  | "document"
   | "repository"
   | "feature"
   | "component"

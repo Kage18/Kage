@@ -89,10 +89,13 @@ test("applyMigration imports the planned packets and records every mapping", () 
   for (const id of ["p-create", "p-archive", "p-review", "p-ungrounded", "p-junk"]) {
     assert.ok(readMigration(model, id), `mapping recorded for ${id}`);
   }
-  // Nothing imported is injectable.
-  for (const entity of model.listEntities("repository:local")) {
-    assert.equal(model.injectableClaims(entity.entity_id).length, 0);
-  }
+  // Approval no longer gates; grounding does. Of the four imported claims, the two from
+  // grounded live packets (p-create, p-review) are injectable, while the archived one and
+  // the ungrounded one are not — the split is the whole point of the new rule.
+  const injectable = model
+    .listEntities("repository:local")
+    .reduce((total, entity) => total + model.injectableClaims(entity.entity_id).length, 0);
+  assert.equal(injectable, 2);
 });
 
 test("applyMigration refuses an entry whose packet drifted since the plan was made", () => {

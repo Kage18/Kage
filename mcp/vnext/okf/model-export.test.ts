@@ -81,13 +81,13 @@ test("exportModelConcept carries the entity, its claims, evidence, and legacy pa
   assert.equal(concept.repository_id, REPO);
   assert.equal(concept.claims.length, 1);
   assert.equal(concept.claims[0].claim_id, result.claim!.claim_id);
-  assert.equal(concept.claims[0].trust_state, "proposed");
+  assert.equal(concept.claims[0].trust_state, "verified");
   assert.deepEqual(concept.legacy_packet_ids, ["packet-export-1"]);
 });
 
 test("exported evidence references are source-backed with their verification method and state", () => {
   const model = new Repository(migratedDatabase());
-  // Build a verified, evidence-backed claim by hand (the importer alone never mints verified claims).
+  // Build a verified, evidence-backed claim by hand.
   model.upsertEntity({
     entity_id: "entity-1",
     repository_id: REPO,
@@ -217,8 +217,10 @@ test("exportModel emits one concept per entity and lints as conformant OKF", () 
   for (const doc of concepts) {
     assert.ok(doc.markdown.startsWith("---"), "has YAML frontmatter");
     assert.match(doc.markdown, /^type:/m);
-    // The frontmatter never claims an unearned verification: an imported concept is proposed.
-    assert.match(doc.markdown, /x-kage-trust: "proposed"/);
+    // A grounded import is verified — backed by evidence rows built from its cited paths,
+    // which createClaim refuses to accept without. Unearned verification is still impossible;
+    // what changed is that grounding now earns it, where previously nothing could.
+    assert.match(doc.markdown, /x-kage-trust: "verified"/);
   }
 });
 

@@ -4,6 +4,7 @@ import type { MemoryPacket, MemoryType } from "../../kernel.js";
 import type { Repository } from "../repo-model/repository.js";
 import { impactFor, reviewPolicyFor, ALWAYS_PROPOSED_KINDS } from "../compiler/candidates.js";
 import type { ClaimRecord, EntityKind, TrustState } from "../repo-model/types.js";
+import type { EvidenceLink } from "../repo-model/repository.js";
 import { LEGACY_PACKET_MIGRATIONS_TABLE } from "./schema.js";
 
 /**
@@ -12,12 +13,16 @@ import { LEGACY_PACKET_MIGRATIONS_TABLE } from "./schema.js";
  * This is a ONE-WAY, NON-DESTRUCTIVE bridge from Kage's legacy memory into the Phase B model. Every
  * honesty gate that governs the compiler governs the importer too, and then some:
  *
- *  - Legacy trust is NOT vNext trust. A packet's legacy `status`/quality score is a historical
- *    human/heuristic judgement, never a re-checkable verified-evidence backing. So an imported claim
- *    is floored at `proposed` (non-injectable) for every live packet — a legacy "approved" packet
- *    does NOT become an injectable `approved`/`verified` claim. It routes to review instead.
- *  - The only trust states an import may mint are: `superseded` (the packet was superseded),
- *    `archived` (the packet was deprecated), or `proposed` (everything else). None are injectable.
+ *  - GROUNDING, not approval, gates injection. Approval was removed from the product: nothing waits
+ *    on a human to become usable, so a grounded live packet imports as `verified` and is readable by
+ *    an agent. The previous floor sent every live packet to `proposed`, which measured 0 of 384
+ *    packets reachable on a real store — memory that exists but can never be read is not memory.
+ *  - A packet citing no code stays `proposed` (non-injectable): an unanchored claim cannot be checked
+ *    against the repository or decayed when the repository moves, so it has no honest basis for trust.
+ *  - A legacy quality score still establishes nothing. Trust follows status and grounding, never a
+ *    self-reported number.
+ *  - Trust states an import may mint: `verified` (grounded and live), `superseded`, `archived`, or
+ *    `proposed` (ungrounded, or a packet that was never accepted).
  *  - Confidence is never a fabricated 1: an imported claim carries a neutral, unmeasured 0.5.
  *  - The ORIGINAL packet is preserved verbatim in the migration ledger so the import is losslessly
  *    reversible, and packet files are NEVER deleted.
@@ -153,11 +158,65 @@ function isJunk(packet: MemoryPacket): boolean {
   return false;
 }
 
-// Trust an imported packet is allowed to carry. Legacy trust is never laundered into an injectable
-// state: only superseded/archived (both non-injectable) or proposed.
+// Trust an imported packet carries.
+//
+// This used to floor EVERY live packet to `proposed`, which meant no imported memory
+// could ever reach an agent (`isInjectableTrustState` admits only verified/approved) —
+// measured at 0 of 384 on this repo. That floor modelled "a human has not approved this
+// yet", and approval has been removed from the product: nothing waits on a human to
+// become usable.
+//
+// A legacy `approved` status means the packet is grounded and was accepted through the old
+// review flow. It imports as `verified` — evidence-backed — not `approved`, because the
+// model rightly refuses to persist `approved` without a completed review item. What still
+// gates injection is GROUNDING: a packet citing no code is forced back to `proposed`,
+// because an unanchored claim cannot be verified against code or decayed when it moves.
+// A packet's cited paths ARE its evidence — that is what makes it grounded, and grounding is the
+// surviving gate now that approval is gone. Each cited path becomes an evidence row so a `verified`
+// claim is backed by something re-checkable rather than asserted; createClaim enforces this by
+// refusing to persist `verified` with no verified supporting evidence.
+function groundingEvidence(
+  model: Repository,
+  packet: MemoryPacket,
+  repositoryId: string,
+  timestamp: string,
+): EvidenceLink[] {
+  const links: EvidenceLink[] = [];
+  for (const path of (packet.paths ?? []).filter((candidate) => candidate.trim().length > 0)) {
+    const cleanPath = path.trim();
+    const evidenceId = `evidence-${digest(lengthPrefixed([repositoryId, packet.id, cleanPath]))}`;
+    // addEvidence dedupes on the NATURAL key (repository, source_type, uri, fingerprint), not on
+    // evidence_id — two packets citing the same file at the same revision share one row. Link the
+    // id it actually persisted, not the one requested, or the link points at a row that was never
+    // inserted and the foreign key fails.
+    const stored = model.addEvidence({
+      evidence_id: evidenceId,
+      repository_id: repositoryId,
+      source_type: "source",
+      source_uri: cleanPath,
+      source_fingerprint: digest(lengthPrefixed([cleanPath, packet.updated_at ?? ""])),
+      commit: null,
+      path: cleanPath,
+      symbol: null,
+      line_start: null,
+      line_end: null,
+      // The packet was accepted against this file in the legacy review flow, and the freshness
+      // machinery re-checks that grounding on every recall — withholding the claim if the cited
+      // code has moved. That continuous re-check, not this import, is what keeps it honest.
+      verification_method: "legacy_packet_grounding",
+      verification_state: "verified",
+      privacy_class: "team_metadata",
+      observed_at: packet.updated_at || timestamp,
+    });
+    links.push({ evidence_id: stored.evidence_id, stance: "supports" });
+  }
+  return links;
+}
+
 function trustForStatus(status: MemoryPacket["status"]): TrustState {
   if (status === "superseded") return "superseded";
   if (status === "deprecated") return "archived";
+  if (status === "approved") return "verified";
   return "proposed";
 }
 
@@ -199,20 +258,26 @@ export function classifyPacket(
     disposition = "merge";
   } else if (packet.status === "superseded" || packet.status === "deprecated") {
     disposition = "archive";
-  } else if (ALWAYS_PROPOSED_KINDS.has(kind)) {
-    // A decision/owner/invariant/incident is always a human judgement — it can only ever be proposed
-    // for review on import, never auto-trusted.
-    disposition = "review";
   } else if (!(packet.paths ?? []).some((path) => path.trim().length > 0)) {
     // No cited path to anchor evidence against: honestly ungrounded, still a proposed claim.
     disposition = "ungrounded";
+  } else if (ALWAYS_PROPOSED_KINDS.has(kind)) {
+    // A decision/owner/invariant/incident is a human judgement. It is surfaced for
+    // ATTENTION — contradictions and decay are worth a second pair of eyes — but with
+    // approval removed this is no longer a gate on whether an agent may read it.
+    // Decisions are the largest class in a real store (144 of 228 here), so gating them
+    // would leave most memory unreachable, which is the failure this import path had.
+    disposition = "review";
   } else {
     disposition = "create";
   }
 
   return {
     disposition,
-    trust_state: trust,
+    // Grounding is the surviving gate: an unanchored claim cannot be verified against
+    // code or decayed when the code moves, so it stays non-injectable regardless of the
+    // status it carried in the legacy store.
+    trust_state: disposition === "ungrounded" ? "proposed" : trust,
     entity_kind: kind,
     entity_name: entityName,
     claim_kind: claimKind,
@@ -262,8 +327,19 @@ export function importPacket(
   const cid = claimId(eid, classification.claim_kind, classification.content);
 
   // Fold onto an existing claim if it is already present (replay / duplicate content).
-  const existing = model.getClaim(cid);
+  let existing = model.getClaim(cid);
   if (existing) {
+    // A claim imported under the OLD floor is stranded at `proposed` forever: a replay would
+    // otherwise merge onto it and leave it unreadable, so a store migrated before this change
+    // would never benefit from it. Upgrading here applies the same rule a fresh import gets —
+    // grounded gets evidence and becomes verified — rather than grandfathering the old policy.
+    if (existing.trust_state === "proposed" && classification.trust_state === "verified") {
+      const links = groundingEvidence(model, packet, repositoryId, timestamp);
+      if (links.length) {
+        model.attachEvidence(existing.claim_id, links);
+        existing = model.transitionClaim(existing.claim_id, "verified", "legacy-import");
+      }
+    }
     recordMigration(model, {
       legacy_packet_id: packet.id,
       source_fingerprint: fingerprint,
@@ -315,10 +391,15 @@ export function importPacket(
     created_at: packet.created_at || timestamp,
     updated_at: timestamp,
   };
-  // No evidence links: a legacy packet is not re-checkable ground truth, so nothing here can carry a
-  // claim to verified. createClaim's honesty gate would in any case reject a verified/approved claim
-  // without backing; the floored trust makes that impossible by construction.
-  const created = model.createClaim(claim, []);
+  // A packet's cited paths ARE its evidence — that is what makes it grounded, and grounding is the
+  // surviving gate now that approval is gone. Each cited path becomes an evidence row so a `verified`
+  // claim is backed by something re-checkable, rather than asserted. createClaim enforces this: it
+  // refuses to persist `verified` with no verified supporting evidence, which is why an ungrounded
+  // packet (no paths -> no evidence) can only ever be `proposed`.
+  const evidenceLinks = classification.trust_state === "verified"
+    ? groundingEvidence(model, packet, repositoryId, timestamp)
+    : [];
+  const created = model.createClaim(claim, evidenceLinks);
 
   recordMigration(model, {
     legacy_packet_id: packet.id,
