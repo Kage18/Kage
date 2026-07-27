@@ -4269,6 +4269,20 @@ function packetFeedbackScore(packet: MemoryPacket): number {
   return Number(quality.votes_up ?? 0) * 2 - Number(quality.votes_down ?? 0) * 3 - Number(quality.reports_stale ?? 0) * 4;
 }
 
+// A packet Kage derived from the repo itself — a package.json transcription, a repo
+// map — is a fact about the code, not something a teammate decided. Presenting it as
+// "Team memory: …" attributed to whoever ran the installer overstates its provenance
+// on the very first recall a new user sees.
+export function isGeneratedRepoFact(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): boolean {
+  if (packet.type === "repo_map") return true;
+  if (Array.isArray(packet.tags) && packet.tags.includes("bootstrap")) return true;
+  return ((packet.quality ?? {}) as Record<string, unknown>).reviewer === "kage-indexer";
+}
+
+export function memoryProvenanceLabel(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): string {
+  return isGeneratedRepoFact(packet) ? "Repo fact (generated):" : "Team memory:";
+}
+
 function recallQualityScore(packet: MemoryPacket): number {
   const stored = Number(((packet.quality ?? {}) as Record<string, unknown>).score);
   if (Number.isFinite(stored)) return Math.max(0, Math.min(10, stored / 10));
@@ -4369,7 +4383,14 @@ function codeAnchorTokens(text: string): Set<string> {
 // Symbol kinds that make meaningful anchors. Constants are allowed only when
 // the name itself is code-shaped (contains an underscore after lowercasing) —
 // a constant literally named "verified" is a prose-word collision, not a handle.
-const ANCHOR_SYMBOL_KINDS = new Set(["function", "class", "method", "interface", "type", "enum"]);
+// Must be drawn from the kinds extractSymbols actually emits — "function" | "class" |
+// "method" | "constant" | "route" | "test". The previous set listed interface/type/enum,
+// which are never emitted, and omitted "constant", which is the most common kind in the
+// store by a wide margin (2089 anchors vs 427 functions). camelCase consts like
+// `defaultGateways` were therefore unanchorable, while SCREAMING_SNAKE ones slipped
+// through only via the underscore escape below — so whether a memory anchored to a
+// constant came down to how the constant happened to be spelled.
+const ANCHOR_SYMBOL_KINDS = new Set(["function", "class", "method", "constant"]);
 
 // current-file symbol span hashes, keyed by `${nameLower}\0${kind}` -> [sha256...].
 // Cached by mtime+size: extraction only runs when a file actually changed.
@@ -4635,11 +4656,27 @@ function changedPathsFromStaleReasons(reasons: string[]): string[] {
   }));
 }
 
-function observationTouchedPaths(observations: ObservationRecord[]): string[] {
+// Agent hooks report file changes as ABSOLUTE host paths — every Claude Code
+// file_change carries tool_input.file_path, and an audit of this repo's own store
+// found 36 of 36 observed paths absolute, none relative. Simply stripping the leading
+// slash turned `/Users/you/.claude/plans/x.md` into `Users/you/.claude/plans/x.md`,
+// which reads as repo-relative: unrelated host files were recorded as touched and then
+// demanded memory reconciliation for work that never happened in this repository.
+// Resolve against the project and drop anything landing outside it.
+function observedRepoPath(projectDir: string, rawPath: string): string | null {
+  const normalized = rawPath.replace(/\\/g, "/").trim();
+  if (!normalized) return null;
+  const absolute = isAbsolute(normalized) ? normalized : join(projectDir, normalized);
+  const relativePath = relative(projectDir, absolute).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || isAbsolute(relativePath)) return null;
+  return meaningfulMemoryPath(relativePath) ? relativePath : null;
+}
+
+function observationTouchedPaths(projectDir: string, observations: ObservationRecord[]): string[] {
   return unique(observations
     .filter((event) => event.type === "file_change" && typeof event.path === "string" && event.path.trim().length > 0)
-    .map((event) => event.path!.replace(/\\/g, "/").replace(/^\/+/, ""))
-    .filter(meaningfulMemoryPath)
+    .map((event) => observedRepoPath(projectDir, event.path!))
+    .filter((path): path is string => path !== null)
   ).sort();
 }
 
@@ -4663,12 +4700,12 @@ function reconciliationInstruction(items: MemoryReconciliationItem[]): string {
 export function kageMemoryReconciliation(projectDir: string, options: { sessionId?: string; limit?: number } = {}): MemoryReconciliationReport {
   ensureMemoryDirs(projectDir);
   const observations = loadObservations(projectDir, options.sessionId);
-  const touchedPaths = observationTouchedPaths(observations);
+  const touchedPaths = observationTouchedPaths(projectDir, observations);
   const sessionIdsByPath = new Map<string, Set<string>>();
   for (const event of observations) {
     if (event.type !== "file_change" || !event.path) continue;
-    const path = event.path.replace(/\\/g, "/").replace(/^\/+/, "");
-    if (!meaningfulMemoryPath(path)) continue;
+    const path = observedRepoPath(projectDir, event.path);
+    if (!path) continue;
     const sessions = sessionIdsByPath.get(path) ?? new Set<string>();
     sessions.add(event.session_id);
     sessionIdsByPath.set(path, sessions);
@@ -8794,6 +8831,81 @@ function writeScipTypescriptIndex(projectDir: string): CodeIndexArtifactResult |
   }
 }
 
+export interface CodeIndexerSpec {
+  id: string;
+  languages: string[];
+  // The binary that produces a SCIP index for these languages.
+  command: string;
+  args: (projectDir: string) => string[];
+  installHint: string;
+}
+
+export interface CodeIndexerStatusEntry {
+  id: string;
+  languages: string[];
+  state: "installed" | "available" | "unsupported";
+  install_hint: string;
+}
+
+export interface CodeIndexerStatusReport {
+  project_dir: string;
+  indexers: CodeIndexerStatusEntry[];
+  // Always false. Stated explicitly because the one thing a registry like this must never do is
+  // install a toolchain behind the user's back.
+  installed_anything: false;
+}
+
+// Compiler-exact symbols come from indexers, not from parsers we write. `parseScipJsonObject` is
+// already language-agnostic and the precedence ladder already prefers scip > lsif > lsp >
+// tree-sitter > ts-ast > generic — but only ONE indexer was ever run, so every language other than
+// TypeScript fell to the regex tier no matter what the developer had installed.
+//
+// Each entry is a subprocess invocation, not an extractor: the work of resolving a call belongs to
+// the language's own toolchain, which does it exactly rather than heuristically.
+export const CODE_INDEXERS: readonly CodeIndexerSpec[] = [
+  { id: "scip-typescript", languages: ["typescript", "javascript"], command: "scip-typescript",
+    args: (dir) => existsSync(join(dir, "tsconfig.json")) ? ["index"] : ["index", "--infer-tsconfig"],
+    installHint: "npm i -g @sourcegraph/scip-typescript" },
+  { id: "scip-python", languages: ["python"], command: "scip-python",
+    args: () => ["index", "."], installHint: "npm i -g @sourcegraph/scip-python" },
+  { id: "scip-ruby", languages: ["ruby"], command: "scip-ruby",
+    args: () => ["--index-file=index.scip"], installHint: "gem install scip-ruby" },
+  { id: "scip-java", languages: ["java", "kotlin", "scala"], command: "scip-java",
+    args: () => ["index"], installHint: "cs install scip-java" },
+  { id: "scip-dotnet", languages: ["csharp"], command: "scip-dotnet",
+    args: () => ["index"], installHint: "dotnet tool install --global scip-dotnet" },
+  { id: "scip-clang", languages: ["cpp"], command: "scip-clang",
+    args: () => ["--compdb-path=compile_commands.json"], installHint: "see github.com/sourcegraph/scip-clang" },
+  { id: "rust-analyzer", languages: ["rust"], command: "rust-analyzer",
+    args: () => ["scip", "."], installHint: "rustup component add rust-analyzer" },
+  { id: "scip-go", languages: ["go"], command: "scip-go",
+    args: () => ["."], installHint: "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest" },
+];
+
+// Which languages this repo actually contains, from the structural scan rather than a guess.
+function projectLanguages(projectDir: string): Set<string> {
+  const languages = new Set<string>();
+  try {
+    for (const file of scanStructuralFiles(projectDir).files) languages.add(codeLanguage(file));
+  } catch { /* an unscannable repo reports no languages rather than throwing */ }
+  return languages;
+}
+
+// Report only. Never installs, never blocks: a missing indexer means the file falls one rung down
+// the precedence ladder exactly as it does today, and the user is told what would sharpen it.
+export function codeIndexerStatus(projectDir: string): CodeIndexerStatusReport {
+  const present = projectLanguages(projectDir);
+  const indexers = CODE_INDEXERS
+    .filter((spec) => spec.languages.some((language) => present.has(language)))
+    .map((spec): CodeIndexerStatusEntry => ({
+      id: spec.id,
+      languages: spec.languages.filter((language) => present.has(language)),
+      state: executableOnPath(projectDir, spec.command) ? "installed" : "available",
+      install_hint: spec.installHint,
+    }));
+  return { project_dir: projectDir, indexers, installed_anything: false };
+}
+
 export function writeCodeIndex(projectDir: string): CodeIndexArtifactResult {
   const scip = writeScipTypescriptIndex(projectDir);
   if (scip?.ok) return scip;
@@ -11542,11 +11654,12 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
         : entry.packet.type === "convention" ? "convention since"
         : "noted";
       const cited = entry.packet.paths.slice(0, 3).join(", ");
-      const author = entry.packet.author_name ? ` by ${entry.packet.author_name}` : "";
+      const generated = isGeneratedRepoFact(entry.packet);
+      const author = !generated && entry.packet.author_name ? ` by ${entry.packet.author_name}` : "";
       const meta = `${verb}${when ? ` ${when}` : ""}${author}${cited ? ` · ${cited}` : ""}`;
       return [
         "",
-        `${index + 1}. Team memory: ${entry.packet.title}`,
+        `${index + 1}. ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
         `   ${entry.packet.summary}`,
         ...(meta.trim() ? [`   (${meta})`] : []),
         ...(contested
@@ -21829,6 +21942,52 @@ export interface MergePacketResult {
   winner: "ours" | "theirs" | null;
   detail: string;
   preserved_path?: string;
+  /** Fields both sides changed away from base differently — the only places a side actually lost. */
+  conflicted_fields?: string[];
+}
+
+// A field-level three-way merge over two packet versions and their common ancestor.
+//
+// Whole-file newest-wins discarded a teammate's work whenever two people touched the same packet,
+// even when they touched DIFFERENT fields — one refining the summary while the other explained the
+// cause is not a conflict, but the old driver silently kept only the newer file. Per field:
+//   - only one side moved       -> take that side (no conflict; both edits survive)
+//   - both moved, same value    -> take it (agreement is not a conflict)
+//   - both moved, different     -> a real conflict; newest updated_at wins THAT field and the field
+//                                  is reported so the loss is visible rather than silent
+function mergePacketObjects(
+  base: Partial<MemoryPacket>,
+  ours: Partial<MemoryPacket>,
+  theirs: Partial<MemoryPacket>,
+  newest: "ours" | "theirs",
+): { merged: Record<string, unknown>; conflicted: string[] } {
+  const merged: Record<string, unknown> = {};
+  const conflicted: string[] = [];
+  const asRecord = (value: Partial<MemoryPacket>): Record<string, unknown> => value as Record<string, unknown>;
+  const [baseRec, oursRec, theirsRec] = [asRecord(base), asRecord(ours), asRecord(theirs)];
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  for (const key of unique([...Object.keys(oursRec), ...Object.keys(theirsRec), ...Object.keys(baseRec)])) {
+    const [b, o, t] = [baseRec[key], oursRec[key], theirsRec[key]];
+    const oursMoved = !same(o, b);
+    const theirsMoved = !same(t, b);
+    if (oursMoved && theirsMoved && !same(o, t)) {
+      conflicted.push(key);
+      merged[key] = newest === "ours" ? o : t;
+    } else if (oursMoved) {
+      merged[key] = o;
+    } else if (theirsMoved) {
+      merged[key] = t;
+    } else {
+      merged[key] = same(o, b) ? (key in oursRec ? o : t) : o;
+    }
+    if (merged[key] === undefined) delete merged[key];
+  }
+  // The merge itself is an update, and `updated_at` drives recency everywhere downstream, so it must
+  // be the newer of the two rather than whichever side happened to win the last field.
+  const recency = [packetRecency(ours), packetRecency(theirs)].sort();
+  if (recency[1]) merged.updated_at = recency[1];
+  return { merged, conflicted };
 }
 
 export function mergePacketFiles(oursPath: string, basePath: string, theirsPath: string, projectDir?: string): MergePacketResult {
@@ -21872,8 +22031,19 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
   }
   const winning = winner === "ours" ? ours! : theirs!;
   const losing = winner === "ours" ? theirs : ours;
+  // With a readable base and BOTH sides present, merge field by field so non-conflicting edits from
+  // each teammate survive. Anything less (a missing side, an unreadable base) falls back to the
+  // whole-file winner, which is the old behaviour and still correct for a genuine race.
+  const baseSide = readSide(basePath);
+  let conflictedFields: string[] | undefined;
+  let mergedRaw: string | null = null;
+  if (ours && theirs && baseSide) {
+    const { merged, conflicted } = mergePacketObjects(baseSide.packet, ours.packet, theirs.packet, winner);
+    conflictedFields = conflicted;
+    mergedRaw = `${JSON.stringify(merged, null, 2)}\n`;
+  }
   try {
-    writeFileSync(oursPath, winning.raw, "utf8");
+    writeFileSync(oursPath, mergedRaw ?? winning.raw, "utf8");
   } catch (error) {
     return { ok: false, winner: null, detail: `kage merge-packet: failed to write merge result: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -21884,7 +22054,10 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
   // vanish with no trace. Preserve it as a review artifact instead of discarding it;
   // best-effort only, and never blocks the merge if writing it fails.
   let preservedPath: string | undefined;
-  if (losing && losing.raw !== winning.raw && projectDir) {
+  // With a real three-way merge, only a genuine field conflict actually loses anything — so preserve
+  // the losing side when there was one, or when we could not merge and fell back to whole-file.
+  const lostSomething = mergedRaw === null || (conflictedFields?.length ?? 0) > 0;
+  if (lostSomething && losing && losing.raw !== winning.raw && projectDir) {
     try {
       const dir = conflictsDir(projectDir);
       mkdirSync(dir, { recursive: true });
@@ -21895,12 +22068,17 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
       preservedPath = file;
     } catch { /* best-effort preservation; a failure here must not fail the merge */ }
   }
+  const detail = mergedRaw === null
+    ? `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`
+    : conflictedFields && conflictedFields.length
+      ? `kage merge-packet: merged both sides; ${conflictedFields.length} field(s) conflicted (${conflictedFields.join(", ")}) and took the ${winner} side.`
+      : "kage merge-packet: merged both sides field by field; no field conflicted, so no edit was lost.";
   return {
     ok: true,
     winner,
-    detail: `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`
-      + (preservedPath ? ` Losing side diverged and was preserved for review: ${preservedPath}` : ""),
+    detail: detail + (preservedPath ? ` Losing side preserved for review: ${preservedPath}` : ""),
     ...(preservedPath ? { preserved_path: preservedPath } : {}),
+    ...(conflictedFields ? { conflicted_fields: conflictedFields } : {}),
   };
 }
 
@@ -22470,6 +22648,72 @@ export function generateSkills(
 // supersede churn when code changed but the memory's claim did not. Refuses
 // when ALL cited evidence is gone — that memory needs supersede or stale, not
 // a rubber stamp.
+export interface ReanchorResult {
+  ok: boolean;
+  project_dir: string;
+  refreshed: string[];
+  skipped_changed: string[];
+  errors: string[];
+}
+
+// Sharpen grounding from whole-file to symbol level for packets that predate an anchor
+// improvement — WITHOUT re-asserting anything. The safety rule is exact: only when every
+// cited file is byte-identical to the stored fingerprint, because then the symbols
+// computed now are provably the symbols that existed at capture. If a file has already
+// moved, symbols computed from today's source would describe code the author never saw,
+// and stamping that as grounding would launder an unchecked claim — so those are
+// refused and left to reverifyMemory, which demands evidence.
+//
+// `last_verified_at` is deliberately untouched: nothing was verified, so the TTL clock
+// must not restart. Only `path_fingerprints` and `updated_at` move.
+export function reanchorUnchangedPackets(projectDir: string): ReanchorResult {
+  ensureMemoryDirs(projectDir);
+  const result: ReanchorResult = { ok: true, project_dir: projectDir, refreshed: [], skipped_changed: [], errors: [] };
+  for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
+    const packet = entry.packet;
+    const stored = packetStoredPathFingerprints(packet);
+    if (!stored.length) continue;
+    const anchorable = stored.filter((print) => pathSupportsSymbolAnchors(print.path));
+    if (!anchorable.some((print) => !(print.symbols && print.symbols.length))) continue;
+
+    const storedShas = new Map(stored.map((print) => [print.path, print.sha256]));
+    const presentPaths = stored.map((print) => print.path).filter((path) => existsSync(join(projectDir, path)));
+    if (!presentPaths.length) continue;
+
+    const next = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+    const nextByPath = new Map(next.map((print) => [print.path, print]));
+    // Per PATH, not per packet: a sibling file moving says nothing about whether THIS
+    // file's symbols are still the ones the author anchored to. Unchanged paths adopt
+    // the sharper fingerprint; changed paths keep the stored one so they stay stale.
+    let changedHere = false;
+    const merged = stored.map((print) => {
+      const fresh = nextByPath.get(print.path);
+      if (!fresh) return print;
+      if (fresh.sha256 !== print.sha256) {
+        changedHere = true;
+        return print;
+      }
+      return fresh;
+    });
+    if (changedHere) result.skipped_changed.push(packet.id);
+
+    const priorAnchorCount = stored.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    const nextAnchorCount = merged.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    if (nextAnchorCount <= priorAnchorCount) continue;
+
+    const freshness = { ...(packet.freshness ?? {}) } as Record<string, unknown>;
+    freshness.path_fingerprints = merged;
+    try {
+      writeJson(entry.path, { ...packet, freshness, updated_at: nowIso() });
+      result.refreshed.push(packet.id);
+    } catch (error) {
+      result.ok = false;
+      result.errors.push(`${packet.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return result;
+}
+
 export function reverifyMemory(projectDir: string, packetId: string, options: { evidence?: string; verifiedBy?: string } = {}): ReverifyMemoryResult {
   ensureMemoryDirs(projectDir);
   const result: ReverifyMemoryResult = {
@@ -22902,6 +23146,84 @@ export interface WorkItemSummary {
   claimed_by: string | null;
   status: MemoryStatus;
   updated_at: string;
+}
+
+export interface WorkItemBrief {
+  ok: boolean;
+  project_dir: string;
+  work_item: { id: string; title: string; body: string } | null;
+  stage: WorkStage | null;
+  claimed_by: string | null;
+  /** Files the proposal cites plus what the code graph says depends on them. */
+  blast_radius: string[];
+  /** The assembled, agent-ready text. */
+  brief: string;
+  errors: string[];
+}
+
+// The missing half of the work-item pipeline. `kage gate list` shows an agent WHAT to pick up, and
+// the stage machine tracks where it got to — but nothing ever told the agent what the team already
+// knows about the code it is about to touch. So a claimed proposal started from zero, which is the
+// exact rediscovery this product exists to prevent.
+//
+// Everything here is assembled from existing parts (recall + risk + the packet store) rather than a
+// new store: a brief is a QUERY, not a document to maintain.
+export function workItemBrief(projectDir: string, packetId: string): WorkItemBrief {
+  ensureMemoryDirs(projectDir);
+  const result: WorkItemBrief = {
+    ok: false, project_dir: projectDir, work_item: null, stage: null, claimed_by: null,
+    blast_radius: [], brief: "", errors: [],
+  };
+  const packet = loadPacketsFromDir(packetsDir(projectDir)).find((entry) => entry.id === packetId);
+  if (!packet) {
+    result.errors.push(`Work item not found: ${packetId}`);
+    return result;
+  }
+  if (packet.type !== "proposal") {
+    result.errors.push(`${packetId} is a ${packet.type}, not a work item. Only proposals are briefed.`);
+    return result;
+  }
+  result.work_item = { id: packet.id, title: packet.title, body: packet.body };
+  result.stage = packet.stage ?? "proposed";
+  result.claimed_by = packet.claimed_by ?? null;
+
+  // What the team knows that bears on this work. Query by the proposal's own words so the brief
+  // reflects the task, not the whole store.
+  const recalled = recall(projectDir, `${packet.title}\n${packet.summary}`, 6)
+    .results.filter((entry) => entry.packet.id !== packet.id);
+
+  const cited = packet.paths.filter((path) => meaningfulMemoryPath(path));
+  let risk: KageRiskReport | null = null;
+  try { risk = kageRisk(projectDir, cited); } catch { /* risk is advisory; a brief without it still helps */ }
+  result.blast_radius = unique([
+    ...cited,
+    ...Object.values(risk?.targets ?? {}).flatMap((target) => target.dependents ?? []),
+  ]);
+
+  result.brief = [
+    `# Work item: ${packet.title}`,
+    "",
+    packet.body,
+    "",
+    `Stage: ${result.stage}${result.claimed_by ? ` · claimed by ${result.claimed_by}` : ""}`,
+    "",
+    "## What the team already knows about this code",
+    ...(recalled.length
+      ? recalled.flatMap((entry) => [
+          "",
+          `- ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
+          `  ${entry.packet.summary}`,
+          ...(entry.packet.paths.length ? [`  (${entry.packet.paths.slice(0, 3).join(", ")})`] : []),
+        ])
+      : ["", "_No prior memory cites this code. You are the first — capture what you learn._"]),
+    "",
+    "## Blast radius",
+    ...(result.blast_radius.length
+      ? result.blast_radius.slice(0, 20).map((path) => `- ${path}`)
+      : ["_The proposal cites no code yet; name the files it touches before claiming it._"]),
+  ].join("\n");
+  result.ok = true;
+  return result;
 }
 
 export function listWorkItems(projectDir: string, options: { stage?: WorkStage } = {}): WorkItemSummary[] {
