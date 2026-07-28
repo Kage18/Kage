@@ -70,6 +70,50 @@ a {
   }
 }
 
+/* Form controls. There were NO element-level styles for input or button, so every control
+   fell back to the browser default — a white box with square corners — which read as broken
+   against the dark theme and disagreed with the controls that did have classes. Styling the
+   ELEMENTS rather than adding another class means a control cannot be added without picking
+   up the theme. */
+
+input,
+select,
+textarea {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  max-width: 100%;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-muted);
+}
+
+button {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-neutral-tint);
+}
+
+/* A disabled control must LOOK unavailable, not merely refuse the click. */
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* ---- App shell layout ---- */
 
 .kage-app {

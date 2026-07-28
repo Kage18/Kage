@@ -39,6 +39,8 @@ interface ReviewQueuePageProps {
   actor: string;
   onDecide: (item: ReviewItemDto, decision: ReviewDecisionInput) => void;
   lastResult?: ReviewMutationFeedback | null;
+  /** Absent in read-only renders; the field then simply does not change. */
+  onActorChange?: (actor: string) => void;
 }
 
 // A human, title-cased label for an item, derived from its entity slug (falling back to the claim
@@ -275,13 +277,34 @@ function ReviewItemCard({
   );
 }
 
-export function ReviewQueuePage({ items, actor, onDecide, lastResult }: ReviewQueuePageProps): React.ReactElement {
+export function ReviewQueuePage({
+  items,
+  actor,
+  onActorChange,
+  onDecide,
+  lastResult,
+}: ReviewQueuePageProps): React.ReactElement {
   return (
     <section aria-label="Review queue">
-      <h1>Review queue</h1>
-      <p className="muted">
-        Acting as <strong>{actor}</strong>. Every decision is recorded under this identity.
-      </p>
+      {/* The identity control belongs INSIDE the header, under the title. Hoisted above the
+          h1 by its container, it read as a stray widget floating above the page, and the
+          identity was then stated twice — once as a control and once as prose. */}
+      <header className="page-header">
+        <h1>Review queue</h1>
+        <div className="entity-card-header">
+          <label className="muted" htmlFor="review-acting-as">
+            Acting as
+          </label>
+          <input
+            id="review-acting-as"
+            type="text"
+            value={actor}
+            onChange={(event) => onActorChange?.(event.target.value)}
+            aria-label="Acting as"
+          />
+          <span className="muted">every decision is recorded under this identity</span>
+        </div>
+      </header>
       {items.length === 0 ? (
         <p className="review-empty">No items are awaiting review.</p>
       ) : (

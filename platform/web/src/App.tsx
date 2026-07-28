@@ -278,15 +278,6 @@ function ReviewQueueContainer({ api }: { api: KageApiClient }): React.ReactEleme
 
   return (
     <div className="review-container">
-      <div className="review-actor">
-        <label htmlFor="review-acting-as">Acting as</label>
-        <input
-          id="review-acting-as"
-          type="text"
-          value={actor}
-          onChange={(event) => setActor(event.target.value)}
-        />
-      </div>
       {items === null && error === null && (
         <p role="status" aria-live="polite">
           Loading the review queue…
@@ -294,7 +285,7 @@ function ReviewQueueContainer({ api }: { api: KageApiClient }): React.ReactEleme
       )}
       {error !== null && <p role="alert">The review queue is unavailable: {error}</p>}
       {items !== null && (
-        <ReviewQueuePage items={items} actor={actor} onDecide={onDecide} lastResult={feedback} />
+        <ReviewQueuePage items={items} actor={actor} onActorChange={setActor} onDecide={onDecide} lastResult={feedback} />
       )}
     </div>
   );
