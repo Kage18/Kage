@@ -7,6 +7,7 @@ import type {
   AttentionQueueDto,
   WorkBoardDto,
   ProofReportDto,
+  WorkDetailDto,
   AttentionActionResultDto,
   CommandResultDto, TeamReportDto,
   EntityDetailDto,
@@ -53,6 +54,7 @@ export interface KageApiClient {
   attention(): Promise<AttentionQueueDto>;
   work(): Promise<WorkBoardDto>;
   proof(): Promise<ProofReportDto>;
+  workItem(id: string): Promise<WorkDetailDto>;
   reverify(ref: string, actor: string): Promise<AttentionActionResultDto>;
   command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto>;
   /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
@@ -131,6 +133,10 @@ export class KageApi implements KageApiClient {
 
   proof(): Promise<ProofReportDto> {
     return this.get<ProofReportDto>("/v2/proof");
+  }
+
+  workItem(id: string): Promise<WorkDetailDto> {
+    return this.get<WorkDetailDto>(`/v2/work/${encodeURIComponent(id)}`);
   }
 
   // A refusal (409) is a RESULT the operator needs to read — reverify declines to

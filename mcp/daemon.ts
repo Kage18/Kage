@@ -1232,6 +1232,20 @@ export async function startViewer(projectDir: string, options: { host?: string; 
         .catch((error) => json(res, 503, { ok: false, error: `proof unavailable: ${error instanceof Error ? error.message : String(error)}` }));
       return;
     }
+    // One work item in full. Kept separate from the board because the board is a glance and
+    // this is an audit — it costs a brief and a risk pass that the board must not pay per card.
+    if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/work/")) {
+      const workId = decodeURIComponent(requestUrl.pathname.slice("/v2/work/".length));
+      import("./vnext/orchestrator/work-detail.js")
+        .then(({ buildWorkDetail }) => {
+          const detail = buildWorkDetail(projectRoot, workId);
+          // A missing item is a 404, never an empty item rendered as if it existed.
+          if (!detail) { json(res, 404, { ok: false, error: `no work item: ${workId}` }); return; }
+          json(res, 200, detail);
+        })
+        .catch((error) => json(res, 503, { ok: false, error: `work detail unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
     // The command loop (tech design §13): the app never mutates state directly. It issues a
     // command, which is validated, appended to the log, and reduced — every surface then
     // re-derives from the same events the CLI writes.

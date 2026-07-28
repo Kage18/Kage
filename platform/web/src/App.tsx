@@ -5,6 +5,7 @@ import type { TeamReportDto,
   AttentionQueueDto,
   WorkBoardDto,
   ProofReportDto,
+  WorkDetailDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -25,6 +26,7 @@ import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
+import { WorkItemPage } from "./pages/WorkItemPage";
 import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
@@ -415,6 +417,21 @@ function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement
   );
 }
 
+function WorkItemContainer({ api, id }: { api: KageApiClient; id: string }): React.ReactElement {
+  const [state, setState] = useState<{ detail: WorkDetailDto | null; error: string | null }>({ detail: null, error: null });
+  useEffect(() => {
+    let live = true;
+    setState({ detail: null, error: null });
+    api.workItem(id)
+      .then((detail: WorkDetailDto) => { if (live) setState({ detail, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ detail: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api, id]);
+  if (state.error) return <p className="empty-state">Work item unavailable: {state.error}</p>;
+  if (!state.detail) return <p className="empty-state">Deriving…</p>;
+  return <WorkItemPage detail={state.detail} />;
+}
+
 function ProofContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ report: ProofReportDto | null; error: string | null }>({ report: null, error: null });
   useEffect(() => {
@@ -530,6 +547,8 @@ function RoutedPage({
       return <WorkContainer api={api} />;
     case "proof":
       return <ProofContainer api={api} />;
+    case "work-item":
+      return <WorkItemContainer api={api} id={route.id} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;

@@ -81,7 +81,9 @@ export function WorkPage({
                   </span>
                 ) : null}
               </div>
-              <h2>{card.title}</h2>
+              <h2>
+                <a href={`/app/work/${encodeURIComponent(card.work_id)}`}>{card.title}</a>
+              </h2>
 
               {card.knowledge.length ? (
                 <div>

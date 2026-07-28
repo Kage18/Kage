@@ -650,6 +650,32 @@ export interface WorkBoardDto {
   totals: Record<string, number>;
 }
 
+// One work item in full (orchestrator §8). The board answers "what should I pick up"; this
+// answers "why does it say that stage" — every transition names its evidence in readable terms.
+export interface StageStepDto {
+  stage: string;
+  at: string;
+  caused_by: string[];
+  evidence_label: string;
+}
+
+export interface WorkDetailDto {
+  work_id: string;
+  title: string;
+  body: string;
+  stage: string;
+  stored_stage: string;
+  claimed_by: string | null;
+  blast_paths: string[];
+  dependents: string[];
+  stage_log: StageStepDto[];
+  evidence: WorkEvidenceDto[];
+  weak_evidence: number;
+  estimate: WorkEstimateDto;
+  knowledge: Array<{ title: string; summary: string }>;
+  errors: string[];
+}
+
 // Acting on an attention item. Only `reverify` is exposed: it is the one queue action that
 // is a single decision. `supersede` needs a replacement packet chosen, and `retire` has no
 // kernel operation — the page says so rather than offering buttons that cannot work.

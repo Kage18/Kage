@@ -111,3 +111,13 @@ describe("navLinks", () => {
     }
   });
 });
+
+describe("work item detail", () => {
+  it("round-trips an id containing colons", () => {
+    const id = "repo:https-github-com-kage-core-kage:proposal:make-tenantlimit-configurable-1785";
+    expect(parseRoute(`/work/${encodeURIComponent(id)}`)).toEqual({ page: "work-item", id });
+    // The round trip is the property that matters: work ids are colon-delimited, so a route
+    // that encodes on the way out but not on the way in silently 404s every real item.
+    expect(parseRoute(routeToPath({ page: "work-item", id }))).toEqual({ page: "work-item", id });
+  });
+});

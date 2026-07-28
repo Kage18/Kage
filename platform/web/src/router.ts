@@ -11,6 +11,7 @@ export type Route =
   | { page: "attention" }
   | { page: "work" }
   | { page: "proof" }
+  | { page: "work-item"; id: string }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -112,6 +113,8 @@ export function parseRoute(input: string): Route {
       break;
     case "work":
       if (segments.length === 1) return { page: "work" };
+      // Work ids contain colons, so they arrive percent-encoded and are decoded by parseRoute.
+      if (segments.length === 2 && tail) return { page: "work-item", id: decodeURIComponent(tail) };
       break;
     case "proof":
       if (segments.length === 1) return { page: "proof" };
@@ -190,6 +193,8 @@ export function routeToPath(route: Route): string {
       return "/attention";
     case "work":
       return "/work";
+    case "work-item":
+      return `/work/${encodeURIComponent(route.id)}`;
     case "proof":
       return "/proof";
     case "overview":
