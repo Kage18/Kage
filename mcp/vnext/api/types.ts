@@ -579,3 +579,47 @@ export interface AttentionItemDto {
 export interface AttentionQueueDto {
   items: AttentionItemDto[];
 }
+
+// ── Work board (orchestrator §8) ─────────────────────────────────────────────
+// Stages are DERIVED from commands + git evidence; nothing here is user-editable state.
+export interface WorkEvidenceDto {
+  hash: string;
+  branch: string;
+  confidence: string;
+}
+
+export interface WorkEstimateDto {
+  radius_class: "S" | "M" | "L";
+  tokens_p50: number;
+  tokens_p90: number;
+  sessions_p50: number;
+  confidence: "matched" | "cold_start" | "none";
+  basis: string[];
+}
+
+export interface WorkCardDto {
+  work_id: string;
+  title: string;
+  stage: "proposed" | "claimed" | "building" | "done";
+  claimed_by: string | null;
+  blast_paths: string[];
+  evidence: WorkEvidenceDto[];
+  weak_evidence: number;
+  stage_log: Array<{ stage: string; at: string; caused_by: string[] }>;
+  estimate: WorkEstimateDto;
+  knowledge: Array<{ title: string; summary: string }>;
+}
+
+export interface WorkBoardDto {
+  project_dir: string;
+  derived_at: string;
+  items: WorkCardDto[];
+  totals: Record<string, number>;
+}
+
+export interface CommandResultDto {
+  ok: boolean;
+  error?: string;
+  work?: WorkBoardDto;
+  attention?: AttentionItemDto[];
+}

@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 
 export type Route =
   | { page: "attention" }
+  | { page: "work" }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -43,6 +44,7 @@ export interface NavLink {
 // navigation landmark and the router test asserts every href resolves to a real route.
 export const navLinks: NavLink[] = [
   { label: "Attention", href: "/attention" },
+  { label: "Work", href: "/work" },
   { label: "Overview", href: "/overview" },
   { label: "System Map", href: "/system-map" },
   { label: "Features", href: "/features" },
@@ -105,6 +107,9 @@ export function parseRoute(input: string): Route {
   switch (head) {
     case "attention":
       if (segments.length === 1) return { page: "attention" };
+      break;
+    case "work":
+      if (segments.length === 1) return { page: "work" };
       break;
     case "overview":
       if (segments.length === 1) return { page: "overview" };
@@ -178,6 +183,8 @@ export function routeToPath(route: Route): string {
   switch (route.page) {
     case "attention":
       return "/attention";
+    case "work":
+      return "/work";
     case "overview":
       return "/overview";
     case "system-map":

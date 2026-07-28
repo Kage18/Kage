@@ -13,6 +13,7 @@ describe("AppShell", () => {
     );
     for (const label of [
       "Attention",
+      "Work",
       "Overview",
       "System Map",
       "Features",

@@ -3,6 +3,7 @@ import type { KageApiClient } from "./api/client";
 import type { TeamReportDto,
   AttentionItemDto,
   AttentionQueueDto,
+  WorkBoardDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -22,6 +23,7 @@ import { BillingPage } from "./pages/BillingPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
+import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -341,6 +343,50 @@ const KNOWLEDGE_LABELS: Record<string, string> = {
   documents: "Documents",
 };
 
+// The command loop lives here: a click becomes a command, the response carries the
+// re-derived board, and the UI renders the consequence rather than an optimistic guess.
+function WorkContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [board, setBoard] = useState<WorkBoardDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+  const [actor, setActor] = useState("local-operator");
+
+  useEffect(() => {
+    let live = true;
+    api.work()
+      .then((next: WorkBoardDto) => { if (live) setBoard(next); })
+      .catch((cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { live = false; };
+  }, [api]);
+
+  const runCommand = useCallback((kind: string, workId: string) => {
+    setPending(workId);
+    setError(null);
+    api.command({ kind, work_id: workId, actor })
+      .then((result) => {
+        // A refused command (self-approval, unknown item) is reported verbatim: the gate
+        // did its job, and hiding the reason would teach the operator nothing.
+        if (!result.ok) { setError(result.error ?? "command refused"); return; }
+        if (result.work) setBoard(result.work);
+      })
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setPending(null));
+  }, [api, actor]);
+
+  if (error && !board) return <p className="empty-state">Work board unavailable: {error}</p>;
+  if (!board) return <p className="empty-state">Deriving…</p>;
+  return (
+    <WorkPage
+      board={board}
+      actor={actor}
+      onActorChange={setActor}
+      onCommand={runCommand}
+      pending={pending}
+      error={error}
+    />
+  );
+}
+
 function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ items: AttentionItemDto[] | null; error: string | null }>({ items: null, error: null });
   useEffect(() => {
@@ -452,6 +498,8 @@ function RoutedPage({
   switch (route.page) {
     case "attention":
       return <AttentionContainer api={api} />;
+    case "work":
+      return <WorkContainer api={api} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;

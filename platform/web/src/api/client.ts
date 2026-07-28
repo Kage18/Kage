@@ -4,7 +4,9 @@
 // wire shape is checked against the backend at build time.
 
 import type {
-  AttentionQueueDto, TeamReportDto,
+  AttentionQueueDto,
+  WorkBoardDto,
+  CommandResultDto, TeamReportDto,
   EntityDetailDto,
   EntityListDto,
   FeatureListDto,
@@ -47,6 +49,8 @@ export interface KageApiClient {
   features(): Promise<FeatureListDto>;
   components(): Promise<EntityListDto>;
   attention(): Promise<AttentionQueueDto>;
+  work(): Promise<WorkBoardDto>;
+  command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto>;
   /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
   knowledgeList(kind: string): Promise<EntityListDto>;
   knowledgeDetail(kind: string, slug: string): Promise<EntityDetailDto>;
@@ -115,6 +119,23 @@ export class KageApi implements KageApiClient {
 
   attention(): Promise<AttentionQueueDto> {
     return this.get<AttentionQueueDto>("/v2/attention");
+  }
+
+  work(): Promise<WorkBoardDto> {
+    return this.get<WorkBoardDto>("/v2/work");
+  }
+
+  // The command loop: the app never mutates state, it issues a decision. The response
+  // carries the re-derived board and queue so the UI shows the consequence, not a guess.
+  async command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto> {
+    const response = await fetch(`${this.baseUrl}/v2/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+      body: JSON.stringify(input),
+    });
+    const body = (await response.json()) as CommandResultDto;
+    if (!response.ok) return { ok: false, error: body.error ?? `command failed (${response.status})` };
+    return body;
   }
 
   knowledgeList(kind: string): Promise<EntityListDto> {

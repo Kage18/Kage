@@ -85,6 +85,7 @@ describe("navLinks", () => {
     // (routes still resolve for bookmarks).
     expect(navLinks.map((l) => l.label)).toEqual([
       "Attention",
+      "Work",
       "Overview",
       "System Map",
       "Features",

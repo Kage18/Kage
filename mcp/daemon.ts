@@ -1187,6 +1187,44 @@ export async function startViewer(projectDir: string, options: { host?: string; 
         .catch(() => json(res, 503, { ok: false, error: "attention derivation failed" }));
       return;
     }
+    // The Work board: derived stages + brief knowledge + estimates. Kernel-side like
+    // attention, so it works on any Node build.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/work") {
+      import("./vnext/orchestrator/board.js")
+        .then(({ buildWorkBoard }) => json(res, 200, buildWorkBoard(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // The command loop (tech design §13): the app never mutates state directly. It issues a
+    // command, which is validated, appended to the log, and reduced — every surface then
+    // re-derives from the same events the CLI writes.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/commands") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const kind = String(body.kind ?? "");
+          const workId = String(body.work_id ?? "");
+          const actor = String(body.actor ?? "").trim();
+          const note = body.note === undefined ? undefined : String(body.note);
+          if (!actor) { json(res, 400, { ok: false, error: "an actor is required — a command is someone's decision" }); return; }
+          const { appendCommandEvent } = await import("./vnext/orchestrator/events.js");
+          const { buildWorkBoard } = await import("./vnext/orchestrator/board.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          if (kind !== "task.claimed" && kind !== "task.released" && kind !== "gate.approved" && kind !== "gate.held") {
+            json(res, 400, { ok: false, error: `unknown command kind: ${kind}` });
+            return;
+          }
+          const event = appendCommandEvent(projectRoot, { kind, work_id: workId, actor, note });
+          // Answer with the re-derived state so the caller never guesses what the command did.
+          json(res, 200, { ok: true, event, work: buildWorkBoard(projectRoot), attention: attentionQueue(projectRoot) });
+        } catch (error) {
+          // Validation failures (self-approval, missing ids) are 409 — the command was
+          // understood and deliberately refused, which is not a server fault.
+          json(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
     if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/")) {
       void servePortalApi(projectRoot, requestUrl, res);
       return;
