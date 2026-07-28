@@ -8,6 +8,7 @@
 
 import { loadApprovedPackets, kageMemoryLifecycle } from "../../kernel.js";
 import { deriveWorkState, type DerivedWorkItem } from "./derive.js";
+import { cachedOpenPullRequestBranches } from "./pr-observer.js";
 
 export type AttentionKind =
   | "unclaimed_building"
@@ -140,7 +141,9 @@ function blastOverlap(a: DerivedWorkItem, b: DerivedWorkItem): string[] {
 export function loadAttentionInputs(projectDir: string): AttentionInputs {
   const packets = loadApprovedPackets(projectDir);
   const blastById = new Map(packets.map((packet) => [packet.id, packet.paths]));
-  const work = deriveWorkState(projectDir).items.map((item) =>
+  const work = deriveWorkState(projectDir, {
+    openPullRequestBranches: () => cachedOpenPullRequestBranches(projectDir),
+  }).items.map((item) =>
     attachBlast(item, blastById.get(item.work_id) ?? []),
   );
 

@@ -39,7 +39,9 @@ export async function createAppJwt(config: GitHubAppConfig, nowMs: number = Date
 }
 
 /** The subset of `fetch` this module needs, so tests can inject a fake transport. */
-export type Fetcher = (url: string, init?: { method?: string; headers?: Record<string, string> }) => Promise<{
+// `body` is part of the shape: a POST that cannot carry one silently drops its payload, which
+// is exactly how check runs shipped with no verdict in them.
+export type Fetcher = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
   ok: boolean;
   status: number;
   json(): Promise<unknown>;

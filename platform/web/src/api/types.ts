@@ -633,7 +633,7 @@ export interface WorkEstimateDto {
 export interface WorkCardDto {
   work_id: string;
   title: string;
-  stage: "proposed" | "claimed" | "building" | "done";
+  stage: "proposed" | "claimed" | "building" | "verifying" | "done";
   claimed_by: string | null;
   blast_paths: string[];
   evidence: WorkEvidenceDto[];

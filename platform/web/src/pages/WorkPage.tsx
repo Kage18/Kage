@@ -6,7 +6,7 @@
 import React from "react";
 import type { WorkBoardDto, WorkCardDto } from "../api/types";
 
-const STAGE_ORDER: Array<WorkCardDto["stage"]> = ["proposed", "claimed", "building", "done"];
+const STAGE_ORDER: Array<WorkCardDto["stage"]> = ["proposed", "claimed", "building", "verifying", "done"];
 
 function Estimate({ card }: { card: WorkCardDto }): React.ReactElement {
   const { estimate } = card;
@@ -121,7 +121,7 @@ export function WorkPage({
                     {pending === card.work_id ? "Claiming…" : "Claim"}
                   </button>
                 ) : null}
-                {card.stage === "claimed" || card.stage === "building" ? (
+                {card.stage === "claimed" || card.stage === "building" || card.stage === "verifying" ? (
                   <>
                     <button
                       type="button"

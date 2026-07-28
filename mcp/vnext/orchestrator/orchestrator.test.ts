@@ -188,6 +188,61 @@ test("the CLI path stays correct when the kernel already transitioned", () => {
 // `building` forever. Merging is observable: if the correlated commits are reachable from
 // the default branch, the work landed — no command, no click.
 
+// ── Verifying: the stage local git cannot see ───────────────────────────────
+// A branch with an open PR is in review, which is a different decision for a lead than
+// "still being written". Git alone cannot tell those apart — it needs a PR observer, so the
+// observer is injected here rather than shelling out to `gh` in a test.
+
+test("an open pull request on a correlated branch derives to verifying", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+  assert.equal(claimWorkItem(project, workId, "alice").ok, true);
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+
+  const branch = "feat/make-tenantlimit-configurable";
+  git(project, "checkout", "-qb", branch);
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 20;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: configurable limit\n\n[kage:${workId}]`);
+
+  // With no PR observer at all, the item is `building` — an absent observer costs derivation
+  // DEPTH, never correctness.
+  assert.equal(
+    deriveWorkState(project).items.find((entry) => entry.work_id === workId)?.derived_stage,
+    "building",
+  );
+
+  // With one, the same commits read as `verifying`.
+  const withPr = deriveWorkState(project, { openPullRequestBranches: () => new Set([branch]) });
+  const item = withPr.items.find((entry) => entry.work_id === workId);
+  assert.equal(item?.derived_stage, "verifying");
+  assert.ok(
+    item?.stage_log.some((step) => step.stage === "verifying" && step.caused_by.length > 0),
+    "the verifying step must name the PR branch that caused it",
+  );
+});
+
+test("a merged branch is done even while its pull request still reads open", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+  assert.equal(claimWorkItem(project, workId, "alice").ok, true);
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+
+  const branch = "feat/make-tenantlimit-configurable";
+  git(project, "checkout", "-qb", branch);
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 20;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: configurable limit\n\n[kage:${workId}]`);
+  git(project, "checkout", "-q", "main");
+  git(project, "merge", "-q", "--no-ff", "-m", "merge limit work", branch);
+
+  // A stale PR listing must never drag a shipped item backwards: the merge is the stronger,
+  // locally-verifiable fact and wins.
+  const item = deriveWorkState(project, { openPullRequestBranches: () => new Set([branch]) })
+    .items.find((entry) => entry.work_id === workId);
+  assert.equal(item?.derived_stage, "done");
+});
+
 test("an item whose commits are merged into the default branch derives to done", () => {
   const project = tempRepo();
   const workId = seedWorkItem(project);

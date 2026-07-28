@@ -17,7 +17,7 @@ import { loadApprovedPackets, type MemoryPacket } from "../../kernel.js";
 import { readCommandEvents, type CommandEvent } from "./events.js";
 import { correlateCommit, type Correlation, type WorkItemRef } from "./correlate.js";
 
-export type DerivedStage = "proposed" | "claimed" | "building" | "done";
+export type DerivedStage = "proposed" | "claimed" | "building" | "verifying" | "done";
 
 export interface StageStep {
   stage: DerivedStage;
@@ -126,10 +126,20 @@ function claimStep(workId: string, packet: MemoryPacket, commands: CommandEvent[
   return null;
 }
 
-export function deriveWorkState(projectDir: string): WorkStateProjection {
+export interface DeriveOptions {
+  /**
+   * Branch names with an open pull request. Injected so derivation stays a pure reduction and
+   * so a test never depends on a live `gh`. Omitted entirely when no PR observer is configured
+   * — which costs the `verifying` stage and nothing else.
+   */
+  openPullRequestBranches?: () => Set<string>;
+}
+
+export function deriveWorkState(projectDir: string, options: DeriveOptions = {}): WorkStateProjection {
   const proposals = loadApprovedPackets(projectDir).filter((packet) => packet.type === "proposal");
   const commands = readCommandEvents(projectDir);
   const commits = observedCommits(projectDir);
+  const openPrBranches = options.openPullRequestBranches?.() ?? null;
   const refs: WorkItemRef[] = proposals.map((packet) => ({ work_id: packet.id, blast_paths: packet.paths }));
 
   const items = proposals.map((packet): DerivedWorkItem => {
@@ -165,7 +175,23 @@ export function deriveWorkState(projectDir: string): WorkStateProjection {
       });
     }
 
+    // An open PR on a correlated branch means the work is in REVIEW, not still being written —
+    // a different decision for a lead. Git cannot see this, so it needs the PR observer; with
+    // no observer the item simply stays `building`.
+    const reviewing = openPrBranches
+      ? correlated.filter((entry) => openPrBranches.has(entry.branch))
+      : [];
+    if (reviewing.length && !merged.length) {
+      log.push({
+        stage: "verifying",
+        at: commits.find((commit) => commit.hash === reviewing[0].hash)?.at ?? claimed?.at ?? packet.created_at,
+        caused_by: reviewing.map((entry) => `pr:${entry.branch}`),
+      });
+    }
+
     // Merging is the honest end of the loop: the work is in the default branch, so it shipped.
+    // Checked after `verifying` and gated on `!merged` above, so a stale PR listing can never
+    // drag a shipped item backwards — the merge is the stronger, locally-verifiable fact.
     // No command is required, because nothing about a merge needs a human to assert it.
     if (merged.length) {
       log.push({

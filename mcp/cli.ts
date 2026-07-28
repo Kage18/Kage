@@ -8,6 +8,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { daemonDoctor, readDaemonStatus, startDaemon, startViewer, stopDaemon } from "./daemon.js";
 import { appendCommandEvent } from "./vnext/orchestrator/events.js";
 import { deriveWorkState } from "./vnext/orchestrator/derive.js";
+import { cachedOpenPullRequestBranches } from "./vnext/orchestrator/pr-observer.js";
 import { attentionQueue } from "./vnext/orchestrator/attention.js";
 import { planIntent } from "./vnext/plan/plan.js";
 import {
@@ -2545,7 +2546,9 @@ async function main(): Promise<void> {
     // The derived board (orchestrator §5-§6): stages computed from commands + git
     // evidence, never from clicks, with the attention queue on top. Read-only by design.
     const project = projectArg(args);
-    const state = deriveWorkState(project);
+    const state = deriveWorkState(project, {
+      openPullRequestBranches: () => cachedOpenPullRequestBranches(project),
+    });
     const attention = attentionQueue(project);
     if (args.includes("--json")) {
       console.log(JSON.stringify({ ...state, attention }, null, 2));

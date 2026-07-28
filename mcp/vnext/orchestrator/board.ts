@@ -5,6 +5,7 @@
 
 import { workItemBrief, loadApprovedPackets, type MemoryPacket } from "../../kernel.js";
 import { deriveWorkState, type DerivedStage } from "./derive.js";
+import { cachedOpenPullRequestBranches } from "./pr-observer.js";
 import { estimateWork, radiusClass, type Estimate, type ReceiptSample } from "./estimate.js";
 
 export interface WorkCardDto {
@@ -40,7 +41,9 @@ function receiptHistory(): ReceiptSample[] {
 }
 
 export function buildWorkBoard(projectDir: string): WorkBoardDto {
-  const derived = deriveWorkState(projectDir);
+  const derived = deriveWorkState(projectDir, {
+    openPullRequestBranches: () => cachedOpenPullRequestBranches(projectDir),
+  });
   const packets = new Map<string, MemoryPacket>(
     loadApprovedPackets(projectDir).map((packet) => [packet.id, packet]),
   );

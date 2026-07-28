@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { valueSummary } from "../../kernel.js";
 import { deriveWorkState, type DerivedWorkItem } from "./derive.js";
 import { attentionQueue } from "./attention.js";
+import { cachedOpenPullRequestBranches } from "./pr-observer.js";
 
 export interface ProofMetricDto {
   id: string;
@@ -78,7 +79,9 @@ function valueTotals(projectDir: string): ValueTotals | null {
 }
 
 export function buildProof(projectDir: string): ProofReportDto {
-  const board = deriveWorkState(projectDir);
+  const board = deriveWorkState(projectDir, {
+    openPullRequestBranches: () => cachedOpenPullRequestBranches(projectDir),
+  });
   const totals = valueTotals(projectDir);
 
   const measured = board.items
