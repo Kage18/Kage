@@ -546,3 +546,27 @@ node benchmarks/swebench-kage-context.mjs \
   --top-k 10 \
   --out /tmp/kage-swebench-context.json
 ```
+
+## Code-graph head-to-head (`code-graph-headtohead.mjs`)
+
+Kage's code graph against any other code knowledge graph, on the SAME repository. Written
+because "our graph is better than theirs" was asserted repeatedly in this project and never
+measured once.
+
+```bash
+node benchmarks/code-graph-headtohead.mjs            # this repo
+node benchmarks/code-graph-headtohead.mjs --json     # machine-readable
+```
+
+The metrics are deliberately chosen to be able to make Kage look bad:
+
+| Metric | Why this one |
+|---|---|
+| `parse_coverage` | Fraction of source files parsed by a REAL parser rather than the metadata fallback. A metadata-only file is a filename in a list, not a node in a graph — counting it is how an index gets to call itself a graph. |
+| `edge_resolution` | Fraction of call edges whose **both** ends resolve to a known symbol. An edge with a dangling end cannot be traversed, so it cannot answer "what calls this". Reported separately from raw edge count, because raw counts reward emitting junk. |
+| `symbols_per_file` | Extraction density on files that actually parsed. |
+| `build_seconds` | Cold build wall clock. |
+
+**A competitor's numbers are never estimated or read off its documentation.** If the tool is
+not installed, its column reads `not measured` and names the command that would produce it —
+the same rule the product's own Proof page follows.
