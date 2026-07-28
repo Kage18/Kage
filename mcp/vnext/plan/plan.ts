@@ -30,13 +30,27 @@ export interface PlanResult {
 // item — a change spanning `src/api` and `platform/web` is two units of work with an
 // ordering question, not one ticket. Deliberately simple and inspectable; dependency-graph
 // clustering (design §7 step 4) refines this, it does not replace its honesty.
+// Root-level files (README.md, package.json) clustered to "." and produced work items
+// literally titled "… — .", which tells a reader nothing. They are repository-root work, and
+// saying so costs one word.
+const ROOT_CLUSTER = "repo root";
+
 function clusterPaths(paths: string[]): Map<string, string[]> {
   const clusters = new Map<string, string[]>();
   for (const path of paths) {
-    const top = path.includes("/") ? path.slice(0, path.indexOf("/")) : ".";
+    const top = path.includes("/") ? path.slice(0, path.indexOf("/")) : ROOT_CLUSTER;
     clusters.set(top, [...(clusters.get(top) ?? []), path]);
   }
   return clusters;
+}
+
+// `slice(0, 60)` cut mid-word — a real intent came back as "…one writer for stage d", which
+// reads like a typo rather than a truncation. Cut at a word boundary and say it was cut.
+function shorten(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
 
 export function planIntent(
@@ -68,12 +82,12 @@ export function planIntent(
   }));
 
   const groundedPaths = [...new Set(recalled.flatMap((packet) => packet.paths))].filter(Boolean);
-  const clusters = groundedPaths.length ? clusterPaths(groundedPaths) : new Map([[".", [] as string[]]]);
+  const clusters = groundedPaths.length ? clusterPaths(groundedPaths) : new Map([[ROOT_CLUSTER, [] as string[]]]);
 
   for (const [cluster, paths] of clusters) {
     const title = clusters.size > 1
-      ? `${options.title ?? trimmed.slice(0, 60)} — ${cluster}`
-      : options.title ?? trimmed.slice(0, 80);
+      ? `${options.title ?? shorten(trimmed, 60)} — ${cluster}`
+      : options.title ?? shorten(trimmed, 80);
     const created = capture({
       projectDir,
       type: "proposal",

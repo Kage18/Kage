@@ -69,3 +69,47 @@ test("a bare phrase is refused with guidance, not planned into junk", () => {
   assert.equal(plan.ok, false);
   assert.match(plan.errors[0], /sentence/);
 });
+
+// Titles a human reads in a queue. Both of these shipped, and both showed up on the board
+// when this repo planned its own work: a work item titled "… — ." (the cluster for
+// root-level files), and an intent cut mid-word to "…one writer for stage d", which reads
+// as a typo rather than as a truncation.
+test("planned titles name their cluster and never truncate mid-word", () => {
+  const project = tempRepo();
+  // Ground the intent to a ROOT-level file so the bare-dot cluster is exercised.
+  assert.equal(capture({
+    projectDir: project,
+    type: "decision",
+    title: "The package manifest pins the supported Node range",
+    body: "package.json pins the supported Node range because the sqlite bindings differ across majors.",
+    paths: ["package.json"],
+  }).ok, true);
+  assert.equal(capture({
+    projectDir: project,
+    type: "decision",
+    title: "Limits live in src and are read by the settings page",
+    body: "src/limits.ts holds the tenant limit and web/settings.tsx reads it, so both move together.",
+    paths: ["src/limits.ts"],
+  }).ok, true);
+
+  const intent =
+    "Close the orchestrator P0 truth loop: one writer for stage decisions, merge and PR derived stages, and a Proof surface";
+  const plan = planIntent(project, intent);
+  assert.equal(plan.ok, true, plan.errors.join("; "));
+
+  for (const item of plan.items) {
+    assert.ok(!item.title.endsWith(" — ."), `a cluster must be named, got "${item.title}"`);
+    // The exact regression: "…one writer for stage decisions" cut to "…stage d".
+    assert.ok(!/stage d\b(?!ecisions)/.test(item.title), `title was cut mid-word: "${item.title}"`);
+    // Any truncation ends at a word boundary and says it happened.
+    if (item.title.includes("…")) {
+      const head = item.title.slice(0, item.title.indexOf("…"));
+      assert.ok(head.endsWith(" ") === false, "no trailing space before the ellipsis");
+      assert.ok(intent.startsWith(head), `truncated title must be a prefix of the intent: "${head}"`);
+      assert.ok(
+        intent[head.length] === " " || intent.length === head.length,
+        `truncation must land on a word boundary, got "${head}"`,
+      );
+    }
+  }
+});
