@@ -35,7 +35,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { connect as connectTcp } from "node:net";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { isRecord } from "../../type-guards.js";
 import type { VnextMode } from "./config.js";
 
@@ -166,8 +166,43 @@ function parseProxyDaemonRecord(raw: string): ProxyDaemonRecord | null {
 }
 
 export type ProxyDaemonProbe =
-  | { running: true; state: ProxyDaemonRecord }
+  | {
+      running: true;
+      state: ProxyDaemonRecord;
+      /**
+       * The script the live process is actually executing, when it differs from the install
+       * this command is running from. A proxy started from another checkout keeps serving with
+       * ITS code, so the CLI you are typing into and the proxy handling your traffic can be
+       * different builds — silently, for days.
+       */
+      foreign_build?: string;
+    }
   | { running: false; state: null; reason: "no_state" | "stale_state_removed" | "untrusted_state" };
+
+// The script path of a running pid, or null when it cannot be read. Best-effort by design: an
+// unreadable command line must not make a healthy proxy look broken.
+function proxyScriptPath(pid: number): string | null {
+  try {
+    const args = execFileSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8", timeout: 2_000 }).trim();
+    // `node /path/to/cli.js proxy --project …` — the first argument ending in .js is the entry.
+    const script = args.split(/\s+/).find((part) => part.endsWith(".js"));
+    return script ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// This module lives beside the CLI it ships with, so the running install's entry point is
+// resolvable from here. Compared by directory rather than exact file so a `cli.js` vs
+// `cli.mjs` naming difference is not reported as a foreign build.
+function isForeignBuild(script: string | null): boolean {
+  if (!script) return false;
+  try {
+    return dirname(resolve(script)) !== dirname(resolve(__dirname, "..", "..", "cli.js"));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The verified answer to "is the background proxy running?". Reads the state file and then
@@ -195,7 +230,10 @@ export async function proxyDaemonState(
     removeProxyDaemonState(projectDir);
     return { running: false, state: null, reason: "stale_state_removed" };
   }
-  return { running: true, state: record };
+  const script = proxyScriptPath(record.pid);
+  return isForeignBuild(script)
+    ? { running: true, state: record, foreign_build: script! }
+    : { running: true, state: record };
 }
 
 // ---------------------------------------------------------------------------------------------

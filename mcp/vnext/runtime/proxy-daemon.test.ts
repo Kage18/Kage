@@ -312,3 +312,46 @@ test("the state file is written 0600 and readable back as the exact record", asy
   const raw = JSON.parse(readFileSync(path, "utf8")) as ProxyDaemonRecord;
   assert.deepEqual(raw, written);
 });
+
+// Found by dogfooding, and it cost a day of confusion: a proxy started six days earlier from
+// `.worktrees/kage-vnext-implementation/` was still serving every request. It reported healthy,
+// counted 15 receipts and 1.3M tokens on its own console, and landed ZERO rows in the current
+// database — because it was running that checkout's code, not this one's. Nothing said so.
+test("a proxy running from a different install is reported as a foreign build", async () => {
+  const project = mkdtempSync(join(tmpdir(), "kage-foreign-"));
+  mkdirSync(join(project, ".agent_memory", "daemon"), { recursive: true });
+
+  // A live listener whose script lives somewhere OTHER than this install.
+  const scriptDir = mkdtempSync(join(tmpdir(), "kage-otherbuild-"));
+  const script = join(scriptDir, "cli.js");
+  writeFileSync(script, "require('node:net').createServer(() => {}).listen(0, '127.0.0.1');\n", "utf8");
+  const child = spawn(process.execPath, [script, "proxy"], { stdio: "ignore", detached: true });
+  child.unref();
+  const listener = await listenOnLoopback();
+
+  writeFileSync(
+    join(project, ".agent_memory", "daemon", "proxy.json"),
+    JSON.stringify({
+      pid: child.pid,
+      port: listener.port,
+      mode: "assist",
+      project_dir: project,
+      started_at: new Date().toISOString(),
+      log_path: join(project, ".agent_memory", "daemon", "proxy.log"),
+    }),
+    { mode: 0o600 },
+  );
+
+  try {
+    const probe = await proxyDaemonState(project, async () => true);
+    assert.equal(probe.running, true, "the listener is alive, so the proxy is running");
+    assert.ok(
+      probe.running && probe.foreign_build,
+      "a proxy executing another install's script must be flagged, not reported as simply healthy",
+    );
+    assert.match(String(probe.running && probe.foreign_build), /cli\.js$/);
+  } finally {
+    try { process.kill(child.pid!); } catch { /* already gone */ }
+    await listener.close();
+  }
+});

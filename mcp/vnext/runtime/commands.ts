@@ -947,6 +947,12 @@ export interface ProxyDaemonStatusReport {
   mode: VnextMode | null;
   log_path: string | null;
   reason: "no_state" | "stale_state_removed" | "untrusted_state" | null;
+  /**
+   * Set when the live proxy is executing a DIFFERENT install than this CLI. A proxy left
+   * running from another checkout keeps serving with its own code, so measurement can be
+   * silently written by a build that predates everything you are looking at.
+   */
+  foreign_build?: string;
 }
 
 export function proxyDaemonReport(probe: ProxyDaemonProbe): ProxyDaemonStatusReport {
@@ -958,6 +964,7 @@ export function proxyDaemonReport(probe: ProxyDaemonProbe): ProxyDaemonStatusRep
       mode: probe.state.mode,
       log_path: probe.state.log_path,
       reason: null,
+      ...(probe.foreign_build ? { foreign_build: probe.foreign_build } : {}),
     }
     : { running: false, pid: null, port: null, mode: null, log_path: null, reason: probe.reason };
 }
@@ -1163,7 +1170,14 @@ export function renderStatus(report: VnextStatusReport): string {
     `  adapters:      ${report.adapters.length ? report.adapters.join(", ") : "none"}`,
     `  runtime:       ${report.runtime.running ? `running at ${report.runtime.url} (protocol v${report.runtime.protocol_version})` : `not running (${report.runtime.reason})`}`,
     report.proxy.running
-      ? `  proxy:         running in the background (pid ${report.proxy.pid}, port ${report.proxy.port}, mode ${report.proxy.mode}) — log: ${report.proxy.log_path}; stop with \`kage down\``
+      ? `  proxy:         running in the background (pid ${report.proxy.pid}, port ${report.proxy.port}, mode ${report.proxy.mode}) — log: ${report.proxy.log_path}; stop with \`kage down\`${
+        // A foreign build is stated LOUDLY, because every symptom it causes looks like
+        // something else: receipts that never land, fixes that appear not to work, a status
+        // line that reads healthy. Naming the path turns a day of confusion into one restart.
+        report.proxy.foreign_build
+          ? `\n                 ⚠ serving from a DIFFERENT install: ${report.proxy.foreign_build} — its code, not this one's. Run \`kage down\` then \`kage up\` to serve from this build.`
+          : ""
+      }`
       : `  proxy:         not running (${report.proxy.reason}) — start it once with \`kage up\``,
     renderAttachState(report.attach),
   ];
