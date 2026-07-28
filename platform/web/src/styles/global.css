@@ -1513,3 +1513,58 @@ a {
   font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
+
+/* Browse-list controls. Search and health filters sit together above the results because they
+   answer one question — "which of these do I care about" — and separating them would imply
+   they are independent tools. */
+.list-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) 0 var(--space-2);
+}
+
+.list-search {
+  flex: 1 1 18rem;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.list-filters {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--color-neutral-tint);
+  border-radius: var(--radius-md);
+}
+
+.list-filter {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+.list-filter:hover { color: var(--color-text); }
+/* The active filter is carried by aria-pressed, so the styling follows the semantics rather
+   than a parallel class — the two can never disagree. */
+.list-filter[aria-pressed="true"] {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.entity-card-health {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+}
