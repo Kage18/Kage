@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseRoute, routeToPath, navLinks, portalBase, withBase } from "./router";
+import { parseRoute, routeToPath, navLinks, navGroups, portalBase, withBase } from "./router";
 
 describe("portal base mounting", () => {
   test("detects the /app mount from the pathname and is empty at root", () => {
@@ -22,8 +22,9 @@ describe("portal base mounting", () => {
 });
 
 describe("parseRoute", () => {
-  test("maps the overview root", () => {
-    expect(parseRoute("/")).toEqual({ page: "overview" });
+  test("the root is Attention — the app opens on decisions, not a dashboard", () => {
+    expect(parseRoute("/")).toEqual({ page: "attention" });
+    expect(parseRoute("/attention")).toEqual({ page: "attention" });
     expect(parseRoute("/overview")).toEqual({ page: "overview" });
   });
 
@@ -78,8 +79,19 @@ describe("parseRoute", () => {
 });
 
 describe("navLinks", () => {
-  test("declares the full information architecture in order", () => {
+  test("declares the full information architecture, grouped, in order", () => {
+    // Grouped rather than flat: a seventeen-item list is a wiki, and the grouping IS the
+    // product claim — you OPERATE, the AGENTS work, the KNOWLEDGE accumulates.
+    expect(navGroups.map((g) => g.label)).toEqual(["Operate", "Agents", "Knowledge"]);
+    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Attention", "Work", "Proof"]);
+    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Agents", "Agent Tasks", "Review Queue"]);
     expect(navLinks.map((l) => l.label)).toEqual([
+      "Attention",
+      "Work",
+      "Proof",
+      "Agents",
+      "Agent Tasks",
+      "Review Queue",
       "Overview",
       "System Map",
       "Features",
@@ -87,12 +99,11 @@ describe("navLinks", () => {
       "Flows",
       "Runbooks",
       "Decisions",
-      "Review Queue",
-      "Agent Tasks",
-      "Costs and Outcomes",
-      "Integrations",
-      "Settings",
-      "Billing",
+      "Contracts",
+      "Data Models",
+      "Invariants",
+      "Incidents",
+      "Documents",
     ]);
   });
 
@@ -100,5 +111,15 @@ describe("navLinks", () => {
     for (const link of navLinks) {
       expect(parseRoute(link.href).page).not.toBe("not-found");
     }
+  });
+});
+
+describe("work item detail", () => {
+  it("round-trips an id containing colons", () => {
+    const id = "repo:https-github-com-kage-core-kage:proposal:make-tenantlimit-configurable-1785";
+    expect(parseRoute(`/work/${encodeURIComponent(id)}`)).toEqual({ page: "work-item", id });
+    // The round trip is the property that matters: work ids are colon-delimited, so a route
+    // that encodes on the way out but not on the way in silently 404s every real item.
+    expect(parseRoute(routeToPath({ page: "work-item", id }))).toEqual({ page: "work-item", id });
   });
 });

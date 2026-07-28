@@ -363,3 +363,54 @@ test("daemon context report gives REST agents combined memory graph and risk con
   assert.ok(report.risk);
   assert.equal(report.risk.targets["src/auth.ts"].target, "src/auth.ts");
 });
+
+// The board re-derives on every request, so a claim made anywhere — the CLI, an agent, a
+// teammate through the app — changes what every other viewer should be seeing. Without a
+// signal on the wire, an operator stares at a stale board until they think to reload, which
+// is exactly when two people claim the same item.
+test("live feed announces work-state changes when a command is logged", async () => {
+  const project = mkdtempSync(join(tmpdir(), "kage-live-work-"));
+  mkdirSync(join(project, ".agent_memory", "packets"), { recursive: true });
+  mkdirSync(join(project, ".agent_memory", "reports"), { recursive: true });
+  mkdirSync(join(project, ".agent_memory", "work"), { recursive: true });
+  const feed = startLiveFeed(project, { debounceMs: 25, heartbeatMs: 60_000 });
+  const server = createServer((req, res) => {
+    if (req.url === "/kage/events") { feed.handleRequest(req, res); return; }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+
+  let received = "";
+  const request = get(`http://127.0.0.1:${port}/kage/events`, (res) => {
+    res.on("data", (chunk) => { received += String(chunk); });
+  });
+  const waitFor = async (pattern: RegExp) => {
+    const deadline = Date.now() + 5000;
+    while (!pattern.test(received)) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${pattern}; received: ${received}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+
+  try {
+    await waitFor(/: connected/);
+    // A command appended by ANY surface — this writes the log directly, exactly as the CLI
+    // and the app both ultimately do.
+    writeFileSync(
+      join(project, ".agent_memory", "work", "commands.jsonl"),
+      `${JSON.stringify({ event_id: "cmd-1", ts: new Date().toISOString(), kind: "task.claimed", work_id: "w-1", actor: "alice" })}\n`,
+      "utf8",
+    );
+    await waitFor(/work_changed/);
+    // The event names the decision that caused it, so a client can show "alice claimed w-1"
+    // without refetching the whole board just to find out what happened.
+    await waitFor(/task\.claimed/);
+    await waitFor(/alice/);
+  } finally {
+    request.destroy();
+    feed.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

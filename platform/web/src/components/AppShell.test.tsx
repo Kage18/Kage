@@ -11,7 +11,15 @@ describe("AppShell", () => {
         <div />
       </AppShell>,
     );
+    // Group headings orient before the links do.
+    for (const group of ["Operate", "Agents", "Knowledge"]) {
+      expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
+    }
     for (const label of [
+      "Attention",
+      "Work",
+      "Proof",
+      "Agent Tasks",
       "Overview",
       "System Map",
       "Features",
@@ -19,11 +27,13 @@ describe("AppShell", () => {
       "Flows",
       "Runbooks",
       "Decisions",
+      "Contracts",
+      "Data Models",
+      "Invariants",
+      "Incidents",
+      "Documents",
       "Review Queue",
       "Agent Tasks",
-      "Costs and Outcomes",
-      "Integrations",
-      "Settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
@@ -37,7 +47,7 @@ describe("AppShell", () => {
     );
     expect(screen.getByRole("banner")).toBeInTheDocument();
     expect(
-      screen.getByRole("navigation", { name: "Repository knowledge" }),
+      screen.getByRole("navigation", { name: "Sections" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
 

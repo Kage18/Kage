@@ -61,6 +61,10 @@ export async function publishCheck(
   }
   const fetcher: Fetcher =
     deps.fetcher ?? ((url, init) => fetch(url, init) as unknown as ReturnType<Fetcher>);
+  // The verdict has to actually go on the wire. This POST previously carried no body at all:
+  // head_sha, conclusion, title and summary were accepted by the signature and dropped, so a
+  // "published" check said nothing on the PR. The tests only asserted the returned status,
+  // which is exactly how that survived.
   const response = await fetcher(
     `${deps.apiBaseUrl}/repos/${installation.owner}/${installation.repo}/check-runs`,
     {
@@ -68,7 +72,18 @@ export async function publishCheck(
       headers: {
         authorization: `Bearer ${deps.token.token}`,
         accept: "application/vnd.github+json",
+        "content-type": "application/json",
       },
+      body: JSON.stringify({
+        name: "Kage",
+        head_sha: check.head_sha,
+        // A run that reports a conclusion is by definition finished; GitHub rejects a
+        // conclusion on a run that is not `completed`.
+        status: "completed",
+        conclusion: check.conclusion,
+        ...(check.details_url ? { details_url: check.details_url } : {}),
+        output: { title: check.title, summary: check.summary },
+      }),
     },
   );
   if (!response.ok) {

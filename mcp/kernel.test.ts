@@ -84,7 +84,11 @@ import {
   kageWorkspace,
   kageWorkspaceRecall,
   learn,
+  bootstrapStarterMemory,
+  codeIndexerStatus,
+  workItemBrief,
   loadApprovedPackets,
+  reanchorUnchangedPackets,
   loadPendingPackets,
   memoryInbox,
   mergePacketFiles,
@@ -3680,6 +3684,26 @@ test("project validation ignores retired packet quality warnings", () => {
   assert.equal(validation.warnings.some((warning) => warning.includes("none of the referenced paths exist")), false);
 });
 
+test("change memory grounds only to git-tracked paths, never untracked local dirs", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  writeFileSync(join(project, "tracked.ts"), "export const tracked = true;\n", "utf8");
+  execFileSync("git", ["add", "tracked.ts"], { cwd: project, stdio: "ignore" });
+  // Untracked local tooling — present in a working tree, absent from every clean checkout.
+  // Citing it made the packet hard-stale in CI ("none of the referenced paths exist").
+  mkdirSync(join(project, ".superpowers", "scratch"), { recursive: true });
+  writeFileSync(join(project, ".superpowers", "scratch", "state.html"), "<p>local</p>", "utf8");
+
+  const result = proposeFromDiff(project);
+  assert.equal(result.ok, true);
+  assert.ok(result.packet!.paths.includes("tracked.ts"), "tracked changes ground the packet");
+  assert.equal(
+    result.packet!.paths.some((path) => path.startsWith(".superpowers/")),
+    false,
+    "untracked paths must never be grounding — they do not exist in a clean checkout",
+  );
+});
+
 test("project validation ignores duplicate warnings between generated branch change memories", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
@@ -3879,6 +3903,10 @@ test("diff proposal from a package directory stores project-relative paths", () 
   commitAll(root, "initial");
   const project = join(root, "packages", "ai");
   writeFileSync(join(project, "src", "client.ts"), "export const client = true;\n", "utf8");
+  // Grounding is commit-adjacent: a new file grounds the proposal once it is staged to
+  // travel with the commit. A never-added file is exactly the phantom-path class that
+  // made a shipped packet hard-stale in CI.
+  execFileSync("git", ["add", "-A"], { cwd: root, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
 
@@ -3909,12 +3937,17 @@ test("diff proposal includes repo memory packet-only changes", () => {
     paths: ["README.md"],
   });
   assert.equal(learned.ok, true);
+  // Stage the new packet so it is commit-adjacent — unstaged brand-new files no longer
+  // ground a proposal (they would not exist in the checkout the packet ships with).
+  execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
   assert.equal(result.ok, true);
   assert.equal(result.changedFiles.some((path) => path.startsWith(".agent_memory/packets/")), true);
   assert.equal(result.packet?.paths.some((path) => path.startsWith(".agent_memory/packets/")), true);
-  assert.match(result.summary?.diff_stat ?? "", /\.agent_memory\/packets\//);
+  // git --stat abbreviates long staged paths (".../gotcha-release-…md"), so match the
+  // packet's filename rather than the directory prefix.
+  assert.match(result.summary?.diff_stat ?? "", /gotcha-release-workflow-gotcha/);
 });
 
 test("diff proposal stat includes untracked files alongside tracked diffs", () => {
@@ -4415,6 +4448,218 @@ test("memory reconciliation makes changed linked memory an agent responsibility"
   assert.deepEqual(report.items[0]?.changed_paths, ["src/retry.js"]);
   assert.match(report.agent_instruction, /kage_learn|kage_supersede/);
   assert.doesNotMatch(report.agent_instruction, /ask the user/i);
+});
+
+test("a work item brief carries the memory and blast radius an agent needs to start", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "retry.ts"), "export const retryLimit = 3;\n", "utf8");
+
+  // Existing knowledge the brief must surface rather than let an agent rediscover.
+  assert.equal(capture({
+    projectDir: project,
+    title: "Retry limit is 3 because the vendor rate-limits above that",
+    body: "We set retryLimit to 3 because the payment vendor starts rate-limiting at 4 concurrent retries, which caused the January incident.",
+    type: "decision",
+    paths: ["src/retry.ts"],
+  }).ok, true);
+
+  const proposal = capture({
+    projectDir: project,
+    title: "Make the retry limit configurable per tenant",
+    body: "We should allow each tenant to configure retryLimit so high-volume tenants can tune it.",
+    type: "proposal",
+    paths: ["src/retry.ts"],
+  });
+  assert.equal(proposal.ok, true);
+
+  const brief = workItemBrief(project, proposal.packet!.id);
+  assert.equal(brief.ok, true);
+  assert.equal(brief.work_item?.id, proposal.packet!.id);
+  assert.equal(brief.stage, "proposed");
+  // The whole point: what the team already knows about this code arrives with the task.
+  assert.match(brief.brief, /vendor rate-limits/);
+  // And what it touches, so scope is visible before the first edit.
+  assert.ok(brief.blast_radius.includes("src/retry.ts"), "the cited code must be named");
+
+  // An id that is not a proposal is refused rather than briefed as if it were work.
+  assert.equal(workItemBrief(project, "repo:nope:decision:not-a-work-item").ok, false);
+});
+
+test("the indexer registry reports one honest status per language present in the repo", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "app.py"), "def handler():\n    return 1\n", "utf8");
+  writeFileSync(join(project, "src", "main.go"), "package main\n\nfunc main() {}\n", "utf8");
+
+  const report = codeIndexerStatus(project);
+
+  // Only languages actually present are reported — an indexer for a language the repo does not
+  // contain is not a gap, and listing it as "missing" would be noise dressed up as a finding.
+  const languages = new Set(report.indexers.flatMap((entry) => entry.languages));
+  assert.ok(languages.has("python"), "python is present and must be reported");
+  assert.ok(languages.has("go"), "go is present and must be reported");
+  assert.equal(languages.has("ruby"), false, "no ruby in this repo, so no ruby indexer row");
+
+  for (const entry of report.indexers) {
+    // Every row is actionable: either it can run, or it says exactly how to make it run.
+    assert.ok(["installed", "available", "unsupported"].includes(entry.state));
+    if (entry.state === "available") assert.ok(entry.install_hint.length > 0, `${entry.id} must say how to install it`);
+  }
+  // Never auto-install: the registry only ever reports.
+  assert.equal(report.installed_anything, false);
+});
+
+test("generated repo facts are not presented as team memory", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Dana Operator"], { cwd: project, stdio: "ignore" });
+  writeFileSync(join(project, "package.json"), JSON.stringify({
+    name: "acme-api",
+    scripts: { test: "vitest run", build: "tsc" },
+  }, null, 2), "utf8");
+
+  const bootstrap = bootstrapStarterMemory(project);
+  assert.equal(bootstrap.created, true, `starter memory must survive admission: ${bootstrap.reason ?? ""}`);
+
+  const block = recall(project, "how do I run the tests").context_block;
+
+  // A packet derived from package.json ten seconds ago is a repo fact, not something
+  // a teammate decided — and it must not be attributed to whoever ran the installer.
+  assert.match(block, /Repo fact \(generated\)/);
+  assert.doesNotMatch(block, /Team memory: How to run/);
+  assert.doesNotMatch(block, /by Dana Operator/);
+});
+
+test("starter memory survives a package.json that overlaps its own wording", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  // Adversarial: script names and values echo the runbook's own vocabulary, which is
+  // what drives citedCodeContainment over its threshold.
+  writeFileSync(join(project, "package.json"), JSON.stringify({
+    name: "run build test dev start lint repo",
+    description: "run the tests before committing; run build; run dev; run start; run lint",
+    scripts: {
+      test: "run the tests before committing vitest run",
+      build: "run build tsc",
+      dev: "run dev vite",
+      start: "run start node .",
+      lint: "run lint eslint .",
+    },
+  }, null, 2), "utf8");
+
+  const bootstrap = bootstrapStarterMemory(project);
+  assert.equal(bootstrap.created, true, `starter memory must survive admission: ${bootstrap.reason ?? ""}`);
+  const packet = loadApprovedPackets(project).find((entry) => entry.tags.includes("bootstrap"));
+  assert.ok(packet, "the starter runbook must be approved, not routed to pending");
+});
+
+test("reanchor sharpens grounding on unchanged files and refuses on moved code", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "stable.ts"), `export const stableGateways = ["a"];\n`, "utf8");
+  writeFileSync(join(project, "src", "moved.ts"), `export const movedGateways = ["a"];\n`, "utf8");
+
+  // Prose bodies that name no symbol in the cited file: these are exactly the packets
+  // that carry a whole-file fingerprint and no anchors, which is what a backfill targets.
+  const stable = capture({
+    projectDir: project,
+    title: "Registration order is significant",
+    body: "The dispatcher matches the first exact hit, so registration order decides which provider answers an overlapping path.",
+    type: "code_explanation",
+    paths: ["src/stable.ts"],
+  });
+  const moved = capture({
+    projectDir: project,
+    title: "Registration order is significant here too",
+    body: "The dispatcher matches the first exact hit, so registration order decides which provider answers an overlapping route.",
+    type: "code_explanation",
+    paths: ["src/moved.ts"],
+  });
+  assert.equal(stable.ok, true);
+  assert.equal(moved.ok, true);
+
+  const verifiedBefore = (moved.packet?.freshness as { last_verified_at?: string })?.last_verified_at;
+
+  // One file moves under its memory; the other does not.
+  writeFileSync(join(project, "src", "moved.ts"), `export const movedGateways = ["a", "b"];\n`, "utf8");
+
+  const report = reanchorUnchangedPackets(project);
+  assert.deepEqual(report.skipped_changed, [moved.packet?.id], "moved code must be refused, not re-stamped");
+  assert.equal(report.skipped_changed.includes(stable.packet!.id), false, "an unchanged file is not a conflict");
+
+  // A re-anchor must never reset the verification clock — nothing was re-verified.
+  const after = loadApprovedPackets(project).find((packet) => packet.id === moved.packet?.id);
+  assert.equal((after?.freshness as { last_verified_at?: string })?.last_verified_at, verifiedBefore);
+});
+
+test("memory anchors to a camelCase exported const, so unrelated edits do not retire it", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  const gatewaysFile = join(project, "src", "gateways.ts");
+  const withHelper = (body: string) => `export const defaultGateways = ["anthropic", "openai"];\n\nexport function unrelatedHelper() {\n  return ${body};\n}\n`;
+  writeFileSync(gatewaysFile, withHelper("1"), "utf8");
+
+  const captured = capture({
+    projectDir: project,
+    title: "Provider gateways are registered in defaultGateways",
+    body: "A new provider is wired by appending it to defaultGateways; order matters only for overlapping paths, because the exact-match router picks the first hit.",
+    type: "code_explanation",
+    paths: ["src/gateways.ts"],
+  });
+  assert.equal(captured.ok, true);
+
+  // The anchor must exist, or staleness silently falls back to whole-file hashing.
+  const fingerprints = (captured.packet?.freshness as { path_fingerprints?: Array<{ path: string; symbols?: Array<{ name: string }> }> })?.path_fingerprints ?? [];
+  const anchored = fingerprints.find((entry) => entry.path === "src/gateways.ts");
+  assert.ok(anchored?.symbols?.some((symbol) => symbol.name === "defaultgateways"), "expected defaultGateways to be anchored");
+
+  // Editing an unrelated function in the same file must not retire the memory.
+  writeFileSync(gatewaysFile, withHelper("42"), "utf8");
+  assert.equal(kageMemoryReconciliation(project).unresolved_count, 0);
+
+  // Editing the anchored symbol itself must retire it.
+  writeFileSync(gatewaysFile, `export const defaultGateways = ["anthropic", "openai", "gemini"];\n\nexport function unrelatedHelper() {\n  return 42;\n}\n`, "utf8");
+  assert.equal(kageMemoryReconciliation(project).unresolved_count, 1);
+});
+
+test("reconciliation only observes paths inside the project directory", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "retry.js"), "export const retryMode = 'callback';\n", "utf8");
+
+  assert.equal(observe(project, {
+    type: "file_change",
+    session_id: "agent-session",
+    agent: "codex",
+    path: "src/retry.js",
+    summary: "Changed retry mode behavior while fixing callback handling.",
+  }).ok, true);
+
+  // Agent-host scratch files arrive as absolute paths from outside the repo. Stripping
+  // the leading slash turns them into plausible repo-relative paths, so they used to be
+  // recorded as touched files and demand reconciliation for work nobody did here.
+  for (const outside of [
+    "/Users/someone/.claude/projects/abc123/tool-results/scratch.txt",
+    "/Users/someone/.claude/plans/some-plan.md",
+    "/tmp/unrelated/file.ts",
+  ]) {
+    assert.equal(observe(project, {
+      type: "file_change",
+      session_id: "agent-session",
+      agent: "codex",
+      path: outside,
+      summary: "Host scratch file, unrelated to this repository.",
+    }).ok, true);
+  }
+
+  const report = kageMemoryReconciliation(project, { sessionId: "agent-session" });
+  assert.deepEqual(report.touched_paths, ["src/retry.js"]);
 });
 
 test("pr check warns but does not block on soft memory reconciliation", () => {
@@ -5931,6 +6176,51 @@ test("refresh on the default branch persists stale metadata to disk", () => {
   assert.equal(result.stale_packets.some((finding) => finding.id === packetId), true);
   const rewritten = parsePacket(packetPath);
   assert.equal(rewritten.quality.stale, true);
+});
+
+test("merge-packet keeps both sides' edits when they touched different fields", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge3-"));
+  const base = {
+    id: "gotcha-merge-3way",
+    title: "Retry limit is 3",
+    summary: "base summary",
+    body: "base body",
+    tags: ["retry"],
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const oursPath = join(dir, "ours.json");
+  const basePath = join(dir, "base.json");
+  const theirsPath = join(dir, "theirs.json");
+  writeFileSync(basePath, JSON.stringify(base, null, 2), "utf8");
+  // Two teammates edit the SAME packet but DIFFERENT fields. Whole-file newest-wins throws one of
+  // these away silently; a three-way merge keeps both because neither actually conflicts.
+  writeFileSync(oursPath, JSON.stringify({ ...base, summary: "ours refined the summary", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(theirsPath, JSON.stringify({ ...base, body: "theirs explained the vendor rate limit", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
+
+  const result = mergePacketFiles(oursPath, basePath, theirsPath);
+  assert.equal(result.ok, true);
+  const merged = JSON.parse(readFileSync(oursPath, "utf8"));
+  assert.equal(merged.summary, "ours refined the summary", "our non-conflicting edit must survive");
+  assert.equal(merged.body, "theirs explained the vendor rate limit", "their non-conflicting edit must survive");
+  assert.equal(merged.title, "Retry limit is 3", "an untouched field stays at base");
+});
+
+test("merge-packet still falls back to newest-wins when both sides changed the same field", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge3c-"));
+  const base = { id: "gotcha-merge-conflict", title: "base title", body: "base body", updated_at: "2026-01-01T00:00:00.000Z" };
+  const oursPath = join(dir, "ours.json");
+  const basePath = join(dir, "base.json");
+  const theirsPath = join(dir, "theirs.json");
+  writeFileSync(basePath, JSON.stringify(base, null, 2), "utf8");
+  writeFileSync(oursPath, JSON.stringify({ ...base, body: "ours rewrote it", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(theirsPath, JSON.stringify({ ...base, body: "theirs rewrote it", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
+
+  const result = mergePacketFiles(oursPath, basePath, theirsPath);
+  assert.equal(result.ok, true);
+  // A genuine conflict on one field: newest wins for THAT field, and the losing text is preserved
+  // rather than vanishing.
+  assert.equal(JSON.parse(readFileSync(oursPath, "utf8")).body, "theirs rewrote it");
+  assert.equal(result.conflicted_fields?.includes("body"), true, "a real field conflict must be reported");
 });
 
 test("merge-packet keeps the newest side whole-file and rejects garbage", () => {

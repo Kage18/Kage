@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { KageApiClient } from "./api/client";
 import type { TeamReportDto,
+  AttentionItemDto,
+  AttentionQueueDto,
+  WorkBoardDto,
+  ProofReportDto,
+  WorkDetailDto,
+  AgentsReportDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -19,6 +25,12 @@ import { AgentTasksPage } from "./pages/AgentTasksPage";
 import { BillingPage } from "./pages/BillingPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
+import { AttentionPage } from "./pages/AttentionPage";
+import { ProofPage } from "./pages/ProofPage";
+import { WorkItemPage } from "./pages/WorkItemPage";
+import { AgentsPage } from "./pages/AgentsPage";
+import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
+import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -266,15 +278,6 @@ function ReviewQueueContainer({ api }: { api: KageApiClient }): React.ReactEleme
 
   return (
     <div className="review-container">
-      <div className="review-actor">
-        <label htmlFor="review-acting-as">Acting as</label>
-        <input
-          id="review-acting-as"
-          type="text"
-          value={actor}
-          onChange={(event) => setActor(event.target.value)}
-        />
-      </div>
       {items === null && error === null && (
         <p role="status" aria-live="polite">
           Loading the review queue…
@@ -282,7 +285,7 @@ function ReviewQueueContainer({ api }: { api: KageApiClient }): React.ReactEleme
       )}
       {error !== null && <p role="alert">The review queue is unavailable: {error}</p>}
       {items !== null && (
-        <ReviewQueuePage items={items} actor={actor} onDecide={onDecide} lastResult={feedback} />
+        <ReviewQueuePage items={items} actor={actor} onActorChange={setActor} onDecide={onDecide} lastResult={feedback} />
       )}
     </div>
   );
@@ -329,6 +332,140 @@ function AgentTasksContainer({ api }: { api: KageApiClient }): React.ReactElemen
 // Loads a browse-list of one entity kind (Components, Flows, Runbooks, Decisions, Features) and renders
 // it. Fetched lazily when its tab opens. `load` picks the right client method; `section` is the URL
 // segment its cards link to. These replace the former "arrives in a later Phase C task" placeholders.
+// Human labels for the knowledge browse tabs, kept beside the dispatch that uses them.
+const KNOWLEDGE_LABELS: Record<string, string> = {
+  contracts: "Contracts",
+  "data-models": "Data Models",
+  invariants: "Invariants",
+  incidents: "Incidents",
+  documents: "Documents",
+};
+
+// The command loop lives here: a click becomes a command, the response carries the
+// re-derived board, and the UI renders the consequence rather than an optimistic guess.
+function WorkContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [board, setBoard] = useState<WorkBoardDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+  const [actor, setActor] = useState("local-operator");
+
+  const reload = useCallback(() => {
+    api.work()
+      .then((next: WorkBoardDto) => setBoard(next))
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, [api]);
+  useEffect(reload, [reload]);
+  // Someone else claiming an item is exactly what a stale board hides, so re-derive on it.
+  useLiveRefresh(reload);
+
+  const runCommand = useCallback((kind: string, workId: string) => {
+    setPending(workId);
+    setError(null);
+    api.command({ kind, work_id: workId, actor })
+      .then((result) => {
+        // A refused command (self-approval, unknown item) is reported verbatim: the gate
+        // did its job, and hiding the reason would teach the operator nothing.
+        if (!result.ok) { setError(result.error ?? "command refused"); return; }
+        if (result.work) setBoard(result.work);
+      })
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setPending(null));
+  }, [api, actor]);
+
+  if (error && !board) return <p className="empty-state">Work board unavailable: {error}</p>;
+  if (!board) return <p className="empty-state">Deriving…</p>;
+  return (
+    <WorkPage
+      board={board}
+      actor={actor}
+      onActorChange={setActor}
+      onCommand={runCommand}
+      pending={pending}
+      error={error}
+    />
+  );
+}
+
+// A live decision anywhere — CLI, agent, teammate — should reach every open view. Containers
+// subscribe to the shell's broadcast rather than each opening their own EventSource, so one
+// connection serves the whole app.
+function useLiveRefresh(reload: () => void): void {
+  useEffect(() => {
+    const handler = (): void => reload();
+    window.addEventListener(WORK_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(WORK_CHANGED_EVENT, handler);
+  }, [reload]);
+}
+
+function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ items: AttentionItemDto[] | null; error: string | null }>({ items: null, error: null });
+  const reload = useCallback(() => {
+    api.attention()
+      .then((queue: AttentionQueueDto) => setState({ items: queue.items, error: null }))
+      .catch((error: unknown) => setState({ items: null, error: error instanceof Error ? error.message : String(error) }));
+  }, [api]);
+  useEffect(reload, [reload]);
+  useLiveRefresh(reload);
+  if (state.error) return <p className="empty-state">Attention queue unavailable: {state.error}</p>;
+  if (state.items === null) return <p className="empty-state">Deriving…</p>;
+  return (
+    <AttentionPage
+      items={state.items}
+      onReverify={(ref) =>
+        api.reverify(ref, "portal").then((result) => {
+          // The re-derived queue comes back with the response, so the row that was just
+          // resolved disappears without a second round trip.
+          if (result.attention) setState({ items: result.attention, error: null });
+          return result;
+        })
+      }
+    />
+  );
+}
+
+function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ report: AgentsReportDto | null; error: string | null }>({ report: null, error: null });
+  useEffect(() => {
+    let live = true;
+    api.agents()
+      .then((report: AgentsReportDto) => { if (live) setState({ report, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api]);
+  if (state.error) return <p className="empty-state">Agents unavailable: {state.error}</p>;
+  if (!state.report) return <p className="empty-state">Reading sessions…</p>;
+  return <AgentsPage report={state.report} />;
+}
+
+function WorkItemContainer({ api, id }: { api: KageApiClient; id: string }): React.ReactElement {
+  const [state, setState] = useState<{ detail: WorkDetailDto | null; error: string | null }>({ detail: null, error: null });
+  useEffect(() => {
+    let live = true;
+    setState({ detail: null, error: null });
+    api.workItem(id)
+      .then((detail: WorkDetailDto) => { if (live) setState({ detail, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ detail: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api, id]);
+  if (state.error) return <p className="empty-state">Work item unavailable: {state.error}</p>;
+  if (!state.detail) return <p className="empty-state">Deriving…</p>;
+  return <WorkItemPage detail={state.detail} />;
+}
+
+function ProofContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ report: ProofReportDto | null; error: string | null }>({ report: null, error: null });
+  useEffect(() => {
+    let live = true;
+    api.proof()
+      .then((report: ProofReportDto) => { if (live) setState({ report, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api]);
+  if (state.error) return <p className="empty-state">Proof unavailable: {state.error}</p>;
+  if (!state.report) return <p className="empty-state">Measuring…</p>;
+  return <ProofPage report={state.report} />;
+}
+
 function EntityListContainer({
   api,
   title,
@@ -424,6 +561,16 @@ function RoutedPage({
   api: KageApiClient;
 }): React.ReactElement {
   switch (route.page) {
+    case "attention":
+      return <AttentionContainer api={api} />;
+    case "work":
+      return <WorkContainer api={api} />;
+    case "proof":
+      return <ProofContainer api={api} />;
+    case "work-item":
+      return <WorkItemContainer api={api} id={route.id} />;
+    case "agents":
+      return <AgentsContainer api={api} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;
@@ -452,6 +599,26 @@ function RoutedPage({
     case "components":
       return (
         <EntityListContainer api={api} title="Components" section="components" load={(a) => a.components()} />
+      );
+    // One list page and one detail page for every knowledge kind. The label is derived from the
+    // route so adding a kind is a router change, not another near-identical page component.
+    case "knowledge":
+      return (
+        <EntityListContainer
+          api={api}
+          title={KNOWLEDGE_LABELS[route.kind] ?? route.kind}
+          section={route.kind}
+          load={(a) => a.knowledgeList(route.kind)}
+        />
+      );
+    case "knowledge-detail":
+      return (
+        <DetailContainer<EntityDetailDto>
+          slug={route.slug}
+          label={KNOWLEDGE_LABELS[route.kind] ?? route.kind}
+          load={(slug) => api.knowledgeDetail(route.kind, slug)}
+          render={(entity) => <FeaturePage feature={entity} />}
+        />
       );
     case "component":
       return (

@@ -4269,6 +4269,20 @@ function packetFeedbackScore(packet: MemoryPacket): number {
   return Number(quality.votes_up ?? 0) * 2 - Number(quality.votes_down ?? 0) * 3 - Number(quality.reports_stale ?? 0) * 4;
 }
 
+// A packet Kage derived from the repo itself — a package.json transcription, a repo
+// map — is a fact about the code, not something a teammate decided. Presenting it as
+// "Team memory: …" attributed to whoever ran the installer overstates its provenance
+// on the very first recall a new user sees.
+export function isGeneratedRepoFact(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): boolean {
+  if (packet.type === "repo_map") return true;
+  if (Array.isArray(packet.tags) && packet.tags.includes("bootstrap")) return true;
+  return ((packet.quality ?? {}) as Record<string, unknown>).reviewer === "kage-indexer";
+}
+
+export function memoryProvenanceLabel(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): string {
+  return isGeneratedRepoFact(packet) ? "Repo fact (generated):" : "Team memory:";
+}
+
 function recallQualityScore(packet: MemoryPacket): number {
   const stored = Number(((packet.quality ?? {}) as Record<string, unknown>).score);
   if (Number.isFinite(stored)) return Math.max(0, Math.min(10, stored / 10));
@@ -4369,7 +4383,14 @@ function codeAnchorTokens(text: string): Set<string> {
 // Symbol kinds that make meaningful anchors. Constants are allowed only when
 // the name itself is code-shaped (contains an underscore after lowercasing) —
 // a constant literally named "verified" is a prose-word collision, not a handle.
-const ANCHOR_SYMBOL_KINDS = new Set(["function", "class", "method", "interface", "type", "enum"]);
+// Must be drawn from the kinds extractSymbols actually emits — "function" | "class" |
+// "method" | "constant" | "route" | "test". The previous set listed interface/type/enum,
+// which are never emitted, and omitted "constant", which is the most common kind in the
+// store by a wide margin (2089 anchors vs 427 functions). camelCase consts like
+// `defaultGateways` were therefore unanchorable, while SCREAMING_SNAKE ones slipped
+// through only via the underscore escape below — so whether a memory anchored to a
+// constant came down to how the constant happened to be spelled.
+const ANCHOR_SYMBOL_KINDS = new Set(["function", "class", "method", "constant"]);
 
 // current-file symbol span hashes, keyed by `${nameLower}\0${kind}` -> [sha256...].
 // Cached by mtime+size: extraction only runs when a file actually changed.
@@ -4635,11 +4656,27 @@ function changedPathsFromStaleReasons(reasons: string[]): string[] {
   }));
 }
 
-function observationTouchedPaths(observations: ObservationRecord[]): string[] {
+// Agent hooks report file changes as ABSOLUTE host paths — every Claude Code
+// file_change carries tool_input.file_path, and an audit of this repo's own store
+// found 36 of 36 observed paths absolute, none relative. Simply stripping the leading
+// slash turned `/Users/you/.claude/plans/x.md` into `Users/you/.claude/plans/x.md`,
+// which reads as repo-relative: unrelated host files were recorded as touched and then
+// demanded memory reconciliation for work that never happened in this repository.
+// Resolve against the project and drop anything landing outside it.
+function observedRepoPath(projectDir: string, rawPath: string): string | null {
+  const normalized = rawPath.replace(/\\/g, "/").trim();
+  if (!normalized) return null;
+  const absolute = isAbsolute(normalized) ? normalized : join(projectDir, normalized);
+  const relativePath = relative(projectDir, absolute).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || isAbsolute(relativePath)) return null;
+  return meaningfulMemoryPath(relativePath) ? relativePath : null;
+}
+
+function observationTouchedPaths(projectDir: string, observations: ObservationRecord[]): string[] {
   return unique(observations
     .filter((event) => event.type === "file_change" && typeof event.path === "string" && event.path.trim().length > 0)
-    .map((event) => event.path!.replace(/\\/g, "/").replace(/^\/+/, ""))
-    .filter(meaningfulMemoryPath)
+    .map((event) => observedRepoPath(projectDir, event.path!))
+    .filter((path): path is string => path !== null)
   ).sort();
 }
 
@@ -4663,12 +4700,12 @@ function reconciliationInstruction(items: MemoryReconciliationItem[]): string {
 export function kageMemoryReconciliation(projectDir: string, options: { sessionId?: string; limit?: number } = {}): MemoryReconciliationReport {
   ensureMemoryDirs(projectDir);
   const observations = loadObservations(projectDir, options.sessionId);
-  const touchedPaths = observationTouchedPaths(observations);
+  const touchedPaths = observationTouchedPaths(projectDir, observations);
   const sessionIdsByPath = new Map<string, Set<string>>();
   for (const event of observations) {
     if (event.type !== "file_change" || !event.path) continue;
-    const path = event.path.replace(/\\/g, "/").replace(/^\/+/, "");
-    if (!meaningfulMemoryPath(path)) continue;
+    const path = observedRepoPath(projectDir, event.path);
+    if (!path) continue;
     const sessions = sessionIdsByPath.get(path) ?? new Set<string>();
     sessions.add(event.session_id);
     sessionIdsByPath.set(path, sessions);
@@ -8794,6 +8831,81 @@ function writeScipTypescriptIndex(projectDir: string): CodeIndexArtifactResult |
   }
 }
 
+export interface CodeIndexerSpec {
+  id: string;
+  languages: string[];
+  // The binary that produces a SCIP index for these languages.
+  command: string;
+  args: (projectDir: string) => string[];
+  installHint: string;
+}
+
+export interface CodeIndexerStatusEntry {
+  id: string;
+  languages: string[];
+  state: "installed" | "available" | "unsupported";
+  install_hint: string;
+}
+
+export interface CodeIndexerStatusReport {
+  project_dir: string;
+  indexers: CodeIndexerStatusEntry[];
+  // Always false. Stated explicitly because the one thing a registry like this must never do is
+  // install a toolchain behind the user's back.
+  installed_anything: false;
+}
+
+// Compiler-exact symbols come from indexers, not from parsers we write. `parseScipJsonObject` is
+// already language-agnostic and the precedence ladder already prefers scip > lsif > lsp >
+// tree-sitter > ts-ast > generic — but only ONE indexer was ever run, so every language other than
+// TypeScript fell to the regex tier no matter what the developer had installed.
+//
+// Each entry is a subprocess invocation, not an extractor: the work of resolving a call belongs to
+// the language's own toolchain, which does it exactly rather than heuristically.
+export const CODE_INDEXERS: readonly CodeIndexerSpec[] = [
+  { id: "scip-typescript", languages: ["typescript", "javascript"], command: "scip-typescript",
+    args: (dir) => existsSync(join(dir, "tsconfig.json")) ? ["index"] : ["index", "--infer-tsconfig"],
+    installHint: "npm i -g @sourcegraph/scip-typescript" },
+  { id: "scip-python", languages: ["python"], command: "scip-python",
+    args: () => ["index", "."], installHint: "npm i -g @sourcegraph/scip-python" },
+  { id: "scip-ruby", languages: ["ruby"], command: "scip-ruby",
+    args: () => ["--index-file=index.scip"], installHint: "gem install scip-ruby" },
+  { id: "scip-java", languages: ["java", "kotlin", "scala"], command: "scip-java",
+    args: () => ["index"], installHint: "cs install scip-java" },
+  { id: "scip-dotnet", languages: ["csharp"], command: "scip-dotnet",
+    args: () => ["index"], installHint: "dotnet tool install --global scip-dotnet" },
+  { id: "scip-clang", languages: ["cpp"], command: "scip-clang",
+    args: () => ["--compdb-path=compile_commands.json"], installHint: "see github.com/sourcegraph/scip-clang" },
+  { id: "rust-analyzer", languages: ["rust"], command: "rust-analyzer",
+    args: () => ["scip", "."], installHint: "rustup component add rust-analyzer" },
+  { id: "scip-go", languages: ["go"], command: "scip-go",
+    args: () => ["."], installHint: "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest" },
+];
+
+// Which languages this repo actually contains, from the structural scan rather than a guess.
+function projectLanguages(projectDir: string): Set<string> {
+  const languages = new Set<string>();
+  try {
+    for (const file of scanStructuralFiles(projectDir).files) languages.add(codeLanguage(file));
+  } catch { /* an unscannable repo reports no languages rather than throwing */ }
+  return languages;
+}
+
+// Report only. Never installs, never blocks: a missing indexer means the file falls one rung down
+// the precedence ladder exactly as it does today, and the user is told what would sharpen it.
+export function codeIndexerStatus(projectDir: string): CodeIndexerStatusReport {
+  const present = projectLanguages(projectDir);
+  const indexers = CODE_INDEXERS
+    .filter((spec) => spec.languages.some((language) => present.has(language)))
+    .map((spec): CodeIndexerStatusEntry => ({
+      id: spec.id,
+      languages: spec.languages.filter((language) => present.has(language)),
+      state: executableOnPath(projectDir, spec.command) ? "installed" : "available",
+      install_hint: spec.installHint,
+    }));
+  return { project_dir: projectDir, indexers, installed_anything: false };
+}
+
 export function writeCodeIndex(projectDir: string): CodeIndexArtifactResult {
   const scip = writeScipTypescriptIndex(projectDir);
   if (scip?.ok) return scip;
@@ -11542,11 +11654,12 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
         : entry.packet.type === "convention" ? "convention since"
         : "noted";
       const cited = entry.packet.paths.slice(0, 3).join(", ");
-      const author = entry.packet.author_name ? ` by ${entry.packet.author_name}` : "";
+      const generated = isGeneratedRepoFact(entry.packet);
+      const author = !generated && entry.packet.author_name ? ` by ${entry.packet.author_name}` : "";
       const meta = `${verb}${when ? ` ${when}` : ""}${author}${cited ? ` · ${cited}` : ""}`;
       return [
         "",
-        `${index + 1}. Team memory: ${entry.packet.title}`,
+        `${index + 1}. ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
         `   ${entry.packet.summary}`,
         ...(meta.trim() ? [`   (${meta})`] : []),
         ...(contested
@@ -12208,22 +12321,126 @@ function commitCategory(subject: string): string {
   return "other";
 }
 
+// ── One history pass, not one per file per commit ────────────────────────────
+//
+// Every per-file git signal (churn, recency, ownership, co-change) is answerable from a single
+// `git log --name-only` walk. Asking git per file — and, for co-change, per commit per file —
+// cost `kageRisk` 118 SECONDS on this repo and made `kage plan` never return.
+//
+// The window is capped so a very long history cannot make this unbounded; when the cap bites,
+// the report says so rather than quietly reporting counts as if they were totals.
+const HISTORY_WINDOW_COMMITS = 5000;
+
+interface HistoryCommit {
+  at: number;
+  author: string;
+  paths: string[];
+}
+
+interface GitHistoryIndex {
+  commitsByPath: Map<string, HistoryCommit[]>;
+  /** True when history was longer than the window, so counts are floors rather than totals. */
+  truncated: boolean;
+  available: boolean;
+}
+
+const EMPTY_HISTORY: GitHistoryIndex = { commitsByPath: new Map(), truncated: false, available: false };
+
+function buildGitHistoryIndex(projectDir: string): GitHistoryIndex {
+  // \x1e separates commits and \x1f separates fields, so neither can collide with a path,
+  // an author name, or a commit message.
+  const raw = readGit(projectDir, [
+    "log",
+    `-n`,
+    String(HISTORY_WINDOW_COMMITS),
+    "--no-renames",
+    "--name-only",
+    "--format=\x1e%cI\x1f%an <%ae>\x1f",
+  ]);
+  if (raw === null) return EMPTY_HISTORY;
+
+  const commitsByPath = new Map<string, HistoryCommit[]>();
+  let commits = 0;
+  for (const record of raw.split("\x1e")) {
+    if (!record.trim()) continue;
+    commits += 1;
+    // Each record is `<iso-date>\x1f<author>\x1f\n\n<path>\n<path>…`.
+    const [isoDate, author, body = ""] = record.split("\x1f");
+    const at = Date.parse((isoDate ?? "").trim());
+    const paths = body.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!paths.length) continue; // merge commits carry no file list
+    const commit: HistoryCommit = {
+      at: Number.isFinite(at) ? at : 0,
+      author: (author ?? "").trim(),
+      paths,
+    };
+    for (const path of new Set(paths)) {
+      const bucket = commitsByPath.get(path);
+      if (bucket) bucket.push(commit);
+      else commitsByPath.set(path, [commit]);
+    }
+  }
+  return { commitsByPath, truncated: commits >= HISTORY_WINDOW_COMMITS, available: true };
+}
+
+// Memoized on HEAD rather than on a clock. A TTL would make the index go stale inside a test
+// that commits and immediately re-reads; HEAD is exact — new commit, new key, fresh index —
+// and costs one cheap `rev-parse` per lookup instead of ~86 log walks per file.
+// Working-tree edits deliberately do not invalidate: this index describes committed history.
+let historyIndexCache: { project: string; head: string; index: GitHistoryIndex } | null = null;
+
+// The cache key must be cheap enough to check on every lookup, and `git rev-parse HEAD` is
+// not — it was itself 500 spawns per risk report. HEAD is readable straight off the
+// filesystem in microseconds, so read it there and keep the spawn only for the cases the
+// files cannot answer (packed refs, worktrees, a `.git` file).
+function headShaWithoutSpawning(projectDir: string): string | null {
+  try {
+    const gitDir = join(projectDir, ".git");
+    if (!statSync(gitDir).isDirectory()) return gitHead(projectDir);
+    const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    if (!head.startsWith("ref: ")) return head || null; // detached HEAD stores the sha itself
+    const refPath = join(gitDir, head.slice(5).trim());
+    if (!existsSync(refPath)) return gitHead(projectDir); // packed-refs
+    return readFileSync(refPath, "utf8").trim() || null;
+  } catch {
+    return gitHead(projectDir);
+  }
+}
+
+function gitHistoryIndex(projectDir: string): GitHistoryIndex {
+  const head = headShaWithoutSpawning(projectDir);
+  if (!head) return EMPTY_HISTORY;
+  if (historyIndexCache && historyIndexCache.project === projectDir && historyIndexCache.head === head) {
+    return historyIndexCache.index;
+  }
+  const index = buildGitHistoryIndex(projectDir);
+  historyIndexCache = { project: projectDir, head, index };
+  return index;
+}
+
+// Answered from the shared index. This was the second-largest source of the storm: ownership
+// and hotspot reporting call it once per file in the code graph, which was ~500 log walks.
+// Only the two `since` windows the callers actually use are supported, because a general
+// date parser here would be inventing capability nothing asks for.
 function gitCommitCountForPath(projectDir: string, path: string, since?: string): number {
-  const args = ["log", "--format=%H"];
-  if (since) args.push(`--since=${since}`);
-  args.push("--", path);
-  return gitLines(projectDir, args).length;
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!since) return commits.length;
+  const days = since.startsWith("30") ? 30 : 90;
+  const cutoff = Date.now() - days * DAY_MS_RISK;
+  return commits.filter((commit) => commit.at >= cutoff).length;
 }
 
 function gitPrimaryOwnerForPath(projectDir: string, path: string): Pick<GitFileSignal, "primary_owner" | "primary_owner_pct" | "contributor_count"> {
-  const authors = gitLines(projectDir, ["log", "--format=%an <%ae>", "--", path]);
-  if (!authors.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
   const counts = new Map<string, number>();
-  for (const author of authors) counts.set(author, (counts.get(author) ?? 0) + 1);
+  for (const commit of commits) {
+    if (commit.author) counts.set(commit.author, (counts.get(commit.author) ?? 0) + 1);
+  }
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     primary_owner: ranked[0]?.[0] ?? null,
-    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / authors.length).toFixed(2)) : null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
     contributor_count: ranked.length,
   };
 }
@@ -12237,14 +12454,16 @@ function gitAuthorCountsForPath(projectDir: string, path: string, since?: string
   return counts;
 }
 
+// Was `1 + 80` git spawns per file — a log walk to find the commits, then a `git show` for
+// every one of them. The same answer falls out of the shared history index for free.
 function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths: Set<string>): Array<{ file_path: string; count: number }> {
-  const commits = gitLines(projectDir, ["log", "--format=%H", "-n", "80", "--", path]);
   const counts = new Map<string, number>();
-  for (const commit of commits) {
-    const changed = gitLines(projectDir, ["show", "--name-only", "--format=", "--no-renames", commit])
-      .filter((candidate) => candidate !== path && graphPaths.has(candidate));
-    if (changed.length > 200) continue;
-    for (const file of new Set(changed)) counts.set(file, (counts.get(file) ?? 0) + 1);
+  for (const commit of gitHistoryIndex(projectDir).commitsByPath.get(path) ?? []) {
+    if (commit.paths.length > 200) continue;
+    for (const candidate of new Set(commit.paths)) {
+      if (candidate === path || !graphPaths.has(candidate)) continue;
+      counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    }
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -12252,19 +12471,62 @@ function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths
     .map(([file_path, count]) => ({ file_path, count }));
 }
 
+const DAY_MS_RISK = 86_400_000;
+
+// Every field below comes from the shared history index — no git process is forked here at
+// all. Previously this function alone cost roughly 86 spawns per file.
 function gitFileSignal(projectDir: string, path: string, graphPaths: Set<string>): GitFileSignal {
-  const total = gitCommitCountForPath(projectDir, path);
-  const owner = gitPrimaryOwnerForPath(projectDir, path);
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) {
+    return {
+      file_path: path,
+      commit_count_total: 0,
+      commit_count_30d: 0,
+      commit_count_90d: 0,
+      last_commit_at: null,
+      primary_owner: null,
+      primary_owner_pct: null,
+      contributor_count: 0,
+      co_change_partners: [],
+    };
+  }
+
+  const now = Date.now();
+  const authors = new Map<string, number>();
+  const partners = new Map<string, number>();
+  let within30 = 0;
+  let within90 = 0;
+  let newest = 0;
+
+  for (const commit of commits) {
+    if (commit.author) authors.set(commit.author, (authors.get(commit.author) ?? 0) + 1);
+    const age = now - commit.at;
+    if (commit.at && age <= 30 * DAY_MS_RISK) within30 += 1;
+    if (commit.at && age <= 90 * DAY_MS_RISK) within90 += 1;
+    if (commit.at > newest) newest = commit.at;
+    // Sweeping commits say nothing about coupling — the old code skipped them at >200 files
+    // and that judgement is preserved.
+    if (commit.paths.length > 200) continue;
+    for (const partner of new Set(commit.paths)) {
+      if (partner === path || !graphPaths.has(partner)) continue;
+      partners.set(partner, (partners.get(partner) ?? 0) + 1);
+    }
+  }
+
+  const ranked = [...authors.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     file_path: path,
-    commit_count_total: total,
-    commit_count_30d: gitCommitCountForPath(projectDir, path, "30 days ago"),
-    commit_count_90d: gitCommitCountForPath(projectDir, path, "90 days ago"),
-    last_commit_at: gitLines(projectDir, ["log", "-1", "--format=%cI", "--", path])[0] ?? null,
-    primary_owner: owner.primary_owner,
-    primary_owner_pct: owner.primary_owner_pct,
-    contributor_count: owner.contributor_count,
-    co_change_partners: gitCoChangePartnersForPath(projectDir, path, graphPaths),
+    commit_count_total: commits.length,
+    commit_count_30d: within30,
+    commit_count_90d: within90,
+    last_commit_at: newest ? new Date(newest).toISOString() : null,
+    primary_owner: ranked[0]?.[0] ?? null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
+    contributor_count: ranked.length,
+    co_change_partners: [...partners.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 5)
+      .map(([file_path, count]) => ({ file_path, count })),
   };
 }
 
@@ -12276,12 +12538,21 @@ function gitChangedFiles(projectDir: string): string[] {
     .filter((path) => !isNoisePath(path));
 }
 
+// Hotspots were ALWAYS empty, in every install, and nothing said so. The old query passed
+// `--format=__KAGE_COMMIT__`, and git treats a format string containing no `%` as the NAME of
+// a built-in format — so it exited with "invalid --pretty format" on every call, `gitLines`
+// swallowed the failure, and the feature silently returned nothing. On this repo that was
+// 6,585 file-change lines discarded.
+//
+// Reading the shared index instead removes both the bug and the spawn.
 function globalGitHotspots(projectDir: string, graph: CodeGraph): KageRiskReport["global_hotspots"] {
   const graphPaths = new Set(graph.files.map((file) => file.path));
+  const cutoff = Date.now() - 90 * DAY_MS_RISK;
   const counts = new Map<string, number>();
-  for (const line of gitLines(projectDir, ["log", "--since=90 days ago", "--name-only", "--format=__KAGE_COMMIT__", "-n", "1000"])) {
-    if (line === "__KAGE_COMMIT__" || !graphPaths.has(line)) continue;
-    counts.set(line, (counts.get(line) ?? 0) + 1);
+  for (const [path, commits] of gitHistoryIndex(projectDir).commitsByPath) {
+    if (!graphPaths.has(path)) continue;
+    const recent = commits.filter((commit) => commit.at >= cutoff).length;
+    if (recent > 0) counts.set(path, recent);
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -20703,6 +20974,24 @@ export function kageResume(projectDir: string): ResumeReport {
   };
 }
 
+// The subset of `paths` git tracks (committed or staged). One `git ls-files` call, set
+// membership after — never a per-file subprocess. On any git failure, returns the input
+// unchanged: degrading to the old behavior beats dropping grounding entirely.
+function gitTrackedSubset(projectDir: string, paths: string[]): string[] {
+  try {
+    const tracked = new Set(
+      execFileSync("git", ["ls-files", "-z"], { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .split("\0")
+        .filter(Boolean),
+    );
+    // An all-untracked change set grounds to nothing — an empty list is the honest answer,
+    // and the packet then routes as ungrounded rather than citing phantom paths.
+    return paths.filter((path) => tracked.has(path));
+  } catch {
+    return paths;
+  }
+}
+
 function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary): { packet: MemoryPacket; path: string } {
   const branch = summary.branch ?? "detached";
   const head = summary.head ?? "unknown";
@@ -20787,7 +21076,11 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     status: "approved",
     confidence: 0.62,
     tags: unique(["change-memory", "diff-proposal", "repo-local", branch ? `branch:${slugify(branch)}` : "branch:detached"]),
-    paths: listedChanged.slice(0, 40),
+    // Grounding paths must exist in a CLEAN CHECKOUT, or the packet goes hard-stale the
+    // moment CI validates it: `git status -uall` includes untracked local tooling
+    // (scratch dirs, editor state) that only this working tree has. The body may still
+    // mention them as context; the packet's verifiable grounding is tracked files only.
+    paths: gitTrackedSubset(projectDir, listedChanged).slice(0, 40),
     stack: inferStack(projectDir),
     source_refs: [
       {
@@ -21829,6 +22122,52 @@ export interface MergePacketResult {
   winner: "ours" | "theirs" | null;
   detail: string;
   preserved_path?: string;
+  /** Fields both sides changed away from base differently — the only places a side actually lost. */
+  conflicted_fields?: string[];
+}
+
+// A field-level three-way merge over two packet versions and their common ancestor.
+//
+// Whole-file newest-wins discarded a teammate's work whenever two people touched the same packet,
+// even when they touched DIFFERENT fields — one refining the summary while the other explained the
+// cause is not a conflict, but the old driver silently kept only the newer file. Per field:
+//   - only one side moved       -> take that side (no conflict; both edits survive)
+//   - both moved, same value    -> take it (agreement is not a conflict)
+//   - both moved, different     -> a real conflict; newest updated_at wins THAT field and the field
+//                                  is reported so the loss is visible rather than silent
+function mergePacketObjects(
+  base: Partial<MemoryPacket>,
+  ours: Partial<MemoryPacket>,
+  theirs: Partial<MemoryPacket>,
+  newest: "ours" | "theirs",
+): { merged: Record<string, unknown>; conflicted: string[] } {
+  const merged: Record<string, unknown> = {};
+  const conflicted: string[] = [];
+  const asRecord = (value: Partial<MemoryPacket>): Record<string, unknown> => value as Record<string, unknown>;
+  const [baseRec, oursRec, theirsRec] = [asRecord(base), asRecord(ours), asRecord(theirs)];
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  for (const key of unique([...Object.keys(oursRec), ...Object.keys(theirsRec), ...Object.keys(baseRec)])) {
+    const [b, o, t] = [baseRec[key], oursRec[key], theirsRec[key]];
+    const oursMoved = !same(o, b);
+    const theirsMoved = !same(t, b);
+    if (oursMoved && theirsMoved && !same(o, t)) {
+      conflicted.push(key);
+      merged[key] = newest === "ours" ? o : t;
+    } else if (oursMoved) {
+      merged[key] = o;
+    } else if (theirsMoved) {
+      merged[key] = t;
+    } else {
+      merged[key] = same(o, b) ? (key in oursRec ? o : t) : o;
+    }
+    if (merged[key] === undefined) delete merged[key];
+  }
+  // The merge itself is an update, and `updated_at` drives recency everywhere downstream, so it must
+  // be the newer of the two rather than whichever side happened to win the last field.
+  const recency = [packetRecency(ours), packetRecency(theirs)].sort();
+  if (recency[1]) merged.updated_at = recency[1];
+  return { merged, conflicted };
 }
 
 export function mergePacketFiles(oursPath: string, basePath: string, theirsPath: string, projectDir?: string): MergePacketResult {
@@ -21872,8 +22211,19 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
   }
   const winning = winner === "ours" ? ours! : theirs!;
   const losing = winner === "ours" ? theirs : ours;
+  // With a readable base and BOTH sides present, merge field by field so non-conflicting edits from
+  // each teammate survive. Anything less (a missing side, an unreadable base) falls back to the
+  // whole-file winner, which is the old behaviour and still correct for a genuine race.
+  const baseSide = readSide(basePath);
+  let conflictedFields: string[] | undefined;
+  let mergedRaw: string | null = null;
+  if (ours && theirs && baseSide) {
+    const { merged, conflicted } = mergePacketObjects(baseSide.packet, ours.packet, theirs.packet, winner);
+    conflictedFields = conflicted;
+    mergedRaw = `${JSON.stringify(merged, null, 2)}\n`;
+  }
   try {
-    writeFileSync(oursPath, winning.raw, "utf8");
+    writeFileSync(oursPath, mergedRaw ?? winning.raw, "utf8");
   } catch (error) {
     return { ok: false, winner: null, detail: `kage merge-packet: failed to write merge result: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -21884,7 +22234,10 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
   // vanish with no trace. Preserve it as a review artifact instead of discarding it;
   // best-effort only, and never blocks the merge if writing it fails.
   let preservedPath: string | undefined;
-  if (losing && losing.raw !== winning.raw && projectDir) {
+  // With a real three-way merge, only a genuine field conflict actually loses anything — so preserve
+  // the losing side when there was one, or when we could not merge and fell back to whole-file.
+  const lostSomething = mergedRaw === null || (conflictedFields?.length ?? 0) > 0;
+  if (lostSomething && losing && losing.raw !== winning.raw && projectDir) {
     try {
       const dir = conflictsDir(projectDir);
       mkdirSync(dir, { recursive: true });
@@ -21895,12 +22248,17 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
       preservedPath = file;
     } catch { /* best-effort preservation; a failure here must not fail the merge */ }
   }
+  const detail = mergedRaw === null
+    ? `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`
+    : conflictedFields && conflictedFields.length
+      ? `kage merge-packet: merged both sides; ${conflictedFields.length} field(s) conflicted (${conflictedFields.join(", ")}) and took the ${winner} side.`
+      : "kage merge-packet: merged both sides field by field; no field conflicted, so no edit was lost.";
   return {
     ok: true,
     winner,
-    detail: `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`
-      + (preservedPath ? ` Losing side diverged and was preserved for review: ${preservedPath}` : ""),
+    detail: detail + (preservedPath ? ` Losing side preserved for review: ${preservedPath}` : ""),
     ...(preservedPath ? { preserved_path: preservedPath } : {}),
+    ...(conflictedFields ? { conflicted_fields: conflictedFields } : {}),
   };
 }
 
@@ -22470,6 +22828,72 @@ export function generateSkills(
 // supersede churn when code changed but the memory's claim did not. Refuses
 // when ALL cited evidence is gone — that memory needs supersede or stale, not
 // a rubber stamp.
+export interface ReanchorResult {
+  ok: boolean;
+  project_dir: string;
+  refreshed: string[];
+  skipped_changed: string[];
+  errors: string[];
+}
+
+// Sharpen grounding from whole-file to symbol level for packets that predate an anchor
+// improvement — WITHOUT re-asserting anything. The safety rule is exact: only when every
+// cited file is byte-identical to the stored fingerprint, because then the symbols
+// computed now are provably the symbols that existed at capture. If a file has already
+// moved, symbols computed from today's source would describe code the author never saw,
+// and stamping that as grounding would launder an unchecked claim — so those are
+// refused and left to reverifyMemory, which demands evidence.
+//
+// `last_verified_at` is deliberately untouched: nothing was verified, so the TTL clock
+// must not restart. Only `path_fingerprints` and `updated_at` move.
+export function reanchorUnchangedPackets(projectDir: string): ReanchorResult {
+  ensureMemoryDirs(projectDir);
+  const result: ReanchorResult = { ok: true, project_dir: projectDir, refreshed: [], skipped_changed: [], errors: [] };
+  for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
+    const packet = entry.packet;
+    const stored = packetStoredPathFingerprints(packet);
+    if (!stored.length) continue;
+    const anchorable = stored.filter((print) => pathSupportsSymbolAnchors(print.path));
+    if (!anchorable.some((print) => !(print.symbols && print.symbols.length))) continue;
+
+    const storedShas = new Map(stored.map((print) => [print.path, print.sha256]));
+    const presentPaths = stored.map((print) => print.path).filter((path) => existsSync(join(projectDir, path)));
+    if (!presentPaths.length) continue;
+
+    const next = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+    const nextByPath = new Map(next.map((print) => [print.path, print]));
+    // Per PATH, not per packet: a sibling file moving says nothing about whether THIS
+    // file's symbols are still the ones the author anchored to. Unchanged paths adopt
+    // the sharper fingerprint; changed paths keep the stored one so they stay stale.
+    let changedHere = false;
+    const merged = stored.map((print) => {
+      const fresh = nextByPath.get(print.path);
+      if (!fresh) return print;
+      if (fresh.sha256 !== print.sha256) {
+        changedHere = true;
+        return print;
+      }
+      return fresh;
+    });
+    if (changedHere) result.skipped_changed.push(packet.id);
+
+    const priorAnchorCount = stored.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    const nextAnchorCount = merged.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    if (nextAnchorCount <= priorAnchorCount) continue;
+
+    const freshness = { ...(packet.freshness ?? {}) } as Record<string, unknown>;
+    freshness.path_fingerprints = merged;
+    try {
+      writeJson(entry.path, { ...packet, freshness, updated_at: nowIso() });
+      result.refreshed.push(packet.id);
+    } catch (error) {
+      result.ok = false;
+      result.errors.push(`${packet.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return result;
+}
+
 export function reverifyMemory(projectDir: string, packetId: string, options: { evidence?: string; verifiedBy?: string } = {}): ReverifyMemoryResult {
   ensureMemoryDirs(projectDir);
   const result: ReverifyMemoryResult = {
@@ -22902,6 +23326,84 @@ export interface WorkItemSummary {
   claimed_by: string | null;
   status: MemoryStatus;
   updated_at: string;
+}
+
+export interface WorkItemBrief {
+  ok: boolean;
+  project_dir: string;
+  work_item: { id: string; title: string; body: string } | null;
+  stage: WorkStage | null;
+  claimed_by: string | null;
+  /** Files the proposal cites plus what the code graph says depends on them. */
+  blast_radius: string[];
+  /** The assembled, agent-ready text. */
+  brief: string;
+  errors: string[];
+}
+
+// The missing half of the work-item pipeline. `kage gate list` shows an agent WHAT to pick up, and
+// the stage machine tracks where it got to — but nothing ever told the agent what the team already
+// knows about the code it is about to touch. So a claimed proposal started from zero, which is the
+// exact rediscovery this product exists to prevent.
+//
+// Everything here is assembled from existing parts (recall + risk + the packet store) rather than a
+// new store: a brief is a QUERY, not a document to maintain.
+export function workItemBrief(projectDir: string, packetId: string): WorkItemBrief {
+  ensureMemoryDirs(projectDir);
+  const result: WorkItemBrief = {
+    ok: false, project_dir: projectDir, work_item: null, stage: null, claimed_by: null,
+    blast_radius: [], brief: "", errors: [],
+  };
+  const packet = loadPacketsFromDir(packetsDir(projectDir)).find((entry) => entry.id === packetId);
+  if (!packet) {
+    result.errors.push(`Work item not found: ${packetId}`);
+    return result;
+  }
+  if (packet.type !== "proposal") {
+    result.errors.push(`${packetId} is a ${packet.type}, not a work item. Only proposals are briefed.`);
+    return result;
+  }
+  result.work_item = { id: packet.id, title: packet.title, body: packet.body };
+  result.stage = packet.stage ?? "proposed";
+  result.claimed_by = packet.claimed_by ?? null;
+
+  // What the team knows that bears on this work. Query by the proposal's own words so the brief
+  // reflects the task, not the whole store.
+  const recalled = recall(projectDir, `${packet.title}\n${packet.summary}`, 6)
+    .results.filter((entry) => entry.packet.id !== packet.id);
+
+  const cited = packet.paths.filter((path) => meaningfulMemoryPath(path));
+  let risk: KageRiskReport | null = null;
+  try { risk = kageRisk(projectDir, cited); } catch { /* risk is advisory; a brief without it still helps */ }
+  result.blast_radius = unique([
+    ...cited,
+    ...Object.values(risk?.targets ?? {}).flatMap((target) => target.dependents ?? []),
+  ]);
+
+  result.brief = [
+    `# Work item: ${packet.title}`,
+    "",
+    packet.body,
+    "",
+    `Stage: ${result.stage}${result.claimed_by ? ` · claimed by ${result.claimed_by}` : ""}`,
+    "",
+    "## What the team already knows about this code",
+    ...(recalled.length
+      ? recalled.flatMap((entry) => [
+          "",
+          `- ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
+          `  ${entry.packet.summary}`,
+          ...(entry.packet.paths.length ? [`  (${entry.packet.paths.slice(0, 3).join(", ")})`] : []),
+        ])
+      : ["", "_No prior memory cites this code. You are the first — capture what you learn._"]),
+    "",
+    "## Blast radius",
+    ...(result.blast_radius.length
+      ? result.blast_radius.slice(0, 20).map((path) => `- ${path}`)
+      : ["_The proposal cites no code yet; name the files it touches before claiming it._"]),
+  ].join("\n");
+  result.ok = true;
+  return result;
 }
 
 export function listWorkItems(projectDir: string, options: { stage?: WorkStage } = {}): WorkItemSummary[] {

@@ -7,6 +7,7 @@ import { KAGE_PROTOCOL_VERSION, type EvidenceEvent } from "../protocol/index.js"
 import { EventStore } from "../storage/event-store.js";
 import { Repository } from "../repo-model/repository.js";
 import { isInjectableTrustState } from "../repo-model/types.js";
+import type { ModelExtractionProvider } from "./model-provider.js";
 import {
   Pipeline,
   REPOSITORY_COMPILER_NAME,
@@ -121,4 +122,96 @@ test("running an empty repository is a no-op that fabricates nothing", async () 
   // An empty run reports honest zero lag and a null checkpoint cursor (never a fabricated event id).
   const checkpoint = model.getCheckpoint(REPOSITORY_COMPILER_NAME, "repo-1");
   assert.equal(checkpoint?.last_event_id ?? null, null);
+});
+
+// ── The semantic pass, wired ────────────────────────────────────────────────
+// The deterministic extractors see shapes (a command failed, then passed). They cannot see
+// WHY a change was made. The model pass proposes that — and must land in the same admission
+// path as everything else, never a side channel.
+
+function seededEvents(repositoryId: string): EvidenceEvent[] {
+  const base = {
+    protocol_version: KAGE_PROTOCOL_VERSION,
+    repository_id: repositoryId,
+    task_id: "task-sem-1",
+    privacy_class: "team_metadata" as const,
+  };
+  return [
+    { ...base, event_id: "ev-sem-1", event_type: "session_start" as const, occurred_at: "2026-07-28T00:00:00.000Z", source_fingerprint: "fp-1", payload: {} },
+    { ...base, event_id: "ev-sem-2", event_type: "tool_result" as const, occurred_at: "2026-07-28T00:01:00.000Z", source_fingerprint: "fp-2", payload: { tool: "Bash", command: "npm test", exit_code: 1 } },
+    { ...base, event_id: "ev-sem-3", event_type: "tool_result" as const, occurred_at: "2026-07-28T00:02:00.000Z", source_fingerprint: "fp-3", payload: { tool: "Bash", command: "npm test", exit_code: 0 } },
+    { ...base, event_id: "ev-sem-4", event_type: "session_end" as const, occurred_at: "2026-07-28T00:03:00.000Z", source_fingerprint: "fp-4", payload: {} },
+  ];
+}
+
+function fakeProvider(response: unknown): ModelExtractionProvider {
+  return {
+    provider_id: "fake",
+    extract: async () => ({ response, input_tokens: 10, output_tokens: 5, cost_usd: null }),
+  };
+}
+
+test("the semantic pass contributes candidates through the same admission path", async () => {
+  const db = migratedDatabase();
+  const model = new Repository(db);
+  const events = new EventStore(db);
+  const repositoryId = "repository:sem";
+  for (const event of seededEvents(repositoryId)) events.append(event);
+
+  const withoutModel = await new Pipeline({ model, events }).run(repositoryId);
+
+  const db2 = migratedDatabase();
+  const model2 = new Repository(db2);
+  const events2 = new EventStore(db2);
+  for (const event of seededEvents(repositoryId)) events2.append(event);
+
+  const withModel = await new Pipeline({
+    model: model2,
+    events: events2,
+    modelProvider: fakeProvider({
+      entities: [{ kind: "component", name: "Retry policy", evidence_event_ids: ["ev-sem-3"] }],
+      claims: [{
+        entity_name: "Retry policy",
+        claim_kind: "rationale",
+        content: "The retry limit stays at 3 because the vendor rate-limits above that.",
+        evidence_event_ids: ["ev-sem-3"],
+        impact_class: "medium",
+      }],
+    }),
+    modelPolicy: { mode: "local" },
+  }).run(repositoryId);
+
+  // The model added something the deterministic extractors could not see.
+  assert.ok(
+    withModel.candidates > withoutModel.candidates,
+    `expected the model pass to add candidates (${withoutModel.candidates} -> ${withModel.candidates})`,
+  );
+
+  // And whatever it proposed is NOT injectable: a model is a source of hypotheses, and the
+  // store's own gate is the only thing that can make a claim readable by an agent.
+  for (const entity of model2.listEntities(repositoryId)) {
+    for (const claim of model2.claimsForEntity(entity.entity_id)) {
+      if (claim.normalized_content.includes("vendor rate-limits")) {
+        assert.equal(isInjectableTrustState(claim.trust_state), false, "a model proposal must never be born injectable");
+      }
+    }
+  }
+});
+
+test("a provider that throws leaves the deterministic pipeline intact", async () => {
+  const db = migratedDatabase();
+  const model = new Repository(db);
+  const events = new EventStore(db);
+  const repositoryId = "repository:sem-fail";
+  for (const event of seededEvents(repositoryId)) events.append(event);
+
+  const result = await new Pipeline({
+    model,
+    events,
+    modelProvider: { provider_id: "broken", extract: async () => { throw new Error("upstream down"); } },
+    modelPolicy: { mode: "local" },
+  }).run(repositoryId);
+
+  // Fail-open: the run completes and the deterministic claims are still there.
+  assert.ok(result.episodes > 0, "episodes still compiled despite the model failure");
 });

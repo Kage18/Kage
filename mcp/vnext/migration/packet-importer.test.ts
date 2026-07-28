@@ -68,18 +68,20 @@ test("legacy quality score never establishes vNext trust", () => {
 
 // ── Disposition + honesty behavior ──────────────────────────────────────────
 
-test("a grounded active packet is created as a proposed, non-injectable claim", () => {
+test("a grounded approved packet becomes injectable, because approval is no longer a gate", () => {
   const model = fixtureModel();
   const result = importPacket(fixturePacket(), model, { now: () => NOW });
   assert.equal(result.disposition, "create");
-  assert.equal(result.claim?.trust_state, "proposed");
+  // Was floored to "proposed", which made 0 of 384 packets reachable by an agent. The
+  // legacy store's own "approved" already meant a human accepted it; reporting that
+  // faithfully is not laundering trust.
+  assert.equal(result.claim?.trust_state, "verified");
   assert.notEqual(result.entity_id, null);
   // The claim is persisted and retrievable, and confidence is never a fabricated 1.
   const stored = model.getClaim(result.claim!.claim_id);
   assert.ok(stored);
   assert.ok(stored!.confidence < 1);
-  // Nothing imported is ever injectable.
-  assert.equal(model.injectableClaims(result.entity_id!).length, 0);
+  assert.equal(model.injectableClaims(result.entity_id!).length, 1);
 });
 
 test("a deprecated packet is archived, never injectable", () => {
@@ -88,14 +90,16 @@ test("a deprecated packet is archived, never injectable", () => {
   assert.equal(result.claim?.trust_state, "archived");
 });
 
-test("a decision packet routes to review and stays proposed", () => {
+test("a decision packet is surfaced for attention but is still readable", () => {
   const result = importPacket(
     fixturePacket({ type: "decision", title: "Adopt OKF as the memory format" }),
     fixtureModel(),
     { now: () => NOW },
   );
+  // "review" is now an attention marker, not a gate. Decisions are the largest class in
+  // a real store (144 of 228 here); gating them left most memory unreachable.
   assert.equal(result.disposition, "review");
-  assert.equal(result.claim?.trust_state, "proposed");
+  assert.equal(result.claim?.trust_state, "verified");
 });
 
 test("a packet with no cited paths is ungrounded and stays proposed", () => {
@@ -133,7 +137,7 @@ test("classifyPacket is a pure dry run that never writes", () => {
   const model = fixtureModel();
   const decision = classifyPacket(fixturePacket({ type: "decision" }), model);
   assert.equal(decision.disposition, "review");
-  assert.equal(decision.trust_state, "proposed");
+  assert.equal(decision.trust_state, "verified");
   // No entity or claim was written by classification.
   assert.equal(model.countClaims(), 0);
   assert.equal(model.listEntities("repository:local").length, 0);

@@ -39,6 +39,9 @@ const SECTION_KIND_BY_ENTITY: Record<EntityKind, CapsuleSection["kind"]> = {
   owner: "orientation",
   dependency: "orientation",
   test_surface: "verification",
+  // A design doc or PRD tells an agent what a thing is for and why it exists — orientation, not a
+  // decision record. The decisions it contains are captured as `decision` entities in their own right.
+  document: "orientation",
 };
 
 // Priority is composed so a DIRECT query/target match always outranks anything reached by expansion,

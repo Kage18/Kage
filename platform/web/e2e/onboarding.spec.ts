@@ -13,11 +13,11 @@ test.describe("onboarding and the accessible shell", () => {
     await expect(skip).toHaveAttribute("href", "#main-content");
   });
 
-  test("a fresh repository is guided through local audit-mode onboarding", async ({ page }) => {
+  test("the operator lands on Attention — decisions, not a dashboard", async ({ page }) => {
     await page.goto("/app/");
-    // Audit mode never modifies agent requests — the onboarding flow says so explicitly.
-    await expect(page.getByText(/audit mode/i)).toBeVisible();
-    await expect(page.getByText(/does not modify agent requests/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Attention" })).toBeVisible();
+    // The page states its own goal condition: an empty queue is success, not absence.
+    await expect(page.getByText(/goal state of this page is empty/i)).toBeVisible();
     // The local flow never asks for a team account or GitHub write permission.
     await expect(page.getByText(/team account/i)).toHaveCount(0);
   });

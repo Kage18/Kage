@@ -257,6 +257,45 @@ function patchGitIdentity(body: unknown, projectDir: string): void {
 // viewer. The model is opened per request and closed immediately — it never takes the runtime's writer
 // lock (openRepositoryModel just opens + migrates), so these reads run alongside a live `kage up`
 // runtime under SQLite WAL without contending for it.
+// The write half of the portal API, mounted on the SAME server that serves the SPA — for exactly the
+// reason the read half is (a same-origin fetch reaches the origin it was served from, and nowhere
+// else). Symmetrical with servePortalApi: always ends `res`, never rejects, opens and closes the model
+// per request so it never holds the runtime's writer lock.
+export async function servePortalMutation(
+  projectDir: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const { handleReviewMutation, REVIEW_ACTIONS } = await import("./vnext/api/review.js");
+    type ReviewAction = Parameters<typeof handleReviewMutation>[2];
+    // POST /v2/review-items/:id/:action — the one authorized write surface.
+    const match = /^\/v2\/review-items\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    const reviewItemId = match ? decodeURIComponent(match[1]) : "";
+    const action = match ? match[2] : "";
+    if (!match || !reviewItemId || reviewItemId.includes("/") || !REVIEW_ACTIONS.has(action)) {
+      json(res, 404, { ok: false, error: "not_found" });
+      return;
+    }
+    const body = await readBody(req);
+    const { openRepositoryModel } = await import("./vnext/migration/model-store.js");
+    const opened = openRepositoryModel(projectDir);
+    try {
+      const result = handleReviewMutation(opened.model, reviewItemId, action as ReviewAction, body);
+      json(res, result.status, result.body);
+    } finally {
+      opened.close();
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error && /sqlite/i.test(error.message)
+        ? "the knowledge portal API needs a Node build with node:sqlite; memory, recall, and the legacy viewer still work"
+        : "the repository model could not be opened for writing";
+    json(res, 503, { ok: false, error: message });
+  }
+}
+
 export async function servePortalApi(projectDir: string, url: URL, res: ServerResponse): Promise<void> {
   try {
     const { matchPortalRoute, handlePortalRoute } = await import("./vnext/api/router.js");
@@ -350,7 +389,7 @@ export function viewerReportPaths(projectRoot: string): Record<string, string> {
 }
 
 export interface LiveFeedEvent {
-  type: "packet_written" | "packet_updated" | "value_event";
+  type: "packet_written" | "packet_updated" | "value_event" | "work_changed";
   title?: string;
   path?: string;
   event?: Record<string, unknown>;
@@ -406,6 +445,8 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
   const debounceMs = options.debounceMs ?? LIVE_FEED_DEBOUNCE_MS;
   const packetsDir = join(projectRoot, ".agent_memory", "packets");
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
+  const workDir = join(projectRoot, ".agent_memory", "work");
+  const commandLogPath = join(workDir, "commands.jsonl");
   const valuePath = join(reportsDir, "value.json");
   const clients = new Set<ServerResponse>();
   const watchers: FSWatcher[] = [];
@@ -428,6 +469,18 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }
   }
   let seenValueEvents = readValueEvents().length;
+
+  // Commands are the only decisions in the whole state machine, so they are the only thing
+  // that can change the board without a commit. Track how many we have already announced so a
+  // rewritten or appended log never replays events a client has seen.
+  function readCommandLines(): string[] {
+    try {
+      return readFileSync(commandLogPath, "utf8").split("\n").filter((line) => line.trim());
+    } catch {
+      return [];
+    }
+  }
+  let seenCommands = readCommandLines().length;
 
   function broadcast(event: LiveFeedEvent): void {
     const payload = `data: ${JSON.stringify(event)}\n\n`;
@@ -452,6 +505,25 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
       stage: summary.stage,
       claimed_by: summary.claimed_by,
     });
+  }
+
+  function onCommandChange(): void {
+    const lines = readCommandLines();
+    if (lines.length < seenCommands) seenCommands = 0; // log rewritten
+    for (const line of lines.slice(seenCommands)) {
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      broadcast({
+        // The event names the decision rather than just saying "something changed", so a
+        // client can show WHO did WHAT without refetching the board to find out.
+        type: "work_changed",
+        title: typeof parsed.kind === "string" ? String(parsed.kind) : "work",
+        path: join(".agent_memory", "work", "commands.jsonl"),
+        event: parsed,
+        ts: typeof parsed.ts === "string" ? parsed.ts : new Date().toISOString(),
+      });
+    }
+    seenCommands = lines.length;
   }
 
   function onValueChange(): void {
@@ -492,6 +564,15 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }));
   } catch {
     // packets dir missing: no packet events
+  }
+  try {
+    mkdirSync(workDir, { recursive: true });
+    watchers.push(watch(workDir, (_event, filename) => {
+      if (String(filename ?? "") !== "commands.jsonl") return;
+      debounced("commands", onCommandChange);
+    }));
+  } catch {
+    // work dir missing: no work events
   }
   try {
     mkdirSync(reportsDir, { recursive: true });
@@ -1140,8 +1221,121 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     // (main.tsx: `new KageApi("", token)`), so the daemon that serves the portal must also answer its
     // API — otherwise the shell loads and every panel shows "Kage API 404" (the 4.0.1 shell fix
     // exposed exactly this). Reads only, localhost, no token: same trust boundary as /kage/* reports.
+    // The attention queue derives from packets + git + the command log (kernel side), not
+    // from the sqlite model — served directly so it works even where node:sqlite doesn't.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/attention") {
+      import("./vnext/orchestrator/attention.js")
+        .then(({ attentionQueue }) => json(res, 200, { items: attentionQueue(projectRoot) }))
+        .catch(() => json(res, 503, { ok: false, error: "attention derivation failed" }));
+      return;
+    }
+    // The Work board: derived stages + brief knowledge + estimates. Kernel-side like
+    // attention, so it works on any Node build.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/work") {
+      import("./vnext/orchestrator/board.js")
+        .then(({ buildWorkBoard }) => json(res, 200, buildWorkBoard(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // Acting on an attention item. Only `reverify` is offered, and deliberately so: it is the
+    // one queue action that is a genuine single decision. `supersede` requires choosing a
+    // replacement packet, and `retire` has no kernel operation at all — offering buttons for
+    // either would be offering buttons that cannot work.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/attention/reverify") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const ref = String(body.ref ?? "").trim();
+          const actor = String(body.actor ?? "").trim();
+          if (!ref) { json(res, 400, { ok: false, error: "an attention item ref is required" }); return; }
+          const { reverifyMemory } = await import("./kernel.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          const result = reverifyMemory(projectRoot, ref, { verifiedBy: actor || "portal" });
+          // reverifyMemory refuses to rubber-stamp a packet whose cited code is all gone.
+          // That refusal is a RESULT, not a server error, and the caller must see the reason.
+          json(res, result.ok ? 200 : 409, {
+            ok: result.ok,
+            error: result.ok ? undefined : result.errors[0],
+            result,
+            attention: attentionQueue(projectRoot),
+          });
+        } catch (error) {
+          json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
+    // Proof: what Kage measurably did. Derived from the same stage log the board reads plus
+    // the value ledger, so it can never disagree with the board — and unmeasured metrics come
+    // back null with an unlock, never as a zero dressed up as a result.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/proof") {
+      import("./vnext/orchestrator/proof.js")
+        .then(({ buildProof }) => json(res, 200, buildProof(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `proof unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // Agents: wired vs actually working vs contributing knowledge.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/agents") {
+      import("./vnext/orchestrator/agents.js")
+        .then(({ buildAgentsReport }) => json(res, 200, buildAgentsReport(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `agents unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // One work item in full. Kept separate from the board because the board is a glance and
+    // this is an audit — it costs a brief and a risk pass that the board must not pay per card.
+    if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/work/")) {
+      const workId = decodeURIComponent(requestUrl.pathname.slice("/v2/work/".length));
+      import("./vnext/orchestrator/work-detail.js")
+        .then(({ buildWorkDetail }) => {
+          const detail = buildWorkDetail(projectRoot, workId);
+          // A missing item is a 404, never an empty item rendered as if it existed.
+          if (!detail) { json(res, 404, { ok: false, error: `no work item: ${workId}` }); return; }
+          json(res, 200, detail);
+        })
+        .catch((error) => json(res, 503, { ok: false, error: `work detail unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // The command loop (tech design §13): the app never mutates state directly. It issues a
+    // command, which is validated, appended to the log, and reduced — every surface then
+    // re-derives from the same events the CLI writes.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/commands") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const kind = String(body.kind ?? "");
+          const workId = String(body.work_id ?? "");
+          const actor = String(body.actor ?? "").trim();
+          const note = body.note === undefined ? undefined : String(body.note);
+          if (!actor) { json(res, 400, { ok: false, error: "an actor is required — a command is someone's decision" }); return; }
+          const { appendCommandEvent } = await import("./vnext/orchestrator/events.js");
+          const { buildWorkBoard } = await import("./vnext/orchestrator/board.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          if (kind !== "task.claimed" && kind !== "task.released" && kind !== "gate.approved" && kind !== "gate.held") {
+            json(res, 400, { ok: false, error: `unknown command kind: ${kind}` });
+            return;
+          }
+          const event = appendCommandEvent(projectRoot, { kind, work_id: workId, actor, note });
+          // Answer with the re-derived state so the caller never guesses what the command did.
+          json(res, 200, { ok: true, event, work: buildWorkBoard(projectRoot), attention: attentionQueue(projectRoot) });
+        } catch (error) {
+          // Validation failures (self-approval, missing ids) are 409 — the command was
+          // understood and deliberately refused, which is not a server fault.
+          json(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
     if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/")) {
       void servePortalApi(projectRoot, requestUrl, res);
+      return;
+    }
+    // The portal's ONE write surface. Without this the SPA loads, renders the queue, and every
+    // action 404s: the POST handler lived only on the vNext runtime server, which serves no static
+    // assets, so nothing that opened the portal could ever reach it. Same localhost trust boundary
+    // as the reads above; the acting identity, optimistic version and self-approval gates are all
+    // enforced inside handleReviewMutation.
+    if (req.method === "POST" && requestUrl.pathname.startsWith("/v2/")) {
+      void servePortalMutation(projectRoot, requestUrl, req, res);
       return;
     }
     let filePath: string | null = null;

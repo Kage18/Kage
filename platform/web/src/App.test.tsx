@@ -18,7 +18,7 @@ describe("App shell", () => {
   test("renders repository navigation and a loading status", () => {
     render(<App api={fakeApi.pending()} />);
     expect(
-      screen.getByRole("navigation", { name: "Repository knowledge" }),
+      screen.getByRole("navigation", { name: "Sections" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Loading repository knowledge",

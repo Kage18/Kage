@@ -176,6 +176,42 @@ test("checks write is honoured only when the installation granted it", async () 
   assert.deepEqual(result, { status: "published", check_run_id: "99" });
 });
 
+// The check ran, GitHub returned 201, and the assertion above passed — while the request
+// carried NO BODY at all. head_sha, conclusion, title and summary were accepted by the
+// function signature and silently dropped, so the published check said nothing. Asserting on
+// the returned status alone is what let that survive; assert on what actually goes on the wire.
+test("the published check actually transmits the verdict", async () => {
+  let sentBody = "";
+  let sentContentType = "";
+  const fetcher: Fetcher = async (_url, init) => {
+    sentBody = String((init as { body?: unknown }).body ?? "");
+    sentContentType = ((init as { headers?: Record<string, string> }).headers ?? {})["content-type"] ?? "";
+    return { ok: true, status: 201, json: async () => ({ id: 99 }) };
+  };
+  await publishCheck(
+    { installation_id: "42", owner: "acme", repo: "api", permissions: { checks: "write" } },
+    {
+      head_sha: "abc123",
+      conclusion: "failure",
+      title: "Kage contract check",
+      summary: "A public contract changed without a decision packet.",
+      details_url: "https://kage.test/receipt/1",
+    },
+    { apiBaseUrl: "https://api.github.test", token: { token: "t", expires_at: "", permissions: {} }, fetcher },
+  );
+
+  assert.equal(sentContentType, "application/json");
+  const body = JSON.parse(sentBody) as Record<string, unknown>;
+  assert.equal(body.head_sha, "abc123");
+  assert.equal(body.conclusion, "failure");
+  assert.equal(body.status, "completed", "a check reporting a conclusion must be marked completed");
+  assert.equal(body.details_url, "https://kage.test/receipt/1");
+  const output = body.output as { title?: string; summary?: string };
+  assert.equal(output.title, "Kage contract check");
+  assert.match(output.summary ?? "", /public contract changed/);
+  assert.equal(body.name, "Kage");
+});
+
 test("a check summary carrying raw payload content is refused", async () => {
   await assert.rejects(
     () =>

@@ -6,6 +6,11 @@
 !.agent_memory/packets/
 !.agent_memory/packets/*.json
 !.agent_memory/packets/*.md
+# The merge driver preserves the side it did not pick here. Ignoring it meant a teammate
+# whose edit lost a merge was never told — the loser existed only on the machine that
+# performed the merge. Tracked so a lost edit is reviewable in the PR that caused it.
+!.agent_memory/conflicts/
+!.agent_memory/conflicts/*.md
 # The rules above are root-anchored (deliberately, so root packets stay tracked).
 # A .agent_memory that appears anywhere else (e.g. a CLI subprocess run with cwd
 # pinned to a subdir) is always leaked test/dev state, never something to track.

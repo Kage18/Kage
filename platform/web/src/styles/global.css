@@ -70,6 +70,50 @@ a {
   }
 }
 
+/* Form controls. There were NO element-level styles for input or button, so every control
+   fell back to the browser default — a white box with square corners — which read as broken
+   against the dark theme and disagreed with the controls that did have classes. Styling the
+   ELEMENTS rather than adding another class means a control cannot be added without picking
+   up the theme. */
+
+input,
+select,
+textarea {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  max-width: 100%;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-muted);
+}
+
+button {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-neutral-tint);
+}
+
+/* A disabled control must LOOK unavailable, not merely refuse the click. */
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* ---- App shell layout ---- */
 
 .kage-app {
@@ -1207,6 +1251,95 @@ a {
   line-height: 1.4;
 }
 
+/* Shared chrome for the orchestrator pages (Attention, Work, Proof). These classes were used
+   by every one of those pages and styled by none of them, so cards had no borders and inline
+   spans ran together — "verifying" collided with "claimed by kushal" with no space at all. */
+.page-header {
+  margin-bottom: var(--space-5);
+}
+.page-subtitle {
+  margin: var(--space-2) 0 0;
+  max-width: 70ch;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+.entity-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+.entity-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+.entity-card h2 {
+  margin: var(--space-2) 0;
+  font-size: var(--font-size-lg);
+}
+/* Flex with a gap is what actually fixes the run-together text: these headers hold a stage
+   pill next to free-floating spans, and inline elements alone give no separation. */
+.entity-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.pill {
+  display: inline-block;
+  padding: 0.15rem var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised, rgba(127, 127, 127, 0.16));
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+}
+.empty-state {
+  color: var(--color-text-muted);
+  line-height: 1.5;
+  max-width: 70ch;
+}
+
+/* Proof page. A measured number is the loudest thing on the card; an unmeasured one recedes
+   to muted body weight so the eye never reads "Not measured" as a result. */
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-3);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-6);
+}
+.proof-grid > li {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+.proof-value {
+  margin: var(--space-2) 0;
+  font-size: 2rem;
+  line-height: 1.1;
+  font-weight: var(--font-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent);
+}
+/* An unmeasured metric must not look like a result. Same weight as body text and the muted
+   colour, so the accent green stays reserved for numbers Kage actually measured. */
+.proof-value-absent {
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
+}
+.proof-grid > li.proof-card-unmeasured {
+  border-style: dashed;
+  background: transparent;
+}
+
 /* Ledger detail cards. */
 .ledger-detail {
   display: grid;
@@ -1248,4 +1381,234 @@ a {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Orchestrator surfaces — shell chrome, live state, and the agent grid.
+
+   The product is an operating surface, not a document viewer, so the shell has
+   to carry three things a wiki does not: what this app IS, whether it is LIVE,
+   and which section of the work you are in.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.shell-tagline {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  letter-spacing: 0.01em;
+}
+
+/* Push live state to the far end of the banner — it is ambient status, not a control. */
+.live-indicator {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--color-neutral);
+  flex: none;
+}
+
+/* Live is stated in words as well as color — a dot alone tells a colorblind or
+   distracted reader nothing, and "am I seeing current data" is too important to imply. */
+.live-indicator[data-state="live"] .live-dot {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 22%, transparent);
+}
+.live-indicator[data-state="unavailable"] .live-dot {
+  background: var(--color-warning);
+}
+.live-indicator[data-state="live"] .live-label {
+  color: var(--color-success);
+  font-weight: var(--font-weight-medium);
+}
+.live-last {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--color-border);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Grouped navigation. The group label is quiet and structural; it orients without
+   competing with the links it introduces. */
+.nav-group + .nav-group {
+  margin-top: var(--space-5);
+}
+.nav-group-label {
+  margin: 0 0 var(--space-2);
+  padding: 0 var(--space-3);
+  font-size: 0.6875rem;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* ── Agents ─────────────────────────────────────────────────────────────── */
+
+.agent-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.agent-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: var(--space-4);
+}
+
+.agent-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  /* A status stripe carries the state at a glance without coloring the whole card,
+     which would drown the numbers the card exists to show. */
+  border-left: 3px solid var(--color-neutral);
+}
+.agent-card[data-tone="success"] { border-left-color: var(--color-success); }
+.agent-card[data-tone="warning"] { border-left-color: var(--color-warning); }
+.agent-card[data-tone="critical"] { border-left-color: var(--color-critical); }
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.agent-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+}
+
+.agent-status {
+  display: inline-block;
+  padding: 0.1rem var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  background: var(--color-neutral-tint);
+  color: var(--color-neutral);
+  white-space: nowrap;
+}
+.agent-status[data-tone="success"] { background: var(--color-success-tint); color: var(--color-success); }
+.agent-status[data-tone="warning"] { background: var(--color-warning-tint); color: var(--color-warning); }
+.agent-status[data-tone="critical"] { background: var(--color-critical-tint); color: var(--color-critical); }
+
+.pill[data-tone="critical"] {
+  background: var(--color-critical-tint);
+  color: var(--color-critical);
+  border-color: color-mix(in srgb, var(--color-critical) 35%, transparent);
+}
+
+.agent-meaning {
+  margin: var(--space-1) 0 var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.agent-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+.agent-stats div { margin: 0; }
+.agent-stats dt {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+.agent-stats dd {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
+}
+.agent-stat-strong { color: var(--color-accent); }
+
+/* A next step is an instruction, so it gets the emphasis of a callout rather than
+   sitting in the same muted grey as the statistics above it. */
+.agent-next {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-tint);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.agent-config {
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* Browse-list controls. Search and health filters sit together above the results because they
+   answer one question — "which of these do I care about" — and separating them would imply
+   they are independent tools. */
+.list-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) 0 var(--space-2);
+}
+
+.list-search {
+  flex: 1 1 18rem;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.list-filters {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--color-neutral-tint);
+  border-radius: var(--radius-md);
+}
+
+.list-filter {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+.list-filter:hover { color: var(--color-text); }
+/* The active filter is carried by aria-pressed, so the styling follows the semantics rather
+   than a parallel class — the two can never disagree. */
+.list-filter[aria-pressed="true"] {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.entity-card-health {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
 }

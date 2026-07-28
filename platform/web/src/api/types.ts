@@ -5,6 +5,7 @@
 
 // --- Inlined backend enums (string-literal unions, mirrored verbatim) ---
 export type EntityKind =
+  | "document"
   | "repository"
   | "feature"
   | "component"
@@ -596,4 +597,151 @@ export interface TeamReportDto {
     oldest_pending_days: number | null;
     contradictions: number;
   };
+}
+
+// ── Attention (orchestrator §10) ─────────────────────────────────────────────
+// Derived on read from the command log + git evidence + memory health; never stored.
+export interface AttentionItemDto {
+  kind: "unclaimed_building" | "overlap_warning" | "parked" | "contradiction" | "stale_critical";
+  severity: number;
+  ref: string;
+  summary: string;
+  actions: string[];
+}
+
+export interface AttentionQueueDto {
+  items: AttentionItemDto[];
+}
+
+// ── Work board (orchestrator §8) ─────────────────────────────────────────────
+// Stages are DERIVED from commands + git evidence; nothing here is user-editable state.
+export interface WorkEvidenceDto {
+  hash: string;
+  branch: string;
+  confidence: string;
+}
+
+export interface WorkEstimateDto {
+  radius_class: "S" | "M" | "L";
+  tokens_p50: number;
+  tokens_p90: number;
+  sessions_p50: number;
+  confidence: "matched" | "cold_start" | "none";
+  basis: string[];
+}
+
+export interface WorkCardDto {
+  work_id: string;
+  title: string;
+  stage: "proposed" | "claimed" | "building" | "verifying" | "done";
+  claimed_by: string | null;
+  blast_paths: string[];
+  evidence: WorkEvidenceDto[];
+  weak_evidence: number;
+  stage_log: Array<{ stage: string; at: string; caused_by: string[] }>;
+  estimate: WorkEstimateDto;
+  knowledge: Array<{ title: string; summary: string }>;
+}
+
+export interface WorkBoardDto {
+  project_dir: string;
+  derived_at: string;
+  items: WorkCardDto[];
+  totals: Record<string, number>;
+}
+
+// Agents (orchestrator §8). "Configured" and "actually feeding memory" are different facts,
+// so the status distinguishes them: a wired agent Kage has never observed is the most common
+// broken install and must not read as healthy.
+export type AgentStatus = "active" | "idle" | "silent";
+
+export interface AgentDto {
+  agent: string;
+  status: AgentStatus;
+  configured: boolean;
+  config_path: string | null;
+  last_seen_at: string | null;
+  sessions: number;
+  observations: number;
+  durable_observations: number;
+  next_step: string | null;
+}
+
+export interface AgentsReportDto {
+  project_dir: string;
+  generated_at: string;
+  agents: AgentDto[];
+  never_observed: boolean;
+}
+
+// One work item in full (orchestrator §8). The board answers "what should I pick up"; this
+// answers "why does it say that stage" — every transition names its evidence in readable terms.
+export interface StageStepDto {
+  stage: string;
+  at: string;
+  caused_by: string[];
+  evidence_label: string;
+}
+
+export interface WorkDetailDto {
+  work_id: string;
+  title: string;
+  body: string;
+  stage: string;
+  stored_stage: string;
+  claimed_by: string | null;
+  blast_paths: string[];
+  dependents: string[];
+  stage_log: StageStepDto[];
+  evidence: WorkEvidenceDto[];
+  weak_evidence: number;
+  estimate: WorkEstimateDto;
+  knowledge: Array<{ title: string; summary: string }>;
+  errors: string[];
+}
+
+// Acting on an attention item. Only `reverify` is exposed: it is the one queue action that
+// is a single decision. `supersede` needs a replacement packet chosen, and `retire` has no
+// kernel operation — the page says so rather than offering buttons that cannot work.
+export interface ReverifyResultDto {
+  ok: boolean;
+  packet_id: string;
+  refreshed_paths: string[];
+  missing_paths: string[];
+  changed_paths: string[];
+  was_stale: boolean;
+  errors: string[];
+}
+
+export interface AttentionActionResultDto {
+  ok: boolean;
+  error?: string;
+  result?: ReverifyResultDto;
+  attention?: AttentionItemDto[];
+}
+
+// ── Proof (orchestrator §8) ──────────────────────────────────────────────────
+// `value: null` is a first-class state, not an error: it means the metric was never measured,
+// and `unlock` says what would make it measurable. The page must never render a null as 0.
+export interface ProofMetricDto {
+  id: string;
+  label: string;
+  value: number | null;
+  unit: "count" | "days" | "percent" | "tokens";
+  formula: string;
+  unlock?: string;
+}
+
+export interface ProofReportDto {
+  project_dir: string;
+  generated_at: string;
+  metrics: ProofMetricDto[];
+  cycle_times: Array<{ work_id: string; title: string; days: number }>;
+}
+
+export interface CommandResultDto {
+  ok: boolean;
+  error?: string;
+  work?: WorkBoardDto;
+  attention?: AttentionItemDto[];
 }

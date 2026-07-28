@@ -3,7 +3,14 @@
 // machine token as a Bearer header. Every method returns a DTO from the generated `types.ts`, so the
 // wire shape is checked against the backend at build time.
 
-import type { TeamReportDto,
+import type {
+  AttentionQueueDto,
+  WorkBoardDto,
+  ProofReportDto,
+  WorkDetailDto,
+  AgentsReportDto,
+  AttentionActionResultDto,
+  CommandResultDto, TeamReportDto,
   EntityDetailDto,
   EntityListDto,
   FeatureListDto,
@@ -45,6 +52,16 @@ export interface KageApiClient {
   systemMap(view?: SystemMapView, focus?: string | null): Promise<SystemMapDto>;
   features(): Promise<FeatureListDto>;
   components(): Promise<EntityListDto>;
+  attention(): Promise<AttentionQueueDto>;
+  work(): Promise<WorkBoardDto>;
+  proof(): Promise<ProofReportDto>;
+  workItem(id: string): Promise<WorkDetailDto>;
+  agents(): Promise<AgentsReportDto>;
+  reverify(ref: string, actor: string): Promise<AttentionActionResultDto>;
+  command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto>;
+  /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
+  knowledgeList(kind: string): Promise<EntityListDto>;
+  knowledgeDetail(kind: string, slug: string): Promise<EntityDetailDto>;
   flows(): Promise<EntityListDto>;
   runbooks(): Promise<EntityListDto>;
   decisions(): Promise<EntityListDto>;
@@ -106,6 +123,58 @@ export class KageApi implements KageApiClient {
 
   components(): Promise<EntityListDto> {
     return this.get<EntityListDto>("/v2/components");
+  }
+
+  attention(): Promise<AttentionQueueDto> {
+    return this.get<AttentionQueueDto>("/v2/attention");
+  }
+
+  work(): Promise<WorkBoardDto> {
+    return this.get<WorkBoardDto>("/v2/work");
+  }
+
+  proof(): Promise<ProofReportDto> {
+    return this.get<ProofReportDto>("/v2/proof");
+  }
+
+  workItem(id: string): Promise<WorkDetailDto> {
+    return this.get<WorkDetailDto>(`/v2/work/${encodeURIComponent(id)}`);
+  }
+
+  agents(): Promise<AgentsReportDto> {
+    return this.get<AgentsReportDto>("/v2/agents");
+  }
+
+  // A refusal (409) is a RESULT the operator needs to read — reverify declines to
+  // rubber-stamp a packet whose cited code is gone — so it is returned, not thrown.
+  async reverify(ref: string, actor: string): Promise<AttentionActionResultDto> {
+    const response = await fetch(`${this.baseUrl}/v2/attention/reverify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+      body: JSON.stringify({ ref, actor }),
+    });
+    return (await response.json()) as AttentionActionResultDto;
+  }
+
+  // The command loop: the app never mutates state, it issues a decision. The response
+  // carries the re-derived board and queue so the UI shows the consequence, not a guess.
+  async command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto> {
+    const response = await fetch(`${this.baseUrl}/v2/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+      body: JSON.stringify(input),
+    });
+    const body = (await response.json()) as CommandResultDto;
+    if (!response.ok) return { ok: false, error: body.error ?? `command failed (${response.status})` };
+    return body;
+  }
+
+  knowledgeList(kind: string): Promise<EntityListDto> {
+    return this.get<EntityListDto>(`/v2/${kind}`);
+  }
+
+  knowledgeDetail(kind: string, slug: string): Promise<EntityDetailDto> {
+    return this.get<EntityDetailDto>(`/v2/${kind}/${encodeURIComponent(slug)}`);
   }
 
   flows(): Promise<EntityListDto> {

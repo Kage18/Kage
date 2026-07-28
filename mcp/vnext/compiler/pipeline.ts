@@ -24,6 +24,8 @@ import { extractRepositoryCandidates } from "./extractors/repository.js";
 import { admitCandidate } from "./admission.js";
 import { consolidate } from "./consolidator.js";
 import { EntityResolver, slugify, type EntityAnchor, type EvidenceAnchorInput } from "./entity-resolver.js";
+import { extractWithModel, type ModelExtractionPolicy } from "./model-extractor.js";
+import type { ModelExtractionProvider } from "./model-provider.js";
 
 /**
  * The repository knowledge compiler pipeline.
@@ -55,6 +57,13 @@ export interface PipelineOptions {
   snapshotSource?: RepositoryIndexSource | null;
   // Injectable clock for deterministic timestamps in tests. Defaults to wall-clock ISO.
   now?: () => string;
+  // The OPTIONAL semantic pass. Deterministic extractors see shapes — a command failed then
+  // passed, a file changed. They cannot see why a choice was made. A model can propose that,
+  // and its proposals join the SAME candidate list, so they face the same admission gate,
+  // the same entity resolution, and the same trust floor as everything else. Absent → the
+  // compiler is exactly as it was.
+  modelProvider?: ModelExtractionProvider | null;
+  modelPolicy?: ModelExtractionPolicy;
 }
 
 export interface PipelineRunResult {
@@ -86,12 +95,48 @@ export class Pipeline {
   private readonly events: EventStore;
   private readonly snapshotSource: RepositoryIndexSource | null;
   private readonly now: () => string;
+  private readonly modelProvider: ModelExtractionProvider | null;
+  private readonly modelPolicy: ModelExtractionPolicy | undefined;
 
   constructor(options: PipelineOptions) {
     this.model = options.model;
     this.events = options.events;
     this.snapshotSource = options.snapshotSource ?? null;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.modelProvider = options.modelProvider ?? null;
+    this.modelPolicy = options.modelPolicy;
+  }
+
+  /**
+   * Ask the model about each closed episode, if a provider is configured. Episodes are rebuilt
+   * here rather than threaded out of `compileEvents`: `buildEpisodes` is pure and its ids are
+   * content-derived, so recomputing costs nothing and keeps the sync compile path untouched.
+   *
+   * Fail-open twice over: `extractWithModel` already captures a provider error as a zero-candidate
+   * receipt, and this catch covers anything it cannot. A model that is down, slow, or absent
+   * degrades the compiler to exactly its deterministic behaviour — never to a failed run.
+   */
+  private async consultModel(events: readonly EvidenceEvent[]): Promise<ClaimCandidate[]> {
+    if (!this.modelProvider) return [];
+    const proposed: ClaimCandidate[] = [];
+    try {
+      const episodes = buildEpisodes([...events]);
+      const byId = new Map(events.map((event) => [event.event_id, event]));
+      for (const episode of episodes) {
+        const context: EpisodeContext = {
+          episode,
+          events: episode.event_ids
+            .map((id) => byId.get(id))
+            .filter((event): event is EvidenceEvent => Boolean(event)),
+        };
+        const outcome = await extractWithModel(context, this.modelProvider, { policy: this.modelPolicy });
+        proposed.push(...outcome.candidates);
+      }
+    } catch (error) {
+      console.error("[kage-vnext] semantic pass failed; deterministic compile continues:", error);
+      return [];
+    }
+    return proposed;
   }
 
   async run(repositoryId: string): Promise<PipelineRunResult> {
@@ -103,7 +148,8 @@ export class Pipeline {
     }
 
     const snapshot = this.snapshotSource ? await this.snapshotSource.scan() : undefined;
-    const result = compileEvents(this.model, events, repositoryId, snapshot, this.now);
+    const modelCandidates = await this.consultModel(events);
+    const result = compileEvents(this.model, events, repositoryId, snapshot, this.now, modelCandidates);
 
     // The last event in the repository's stable (occurred_at, event_id) order becomes the checkpoint
     // cursor. `forRepository` already returns that order, so the last row is the cursor.
@@ -125,6 +171,7 @@ export function compileEvents(
   repositoryId: string,
   snapshot: RepositorySnapshot | undefined,
   now: () => string,
+  extraCandidates: readonly ClaimCandidate[] = [],
 ): PipelineRunResult {
   const result = emptyResult();
   if (events.length === 0) return result;
@@ -163,6 +210,9 @@ export function compileEvents(
     candidates.push(...extractChangeCandidates(context));
     candidates.push(...extractFailureCandidates(context));
   }
+  // Model-proposed candidates enter here, alongside the deterministic ones — never after the
+  // gate, never around it.
+  candidates.push(...extraCandidates);
   // Stable processing order so consolidation decisions never depend on extractor ordering.
   candidates.sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
   result.candidates = candidates.length;
