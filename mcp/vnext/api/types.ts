@@ -617,6 +617,30 @@ export interface WorkBoardDto {
   totals: Record<string, number>;
 }
 
+// Agents (orchestrator §8). "Configured" and "actually feeding memory" are different facts,
+// so the status distinguishes them: a wired agent Kage has never observed is the most common
+// broken install and must not read as healthy.
+export type AgentStatus = "active" | "idle" | "silent";
+
+export interface AgentDto {
+  agent: string;
+  status: AgentStatus;
+  configured: boolean;
+  config_path: string | null;
+  last_seen_at: string | null;
+  sessions: number;
+  observations: number;
+  durable_observations: number;
+  next_step: string | null;
+}
+
+export interface AgentsReportDto {
+  project_dir: string;
+  generated_at: string;
+  agents: AgentDto[];
+  never_observed: boolean;
+}
+
 // One work item in full (orchestrator §8). The board answers "what should I pick up"; this
 // answers "why does it say that stage" — every transition names its evidence in readable terms.
 export interface StageStepDto {

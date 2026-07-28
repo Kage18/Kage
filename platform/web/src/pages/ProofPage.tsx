@@ -23,11 +23,11 @@ function formatValue(metric: ProofMetricDto): string {
 function MetricCard({ metric }: { metric: ProofMetricDto }): React.ReactElement {
   const measured = metric.value !== null;
   return (
-    <li className={`entity-card${measured ? "" : " metric-unmeasured"}`}>
+    <li className={`proof-card${measured ? "" : " proof-card-unmeasured"}`}>
       <div className="entity-card-header">
         <span className="pill">{metric.label}</span>
       </div>
-      <p className={measured ? "metric-value" : "metric-value muted"}>{formatValue(metric)}</p>
+      <p className={measured ? "proof-value" : "proof-value proof-value-absent"}>{formatValue(metric)}</p>
       <p className="muted">{metric.formula}</p>
       {metric.unlock ? <p className="metric-unlock">To measure this: {metric.unlock}</p> : null}
     </li>
@@ -46,7 +46,7 @@ export function ProofPage({ report }: { report: ProofReportDto }): React.ReactEl
         </p>
       </header>
 
-      <ul className="entity-list metric-grid">
+      <ul className="proof-grid">
         {report.metrics.map((metric) => (
           <MetricCard key={metric.id} metric={metric} />
         ))}

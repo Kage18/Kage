@@ -6,6 +6,7 @@ import type { TeamReportDto,
   WorkBoardDto,
   ProofReportDto,
   WorkDetailDto,
+  AgentsReportDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -27,6 +28,8 @@ import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
+import { AgentsPage } from "./pages/AgentsPage";
+import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
@@ -355,13 +358,14 @@ function WorkContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [pending, setPending] = useState<string | null>(null);
   const [actor, setActor] = useState("local-operator");
 
-  useEffect(() => {
-    let live = true;
+  const reload = useCallback(() => {
     api.work()
-      .then((next: WorkBoardDto) => { if (live) setBoard(next); })
-      .catch((cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
-    return () => { live = false; };
+      .then((next: WorkBoardDto) => setBoard(next))
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, [api]);
+  useEffect(reload, [reload]);
+  // Someone else claiming an item is exactly what a stale board hides, so re-derive on it.
+  useLiveRefresh(reload);
 
   const runCommand = useCallback((kind: string, workId: string) => {
     setPending(workId);
@@ -391,15 +395,26 @@ function WorkContainer({ api }: { api: KageApiClient }): React.ReactElement {
   );
 }
 
+// A live decision anywhere — CLI, agent, teammate — should reach every open view. Containers
+// subscribe to the shell's broadcast rather than each opening their own EventSource, so one
+// connection serves the whole app.
+function useLiveRefresh(reload: () => void): void {
+  useEffect(() => {
+    const handler = (): void => reload();
+    window.addEventListener(WORK_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(WORK_CHANGED_EVENT, handler);
+  }, [reload]);
+}
+
 function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ items: AttentionItemDto[] | null; error: string | null }>({ items: null, error: null });
-  useEffect(() => {
-    let live = true;
+  const reload = useCallback(() => {
     api.attention()
-      .then((queue: AttentionQueueDto) => { if (live) setState({ items: queue.items, error: null }); })
-      .catch((error: unknown) => { if (live) setState({ items: null, error: error instanceof Error ? error.message : String(error) }); });
-    return () => { live = false; };
+      .then((queue: AttentionQueueDto) => setState({ items: queue.items, error: null }))
+      .catch((error: unknown) => setState({ items: null, error: error instanceof Error ? error.message : String(error) }));
   }, [api]);
+  useEffect(reload, [reload]);
+  useLiveRefresh(reload);
   if (state.error) return <p className="empty-state">Attention queue unavailable: {state.error}</p>;
   if (state.items === null) return <p className="empty-state">Deriving…</p>;
   return (
@@ -415,6 +430,20 @@ function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement
       }
     />
   );
+}
+
+function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ report: AgentsReportDto | null; error: string | null }>({ report: null, error: null });
+  useEffect(() => {
+    let live = true;
+    api.agents()
+      .then((report: AgentsReportDto) => { if (live) setState({ report, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api]);
+  if (state.error) return <p className="empty-state">Agents unavailable: {state.error}</p>;
+  if (!state.report) return <p className="empty-state">Reading sessions…</p>;
+  return <AgentsPage report={state.report} />;
 }
 
 function WorkItemContainer({ api, id }: { api: KageApiClient; id: string }): React.ReactElement {
@@ -549,6 +578,8 @@ function RoutedPage({
       return <ProofContainer api={api} />;
     case "work-item":
       return <WorkItemContainer api={api} id={route.id} />;
+    case "agents":
+      return <AgentsContainer api={api} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;

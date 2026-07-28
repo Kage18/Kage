@@ -12,6 +12,7 @@ export type Route =
   | { page: "work" }
   | { page: "proof" }
   | { page: "work-item"; id: string }
+  | { page: "agents" }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -44,25 +45,53 @@ export interface NavLink {
 
 // The product information architecture, in a FIXED order. The AppShell renders these as the primary
 // navigation landmark and the router test asserts every href resolves to a real route.
-export const navLinks: NavLink[] = [
-  { label: "Attention", href: "/attention" },
-  { label: "Work", href: "/work" },
-  { label: "Proof", href: "/proof" },
-  { label: "Overview", href: "/overview" },
-  { label: "System Map", href: "/system-map" },
-  { label: "Features", href: "/features" },
-  { label: "Components", href: "/components" },
-  { label: "Flows", href: "/flows" },
-  { label: "Runbooks", href: "/runbooks" },
-  { label: "Decisions", href: "/decisions" },
-  { label: "Contracts", href: "/contracts" },
-  { label: "Data Models", href: "/data-models" },
-  { label: "Invariants", href: "/invariants" },
-  { label: "Incidents", href: "/incidents" },
-  { label: "Documents", href: "/documents" },
-  { label: "Review Queue", href: "/review" },
-  { label: "Agent Tasks", href: "/tasks" },
+export interface NavGroup {
+  label: string;
+  links: NavLink[];
+}
+
+// Grouped, because a flat list of seventeen links is a wiki and this is an operating surface.
+// The grouping IS the product claim: you OPERATE (decisions and work), you see the AGENTS doing
+// it, and you read the KNOWLEDGE they produce. Order within a group is fixed, and the first
+// group is the one you land in.
+export const navGroups: NavGroup[] = [
+  {
+    label: "Operate",
+    links: [
+      { label: "Attention", href: "/attention" },
+      { label: "Work", href: "/work" },
+      { label: "Proof", href: "/proof" },
+    ],
+  },
+  {
+    label: "Agents",
+    links: [
+      { label: "Agents", href: "/agents" },
+      { label: "Agent Tasks", href: "/tasks" },
+      { label: "Review Queue", href: "/review" },
+    ],
+  },
+  {
+    label: "Knowledge",
+    links: [
+      { label: "Overview", href: "/overview" },
+      { label: "System Map", href: "/system-map" },
+      { label: "Features", href: "/features" },
+      { label: "Components", href: "/components" },
+      { label: "Flows", href: "/flows" },
+      { label: "Runbooks", href: "/runbooks" },
+      { label: "Decisions", href: "/decisions" },
+      { label: "Contracts", href: "/contracts" },
+      { label: "Data Models", href: "/data-models" },
+      { label: "Invariants", href: "/invariants" },
+      { label: "Incidents", href: "/incidents" },
+      { label: "Documents", href: "/documents" },
+    ],
+  },
 ];
+
+/** Flattened, in nav order. The router test asserts every href resolves to a real route. */
+export const navLinks: NavLink[] = navGroups.flatMap((group) => group.links);
 
 // Deliberately NOT in the nav — a nav item must render live data or not exist:
 //   /costs        rendered AgentTasksContainer verbatim, i.e. the Agent Tasks table under a second
@@ -118,6 +147,9 @@ export function parseRoute(input: string): Route {
       break;
     case "proof":
       if (segments.length === 1) return { page: "proof" };
+      break;
+    case "agents":
+      if (segments.length === 1) return { page: "agents" };
       break;
     case "overview":
       if (segments.length === 1) return { page: "overview" };
@@ -197,6 +229,8 @@ export function routeToPath(route: Route): string {
       return `/work/${encodeURIComponent(route.id)}`;
     case "proof":
       return "/proof";
+    case "agents":
+      return "/agents";
     case "overview":
       return "/overview";
     case "system-map":

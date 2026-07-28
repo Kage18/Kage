@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import type { RepositoryDto } from "../api/types";
-import { navLinks, withBase } from "../router";
+import { navGroups, withBase } from "../router";
 import { RepositorySwitcher } from "./RepositorySwitcher";
+import { LiveIndicator } from "./LiveIndicator";
 
 // The accessible application shell: a skip link, a banner landmark carrying brand + repository
 // identity, the primary navigation landmark, and the main content region. Page content is passed as
@@ -44,26 +45,32 @@ export function AppShell({
 
       <header className="shell-banner" role="banner">
         <RepositorySwitcher repository={repository} />
-        <span className="shell-brand">Kage knowledge portal</span>
+        <span className="shell-brand">Kage</span>
+        <span className="shell-tagline">orchestrator of memory and agents</span>
+        <LiveIndicator />
       </header>
 
       <div className="shell-body">
-        <nav className="shell-nav" aria-label="Repository knowledge">
-          <ul>
-            {navLinks.map((link) => {
-              const active = isActive(link.href, route);
-              return (
-                <li key={link.href}>
-                  <a
-                    href={withBase(link.href)}
-                    aria-current={active ? "page" : undefined}
-                  >
-                    {link.label}
-                  </a>
-                </li>
-              );
-            })}
-          </ul>
+        {/* Grouped rather than flat: a seventeen-item list is a wiki, and the grouping is the
+            product claim — you operate, the agents work, the knowledge accumulates. */}
+        <nav className="shell-nav" aria-label="Sections">
+          {navGroups.map((group) => (
+            <div key={group.label} className="nav-group">
+              <h2 className="nav-group-label">{group.label}</h2>
+              <ul>
+                {group.links.map((link) => {
+                  const active = isActive(link.href, route);
+                  return (
+                    <li key={link.href}>
+                      <a href={withBase(link.href)} aria-current={active ? "page" : undefined}>
+                        {link.label}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
         </nav>
 
         <main className="shell-main" id="main-content" tabIndex={-1}>

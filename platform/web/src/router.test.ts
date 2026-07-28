@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseRoute, routeToPath, navLinks, portalBase, withBase } from "./router";
+import { parseRoute, routeToPath, navLinks, navGroups, portalBase, withBase } from "./router";
 
 describe("portal base mounting", () => {
   test("detects the /app mount from the pathname and is empty at root", () => {
@@ -79,15 +79,19 @@ describe("parseRoute", () => {
 });
 
 describe("navLinks", () => {
-  test("declares the full information architecture in order", () => {
-    // Attention leads; the five knowledge kinds the model always stored are browsable;
-    // Costs/Integrations/Settings/Billing left the nav because they rendered no live data
-    // (routes still resolve for bookmarks).
+  test("declares the full information architecture, grouped, in order", () => {
+    // Grouped rather than flat: a seventeen-item list is a wiki, and the grouping IS the
+    // product claim — you OPERATE, the AGENTS work, the KNOWLEDGE accumulates.
+    expect(navGroups.map((g) => g.label)).toEqual(["Operate", "Agents", "Knowledge"]);
+    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Attention", "Work", "Proof"]);
+    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Agents", "Agent Tasks", "Review Queue"]);
     expect(navLinks.map((l) => l.label)).toEqual([
       "Attention",
       "Work",
-      // Proof sits third: the two operating pages first, then the page that justifies them.
       "Proof",
+      "Agents",
+      "Agent Tasks",
+      "Review Queue",
       "Overview",
       "System Map",
       "Features",
@@ -100,8 +104,6 @@ describe("navLinks", () => {
       "Invariants",
       "Incidents",
       "Documents",
-      "Review Queue",
-      "Agent Tasks",
     ]);
   });
 

@@ -389,7 +389,7 @@ export function viewerReportPaths(projectRoot: string): Record<string, string> {
 }
 
 export interface LiveFeedEvent {
-  type: "packet_written" | "packet_updated" | "value_event";
+  type: "packet_written" | "packet_updated" | "value_event" | "work_changed";
   title?: string;
   path?: string;
   event?: Record<string, unknown>;
@@ -445,6 +445,8 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
   const debounceMs = options.debounceMs ?? LIVE_FEED_DEBOUNCE_MS;
   const packetsDir = join(projectRoot, ".agent_memory", "packets");
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
+  const workDir = join(projectRoot, ".agent_memory", "work");
+  const commandLogPath = join(workDir, "commands.jsonl");
   const valuePath = join(reportsDir, "value.json");
   const clients = new Set<ServerResponse>();
   const watchers: FSWatcher[] = [];
@@ -467,6 +469,18 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }
   }
   let seenValueEvents = readValueEvents().length;
+
+  // Commands are the only decisions in the whole state machine, so they are the only thing
+  // that can change the board without a commit. Track how many we have already announced so a
+  // rewritten or appended log never replays events a client has seen.
+  function readCommandLines(): string[] {
+    try {
+      return readFileSync(commandLogPath, "utf8").split("\n").filter((line) => line.trim());
+    } catch {
+      return [];
+    }
+  }
+  let seenCommands = readCommandLines().length;
 
   function broadcast(event: LiveFeedEvent): void {
     const payload = `data: ${JSON.stringify(event)}\n\n`;
@@ -491,6 +505,25 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
       stage: summary.stage,
       claimed_by: summary.claimed_by,
     });
+  }
+
+  function onCommandChange(): void {
+    const lines = readCommandLines();
+    if (lines.length < seenCommands) seenCommands = 0; // log rewritten
+    for (const line of lines.slice(seenCommands)) {
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      broadcast({
+        // The event names the decision rather than just saying "something changed", so a
+        // client can show WHO did WHAT without refetching the board to find out.
+        type: "work_changed",
+        title: typeof parsed.kind === "string" ? String(parsed.kind) : "work",
+        path: join(".agent_memory", "work", "commands.jsonl"),
+        event: parsed,
+        ts: typeof parsed.ts === "string" ? parsed.ts : new Date().toISOString(),
+      });
+    }
+    seenCommands = lines.length;
   }
 
   function onValueChange(): void {
@@ -531,6 +564,15 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }));
   } catch {
     // packets dir missing: no packet events
+  }
+  try {
+    mkdirSync(workDir, { recursive: true });
+    watchers.push(watch(workDir, (_event, filename) => {
+      if (String(filename ?? "") !== "commands.jsonl") return;
+      debounced("commands", onCommandChange);
+    }));
+  } catch {
+    // work dir missing: no work events
   }
   try {
     mkdirSync(reportsDir, { recursive: true });
@@ -1230,6 +1272,13 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       import("./vnext/orchestrator/proof.js")
         .then(({ buildProof }) => json(res, 200, buildProof(projectRoot)))
         .catch((error) => json(res, 503, { ok: false, error: `proof unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // Agents: wired vs actually working vs contributing knowledge.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/agents") {
+      import("./vnext/orchestrator/agents.js")
+        .then(({ buildAgentsReport }) => json(res, 200, buildAgentsReport(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `agents unavailable: ${error instanceof Error ? error.message : String(error)}` }));
       return;
     }
     // One work item in full. Kept separate from the board because the board is a glance and
