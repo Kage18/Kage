@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { buildWorkBoard } from "./vnext/orchestrator/board.js";
+import { appendCommandEvent } from "./vnext/orchestrator/events.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -83,6 +85,7 @@ import {
   supersedeMemory,
   transitionWorkStage,
   claimWorkItem,
+  workItemBrief,
   linkImplements,
   listWorkItems,
   validateProject,
@@ -183,6 +186,49 @@ function allTools() {
       // Combined entry-point tool: validate + recall + code_graph + graph in one call.
       // Agents should load this schema first (one ToolSearch) instead of loading four
       // separate deferred schemas. Cuts session start from 4 schema loads to 1.
+      name: "kage_queue",
+      description:
+        "The work an agent can pick up: ready items with their derived stage, who holds them, and what code each touches. Stages come from commits and commands, never from a status someone typed. Call this to find work, then kage_brief before starting it.",
+      annotations: { title: "List claimable work with derived stage", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          unclaimed_only: { type: "boolean", description: "Only items nobody has claimed (default true)" },
+        },
+        required: ["project_dir"],
+      },
+    },
+    {
+      name: "kage_brief",
+      description:
+        "Everything known about a work item before touching it: what the team already learned about that code, the blast radius, and its stage. Call this after claiming and before the first edit — it is the difference between starting informed and rediscovering what someone already solved.",
+      annotations: { title: "Get the brief for a work item", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          work_id: { type: "string", description: "The work item id, from kage_queue" },
+        },
+        required: ["project_dir", "work_id"],
+      },
+    },
+    {
+      name: "kage_claim",
+      description:
+        "Claim a work item so other agents do not collide on it. Takes a per-item lock and records the claim as an event, which is what moves the item to `claimed` on every surface. Claim before you work, not after.",
+      annotations: { title: "Claim a work item", readOnlyHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          work_id: { type: "string", description: "The work item id, from kage_queue" },
+          actor: { type: "string", description: "Who is claiming it — your agent identity" },
+        },
+        required: ["project_dir", "work_id", "actor"],
+      },
+    },
+    {
       name: "kage_context",
       description:
         "Primary kage entry point. Validates memory health, recalls relevant packets, and queries both the code graph and knowledge graph — all in one call. Call this at the start of every task; it answers caller/usage questions from the code graph too, so you rarely need a separate graph tool.",
@@ -1248,6 +1294,54 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     const domain = String(args?.domain ?? "");
     const nodeId = String(args?.node_id ?? "");
     return { content: [{ type: "text", text: await kageFetchPublicGraphNode(domain, nodeId) }] };
+  }
+
+  if (name === "kage_queue") {
+    const project = String(args?.project_dir ?? "");
+    const unclaimedOnly = args?.unclaimed_only !== false;
+    const board = buildWorkBoard(project);
+    const items = board.items.filter((item) => (unclaimedOnly ? !item.claimed_by : true) && item.stage !== "done");
+    const lines = items.length
+      ? items.map((item) => [
+          `${item.stage.padEnd(9)} ${item.title}`,
+          `  id: ${item.work_id}`,
+          item.blast_paths.length ? `  touches: ${item.blast_paths.slice(0, 5).join(", ")}` : "  touches: (not grounded yet)",
+          item.claimed_by ? `  claimed by: ${item.claimed_by}` : "  unclaimed — kage_claim to take it",
+        ].join("\n"))
+      : ["No claimable work. Create some with `kage plan --intent \"…\"`."];
+    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+  }
+
+  if (name === "kage_brief") {
+    const result = workItemBrief(String(args?.project_dir ?? ""), String(args?.work_id ?? ""));
+    return { content: [{ type: "text", text: result.ok ? result.brief : result.errors.join("; ") }] };
+  }
+
+  if (name === "kage_claim") {
+    const project = String(args?.project_dir ?? "");
+    const workId = String(args?.work_id ?? "");
+    const actor = String(args?.actor ?? "").trim();
+    if (!actor) {
+      return { content: [{ type: "text", text: "A claim needs an actor — it records who is responsible for the item." }] };
+    }
+    const claimed = claimWorkItem(project, workId, actor);
+    if (!claimed.ok) {
+      return { content: [{ type: "text", text: `Claim refused: ${claimed.errors.join("; ")}` }] };
+    }
+    // The claim is also an EVENT: that is what moves the item to `claimed` on the board,
+    // in attention, and in `kage work`. Without it the lock exists and no surface knows.
+    try {
+      appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor });
+    } catch (error) {
+      return { content: [{ type: "text", text: `Claimed, but the event was refused: ${error instanceof Error ? error.message : String(error)}` }] };
+    }
+    const brief = workItemBrief(project, workId);
+    return {
+      content: [{
+        type: "text",
+        text: `Claimed ${workId} as ${actor}.\n\n${brief.ok ? brief.brief : "(no brief available)"}`,
+      }],
+    };
   }
 
   if (name === "kage_context") {

@@ -83,5 +83,50 @@ export function appendCommandEvent(projectDir: string, input: CommandEventInput)
   };
   mkdirSync(workDir(projectDir), { recursive: true });
   appendFileSync(commandLogPath(projectDir), `${JSON.stringify(event)}\n`, "utf8");
+  applyStoredStage(projectDir, event);
   return event;
 }
+
+// The command log and the packet store were drifting apart: an app claim appended an event
+// and never moved the packet, so the board rendered `claimed` with `claimed_by: null` —
+// the derived stage and the stored owner disagreeing, on real data.
+//
+// One writer fixes it. Appending the event IS the decision, so the stored transition happens
+// here rather than at each call site. Idempotent by design: `kage claim` transitions through
+// the kernel first and then logs, so this must be a no-op when the packet already holds the
+// target state — never a double-transition, never an error on the correct path.
+function applyStoredStage(projectDir: string, event: CommandEvent): void {
+  const target = STORED_STAGE_BY_KIND[event.kind];
+  if (!target) return;
+  try {
+    // Required lazily: the kernel is a large module and the command log must stay usable in
+    // contexts (tests, tooling) that never touch packets.
+    const kernel = require("../../kernel.js") as {
+      readPacketFromDisk?: unknown;
+      transitionWorkStage: (
+        projectDir: string,
+        packetId: string,
+        to: string,
+        options: { actor?: string; evidence?: string },
+      ) => { ok: boolean; errors: string[] };
+      listWorkItems: (projectDir: string) => Array<{ id: string; stage?: string; claimed_by?: string | null }>;
+    };
+    const current = kernel.listWorkItems(projectDir).find((item) => item.id === event.work_id);
+    if (!current || current.stage === target) return; // already there — nothing to do
+    kernel.transitionWorkStage(projectDir, event.work_id, target, {
+      actor: event.actor,
+      evidence: `command:${event.kind}:${event.event_id}`,
+    });
+  } catch {
+    // The event is the source of truth for derivation; a stored-stage write that fails must
+    // not lose the decision. Derivation still reads the log and reports the right stage.
+  }
+}
+
+// Only the transitions the stored machine actually accepts. `gate.approved` is deliberately
+// absent: the stored machine requires `in_review` before `done`, and inventing that hop here
+// would fabricate a review that never happened.
+const STORED_STAGE_BY_KIND: Partial<Record<CommandEventKind, string>> = {
+  "task.claimed": "claimed",
+  "task.released": "proposed",
+};

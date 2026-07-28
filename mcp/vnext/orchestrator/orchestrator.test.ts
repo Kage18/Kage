@@ -150,3 +150,35 @@ test("gate approval is a command, and self-approval is rejected at validation", 
   const approved = appendCommandEvent(project, { kind: "gate.approved", work_id: workId, actor: "bob" });
   assert.equal(approved.kind, "gate.approved");
 });
+
+// ── One writer for stage decisions ──────────────────────────────────────────
+// The command log and the packet store were drifting: a claim made through the app
+// appended an event but never moved the packet, so the board showed `claimed` with
+// `claimed_by: null` — the derived stage and the stored owner disagreeing on real data.
+
+test("a command event also applies the packet transition, once, idempotently", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+
+  // The app path: an event alone used to leave the packet untouched.
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "bob" });
+
+  const state = deriveWorkState(project);
+  const item = state.items.find((entry) => entry.work_id === workId);
+  assert.equal(item?.derived_stage, "claimed");
+  assert.equal(item?.claimed_by, "bob", "the stored owner must agree with the derived stage");
+});
+
+test("the CLI path stays correct when the kernel already transitioned", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+
+  // `kage claim` transitions the packet first, then logs the event. Appending must not
+  // fail or double-transition on an already-claimed item.
+  assert.equal(claimWorkItem(project, workId, "alice").ok, true);
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+
+  const item = deriveWorkState(project).items.find((entry) => entry.work_id === workId);
+  assert.equal(item?.derived_stage, "claimed");
+  assert.equal(item?.claimed_by, "alice");
+});
