@@ -459,7 +459,7 @@ test("captureEvents emits nothing for an empty prompt and no tool calls", () => 
 // --- Fail-open: every entry point tolerates garbage without throwing ------------------------
 
 test("every OpenAI gateway entry point fails open on a garbage or oversized body — no throw", () => {
-  const garbage = ["", "not json", "{", '{"messages":', " ", "[1,2,3]", "x".repeat(200_000)];
+  const garbage = ["", "not json", "{", '{"messages":', "\u0000\u0001", "[1,2,3]", "x".repeat(200_000)];
   for (const raw of garbage) {
     assert.doesNotThrow(() => extractOpenAiUsage(raw));
     assert.equal(totalPromptTokens(extractOpenAiUsage(raw)), null);
@@ -694,7 +694,7 @@ test("a non-JSON body to an OpenAI path is forwarded unchanged and never 500s (f
   });
   const proxy = startProxy(project, { port: 0, upstream: url, mode: "assist", receiptSink: { write: () => {} } });
   const port = await listeningPort(proxy);
-  const garbage = "}{ this is not json at all  ";
+  const garbage = "}{ this is not json at all \u0000";
 
   try {
     const response = await proxyRequest(port, "/v1/chat/completions", garbage);

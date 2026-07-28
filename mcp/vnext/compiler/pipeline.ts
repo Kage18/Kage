@@ -388,7 +388,7 @@ function openReview(
   timestamp: string,
   result: PipelineRunResult,
 ): void {
-  const reviewId = `review-${digest(`${claimId} ${reason}`)}`;
+  const reviewId = `review-${digest(`${claimId}\u0000${reason}`)}`;
   if (model.reviewItemsForClaim(claimId).some((item) => item.review_item_id === reviewId)) return;
   model.createReviewItem({
     review_item_id: reviewId,

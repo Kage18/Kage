@@ -1471,7 +1471,20 @@ async function handleDelete(
   const slug = await db.query<{ slug: string }>(`SELECT slug FROM workspaces WHERE workspace_id = $1`, [
     principal.workspace_id,
   ]);
-  if (String(body.confirm_slug ?? "") !== (slug.rows[0]?.slug ?? " ")) {
+  // A workspace with no row cannot be confirmed, and must never fall back to a sentinel: the
+  // previous default here was a literal NUL character, so a caller who sent that exact
+  // constant satisfied the confirmation step on the most destructive route in the product.
+  // Absent is 404 — you cannot confirm the deletion of something that is not there.
+  //
+  // Writing it as a literal NUL also made this file read as BINARY to grep, ripgrep and every
+  // review tool, which silently returned nothing for any search over it. The guard that would
+  // have caught this was blinded by the bug itself.
+  const workspaceSlug = slug.rows[0]?.slug;
+  if (workspaceSlug === undefined) {
+    json(res, 404, { error: "not_found" });
+    return;
+  }
+  if (String(body.confirm_slug ?? "") !== workspaceSlug) {
     json(res, 400, { error: "confirmation_required" });
     return;
   }

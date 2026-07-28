@@ -185,7 +185,7 @@ export function reviewItemVersion(item: ReviewItemRecord): string {
     item.decided_by ?? "",
     item.decided_at ?? "",
     item.decision_note ?? "",
-  ].join(" ");
+  ].join("\u0000");
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
 

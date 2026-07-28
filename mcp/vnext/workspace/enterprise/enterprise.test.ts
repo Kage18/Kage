@@ -1114,6 +1114,35 @@ test("workspace deletion takes the re-authentication instant from the server, no
   assert.equal(await workspaceExists(db, workspaceId), false);
 });
 
+// 2b ----------------------------------------------------------------------------------------
+// The confirmation gate on workspace deletion compared against a SENTINEL when the workspaces
+// row was missing — and that sentinel was written as a LITERAL NUL BYTE in the source.
+//
+// Honest scope, established by trying to exploit it and failing: the branch is UNREACHABLE.
+// `workspace_sessions` references `workspace_principals`, which references `workspaces`, so
+// deleting the row invalidates the session first and an authenticated caller can never arrive
+// here with `slug.rows[0]` undefined. It was dead defensive code, not an open door.
+//
+// The real damage was to TOOLING. One NUL byte makes the whole file read as binary, so grep,
+// ripgrep and every review tool silently return nothing for any search over server.ts — the
+// instruments that would catch a bad guard were blinded by the guard itself. That is what the
+// repo-wide check below defends, and why the branch is now a plain 404.
+test("the deletion gate rejects a NUL slug like any other wrong answer", async () => {
+  const { workspaceId, ownerId } = await seedOwnedWorkspace();
+  const session = await createSession(db, { workspace_id: workspaceId, principal_id: ownerId });
+
+  const NUL = String.fromCharCode(0);
+  const withNul = await deleteViaRoute(workspaceId, session, { confirm_slug: NUL });
+  assert.equal(withNul.status, 400, "a NUL is simply the wrong slug — never a skeleton key");
+  assert.equal(withNul.body.error, "confirmation_required");
+  assert.equal(await workspaceExists(db, workspaceId), true);
+
+  // The legitimate path still deletes, so the hardening did not break the real flow.
+  const correct = await deleteViaRoute(workspaceId, session, { confirm_slug: await slugOf(workspaceId) });
+  assert.equal(correct.status, 200);
+  assert.equal(await workspaceExists(db, workspaceId), false);
+});
+
 // 3 -----------------------------------------------------------------------------------------
 test("a SCIM directory can neither mint nor revoke a workspace owner", async () => {
   const issued = await issueScimToken(db, enterpriseWorkspace, "authority-idp");
