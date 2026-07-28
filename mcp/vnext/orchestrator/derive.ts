@@ -4,9 +4,13 @@
 // while the DERIVED stage layers observed evidence (branches, commits) on top. Consumers
 // (the board, attention, the app) read the derivation; humans never update a status.
 //
-// v1 derives through `building` from local git, and `done` from an approved gate. The
-// `verifying` step needs PR events (GitHub App), which arrive in a later slice — absent
-// observers degrade DERIVATION DEPTH, never correctness (tenet T4).
+// Derives the full local loop: `claimed` from a command, `building` from correlated commits
+// on an unmerged branch, and `done` from those commits reaching the default branch — merging
+// is observable, so shipping needs no human assertion. An approved gate also closes an item,
+// for work that ships some other way.
+//
+// `verifying` (PR open, pre-merge) is the one stage local git cannot see; it needs PR events
+// from the GitHub App. Absent observers degrade DERIVATION DEPTH, never correctness (tenet T4).
 
 import { execFileSync } from "node:child_process";
 import { loadApprovedPackets, type MemoryPacket } from "../../kernel.js";
@@ -47,6 +51,8 @@ interface ObservedCommit {
   message: string;
   changed_paths: string[];
   at: string;
+  /** Reachable from the default branch — the work landed. */
+  merged: boolean;
 }
 
 function git(projectDir: string, ...args: string[]): string | null {
@@ -67,18 +73,23 @@ function defaultBranch(projectDir: string): string | null {
 const BRANCH_CAP = 20;
 const COMMITS_PER_BRANCH = 30;
 
-// Feature-branch commits not reachable from the default branch — where building happens.
+// Commits that can move an item: unmerged feature-branch work (building) and recent
+// default-branch history (merged — the work shipped).
+//
+// Scanning the default branch matters more than it looks: once a branch merges, `base..branch`
+// is empty, so an item whose work actually landed would lose all its evidence and fall BACK to
+// `claimed`. Reading merged commits is what lets the loop close instead of regressing.
+//
 // Caps keep this O(small) on real repositories; the board is a glance, not an audit.
 function observedCommits(projectDir: string): ObservedCommit[] {
   const base = defaultBranch(projectDir);
   const refs = git(projectDir, "for-each-ref", "--format=%(refname:short)", "refs/heads");
   if (!refs) return [];
   const commits: ObservedCommit[] = [];
-  for (const branch of refs.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, BRANCH_CAP)) {
-    if (branch === base) continue;
-    const range = base ? `${base}..${branch}` : branch;
+
+  const readRange = (branch: string, range: string, merged: boolean): void => {
     const raw = git(projectDir, "log", "-n", String(COMMITS_PER_BRANCH), "--format=%H%x1f%cI%x1f%B%x1e", range);
-    if (!raw) continue;
+    if (!raw) return;
     for (const record of raw.split("\x1e")) {
       if (!record.trim()) continue;
       const [hash, at, message] = record.split("\x1f");
@@ -90,9 +101,17 @@ function observedCommits(projectDir: string): ObservedCommit[] {
         message,
         changed_paths: (changed ?? "").split("\n").map((line) => line.trim()).filter(Boolean),
         at: at?.trim() || new Date().toISOString(),
+        merged,
       });
     }
+  };
+
+  for (const branch of refs.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, BRANCH_CAP)) {
+    if (branch === base) continue;
+    readRange(branch, base ? `${base}..${branch}` : branch, false);
   }
+  if (base) readRange(base, base, true);
+
   return commits.sort((a, b) => a.at.localeCompare(b.at));
 }
 
@@ -116,6 +135,7 @@ export function deriveWorkState(projectDir: string): WorkStateProjection {
   const items = proposals.map((packet): DerivedWorkItem => {
     const log: StageStep[] = [{ stage: "proposed", at: packet.created_at, caused_by: [`packet:${packet.id}`] }];
     const correlated: DerivedWorkItem["correlated_commits"] = [];
+    const merged: ObservedCommit[] = [];
     let weak = 0;
 
     const claimed = claimStep(packet.id, packet, commands);
@@ -132,6 +152,7 @@ export function deriveWorkState(projectDir: string): WorkStateProjection {
         continue;
       }
       correlated.push({ hash: commit.hash, branch: commit.branch, confidence: match.confidence });
+      if (commit.merged) merged.push(commit);
     }
 
     // building requires BOTH a claim and correlated work — an unclaimed item with commits
@@ -144,8 +165,19 @@ export function deriveWorkState(projectDir: string): WorkStateProjection {
       });
     }
 
+    // Merging is the honest end of the loop: the work is in the default branch, so it shipped.
+    // No command is required, because nothing about a merge needs a human to assert it.
+    if (merged.length) {
+      log.push({
+        stage: "done",
+        at: merged[merged.length - 1].at,
+        caused_by: merged.map((commit) => commit.hash),
+      });
+    }
     const gate = commands.find((event) => event.kind === "gate.approved" && event.work_id === packet.id);
-    if (gate) log.push({ stage: "done", at: gate.ts, caused_by: [gate.event_id] });
+    if (gate && log[log.length - 1].stage !== "done") {
+      log.push({ stage: "done", at: gate.ts, caused_by: [gate.event_id] });
+    }
 
     return {
       work_id: packet.id,

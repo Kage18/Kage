@@ -182,3 +182,37 @@ test("the CLI path stays correct when the kernel already transitioned", () => {
   assert.equal(item?.derived_stage, "claimed");
   assert.equal(item?.claimed_by, "alice");
 });
+
+// ── Merge closes the loop ───────────────────────────────────────────────────
+// `done` required a human gate command, so an item whose work actually shipped sat at
+// `building` forever. Merging is observable: if the correlated commits are reachable from
+// the default branch, the work landed — no command, no click.
+
+test("an item whose commits are merged into the default branch derives to done", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+  assert.equal(claimWorkItem(project, workId, "alice").ok, true);
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+
+  git(project, "checkout", "-qb", "feat/make-tenantlimit-configurable");
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 20;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: configurable limit\n\n[kage:${workId}]`);
+
+  // Still on the branch, unmerged: building.
+  assert.equal(
+    deriveWorkState(project).items.find((entry) => entry.work_id === workId)?.derived_stage,
+    "building",
+  );
+
+  // Merge it. Nobody runs a command; the work simply landed.
+  git(project, "checkout", "-q", "main");
+  git(project, "merge", "-q", "--no-ff", "-m", "merge limit work", "feat/make-tenantlimit-configurable");
+
+  const item = deriveWorkState(project).items.find((entry) => entry.work_id === workId);
+  assert.equal(item?.derived_stage, "done", "a merged branch means the work shipped");
+  assert.ok(
+    item?.stage_log.some((step) => step.stage === "done"),
+    "the done step must name the merge that caused it",
+  );
+});
