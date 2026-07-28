@@ -11,6 +11,8 @@ import { workItemBrief, loadApprovedPackets, type MemoryPacket } from "../../ker
 import { deriveWorkState, type DerivedStage } from "./derive.js";
 import { cachedOpenPullRequestBranches } from "./pr-observer.js";
 import { estimateWork, radiusClass, type Estimate, type ReceiptSample } from "./estimate.js";
+import { buildReceiptHistory, type MeasuredReceipt } from "./receipt-history.js";
+import { readStoredReceipts } from "./stored-receipts.js";
 
 export interface WorkCardDto {
   work_id: string;
@@ -37,11 +39,18 @@ export interface WorkBoardDto {
   totals: Record<string, number>;
 }
 
-// Receipts are per-agent-session today and not yet linked to work items, so the board reads
-// none and every estimate is honestly "none"/"cold_start" rather than a fabricated match.
-// When task->receipt linkage lands this is the only function that changes.
-function receiptHistory(): ReceiptSample[] {
-  return [];
+// Receipts, joined to work items. This used to hard-return `[]` — receipts are measured per
+// agent SESSION and work is tracked per ITEM, and nothing joined the two, so every estimate on
+// the board honestly reported `confidence: "none"`. `WorkItemRecord.receipt_ids` is that join.
+//
+// Still degrades to `[]` when the receipt store is unavailable (an older Node without
+// node:sqlite, a runtime that never ran): no history means `none`, which is the truthful
+// answer, never a fabricated match.
+function receiptHistory(projectDir: string, blastByWorkId: Map<string, string[]>): ReceiptSample[] {
+  const receiptsById = new Map<string, MeasuredReceipt>();
+  for (const receipt of readStoredReceipts(projectDir)) receiptsById.set(receipt.receipt_id, receipt);
+  if (receiptsById.size === 0) return [];
+  return buildReceiptHistory(projectDir, { blastByWorkId, receiptsById });
 }
 
 // The board is a pure function of on-disk state, and the app re-derives it on every request:
@@ -102,7 +111,10 @@ function computeWorkBoard(projectDir: string): WorkBoardDto {
   const packets = new Map<string, MemoryPacket>(
     loadApprovedPackets(projectDir).map((packet) => [packet.id, packet]),
   );
-  const history = receiptHistory();
+  const blastByWorkId = new Map<string, string[]>(
+    [...packets.values()].map((packet) => [packet.id, packet.paths]),
+  );
+  const history = receiptHistory(projectDir, blastByWorkId);
 
   const items = derived.items.map((item): WorkCardDto => {
     const packet = packets.get(item.work_id);
