@@ -23,12 +23,13 @@ function formatValue(metric: ProofMetricDto): string {
 function MetricCard({ metric }: { metric: ProofMetricDto }): React.ReactElement {
   const measured = metric.value !== null;
   return (
-    <li className={`proof-card${measured ? "" : " proof-card-unmeasured"}`}>
-      <div className="entity-card-header">
-        <span className="pill">{metric.label}</span>
-      </div>
-      <p className={measured ? "proof-value" : "proof-value proof-value-absent"}>{formatValue(metric)}</p>
-      <p className="muted">{metric.formula}</p>
+    <li className="entity-card" data-confidence={measured ? "measured" : "unknown"}>
+      <p className="section-label">{metric.label}</p>
+      {/* The figure carries the confidence: a measured one gets the display step and the
+          accent; an unmeasured one is deliberately smaller, unweighted and grey, so it can
+          never be mistaken for a result at a glance. */}
+      <p className="figure" data-confidence={measured ? "measured" : "unknown"}>{formatValue(metric)}</p>
+      <p className="muted proof-formula">{metric.formula}</p>
       {metric.unlock ? <p className="metric-unlock">To measure this: {metric.unlock}</p> : null}
     </li>
   );
@@ -46,7 +47,7 @@ export function ProofPage({ report }: { report: ProofReportDto }): React.ReactEl
         </p>
       </header>
 
-      <ul className="proof-grid">
+      <ul className="entity-list proof-grid">
         {report.metrics.map((metric) => (
           <MetricCard key={metric.id} metric={metric} />
         ))}
@@ -64,7 +65,7 @@ export function ProofPage({ report }: { report: ProofReportDto }): React.ReactEl
             <li key={entry.work_id} className="entity-card">
               <div className="entity-card-header">
                 <span>{entry.title}</span>
-                <span className="muted">{entry.days === 0 ? "under a day" : `${entry.days} days`}</span>
+                <span className="evidence">{entry.days === 0 ? "under a day" : `${entry.days} days`}</span>
               </div>
             </li>
           ))}

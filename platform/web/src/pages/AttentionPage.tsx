@@ -70,10 +70,16 @@ export function AttentionPage({
       ) : (
         <ul className="entity-list">
           {items.map((item) => (
-            <li key={`${item.kind}:${item.ref}`} className="entity-card">
+            <li
+              key={`${item.kind}:${item.ref}`}
+              className="entity-card"
+              // Every row here is by definition something a human must decide.
+              data-confidence="attention"
+            >
               <div className="entity-card-header">
-                <span className="pill">{KIND_LABEL[item.kind] ?? item.kind}</span>
-                <span className="muted">severity {item.severity}</span>
+                <span className="pill" data-tone="attention">{KIND_LABEL[item.kind] ?? item.kind}</span>
+                {/* Severity is a computed rank, so it reads as evidence rather than prose. */}
+                <span className="evidence">severity {item.severity}</span>
               </div>
               <p>{item.summary}</p>
               <div className="entity-card-header">

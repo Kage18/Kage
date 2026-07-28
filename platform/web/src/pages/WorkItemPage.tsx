@@ -53,9 +53,11 @@ export function WorkItemPage({ detail }: { detail: WorkDetailDto }): React.React
           <li key={`${step.stage}:${step.at}`} className="entity-card">
             <div className="entity-card-header">
               <span className="pill">{step.stage}</span>
+              {/* What CAUSED the step is the answer the page exists to give, so it sits
+                  beside the stage as evidence rather than below it as an aside. */}
+              <span className="evidence">{step.evidence_label}</span>
               <span className="muted">{new Date(step.at).toLocaleString()}</span>
             </div>
-            <p className="muted">{step.evidence_label}</p>
           </li>
         ))}
       </ul>
@@ -86,8 +88,7 @@ export function WorkItemPage({ detail }: { detail: WorkDetailDto }): React.React
               <li key={commit.hash} className="entity-card">
                 <div className="entity-card-header">
                   <span className="pill">{commit.confidence}</span>
-                  <code>{commit.hash}</code>
-                  <span className="muted">{commit.branch}</span>
+                  <span className="evidence">{commit.hash} · {commit.branch}</span>
                 </div>
               </li>
             ))}

@@ -9,8 +9,10 @@
 import React from "react";
 import type { AgentDto, AgentsReportDto } from "../api/types";
 
+// Mapped onto the shared confidence ladder rather than a private palette, so an agent's
+// health reads the same way as a metric's or a work item's.
 const STATE_COPY: Record<AgentDto["status"], { label: string; tone: string; meaning: string }> = {
-  active: { label: "Active", tone: "success", meaning: "working, and Kage is capturing it" },
+  active: { label: "Active", tone: "measured", meaning: "working, and Kage is capturing it" },
   idle: { label: "Idle", tone: "neutral", meaning: "wired and has worked before, nothing recent" },
   silent: { label: "Never seen", tone: "critical", meaning: "wired, but Kage has never observed it" },
 };
@@ -30,10 +32,11 @@ function relative(iso: string | null): string {
 function AgentCard({ agent }: { agent: AgentDto }): React.ReactElement {
   const state = STATE_COPY[agent.status];
   return (
-    <li className="agent-card" data-tone={state.tone}>
+    <li className="entity-card agent-card" data-confidence={state.tone === "measured" ? "measured" : state.tone}>
       <div className="agent-card-head">
-        <span className="agent-name">{agent.agent}</span>
-        <span className="agent-status" data-tone={state.tone}>
+        {/* An agent name is an identifier the machine knows, not prose. */}
+        <span className="evidence agent-name">{agent.agent}</span>
+        <span className="pill" data-tone={state.tone === "neutral" ? undefined : state.tone}>
           {state.label}
         </span>
       </div>
@@ -55,7 +58,10 @@ function AgentCard({ agent }: { agent: AgentDto }): React.ReactElement {
         <div>
           {/* The only number that means memory actually grew. */}
           <dt>Became knowledge</dt>
-          <dd className={agent.durable_observations > 0 ? "agent-stat-strong" : "muted"}>
+          <dd
+            className="agent-stat-strong"
+            data-confidence={agent.durable_observations > 0 ? "measured" : "unknown"}
+          >
             {agent.durable_observations.toLocaleString()}
           </dd>
         </div>
@@ -91,7 +97,7 @@ export function AgentsPage({ report }: { report: AgentsReportDto }): React.React
       ) : (
         <>
           <div className="agent-summary">
-            <span className="pill">{working} working</span>
+            <span className="pill" data-tone="measured">{working} working</span>
             {needsAttention > 0 ? (
               <span className="pill" data-tone="critical">
                 {needsAttention} need attention

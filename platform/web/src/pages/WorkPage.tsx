@@ -72,10 +72,13 @@ export function WorkPage({
           {board.items.map((card) => (
             <li key={card.work_id} className="entity-card">
               <div className="entity-card-header">
-                <span className="pill">{card.stage}</span>
+                <span className="pill" data-tone={card.stage === "done" ? "measured" : undefined}>
+                  {card.stage}
+                </span>
                 {card.claimed_by ? <span className="muted">claimed by {card.claimed_by}</span> : null}
+                {/* Commits and branches are things the machine observed — mono, chipped. */}
                 {card.evidence.length ? (
-                  <span className="muted">
+                  <span className="evidence">
                     {card.evidence.length} commit{card.evidence.length === 1 ? "" : "s"} ·{" "}
                     {card.evidence[0].branch}
                   </span>
