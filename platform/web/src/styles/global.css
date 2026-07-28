@@ -1744,3 +1744,104 @@ code {
   font-size: var(--font-size-sm);
   line-height: 1.45;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Kind chips — a kind is a FILTER, not a destination.
+
+   These replaced ten sidebar entries that all rendered the same page. The count
+   is the point: the shape of what a repository knows should be legible before
+   you click anything, and an empty kind should say "none" rather than being an
+   empty page you had to navigate to in order to discover that.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.kind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 var(--space-3);
+}
+
+.kind-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-data);
+}
+
+.kind-chip:hover:not(:disabled) {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+
+/* Active state carries weight and a filled surface, not colour alone. */
+.kind-chip[aria-pressed="true"] {
+  background: var(--color-surface-raised);
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+/* An empty kind stays VISIBLE and disabled. Hiding it would make the absence
+   invisible, and "we have no runbooks" is information a lead needs. */
+.kind-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.kind-count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Status — colour is a REDUNDANT channel here, never the carrier.
+
+   Measured, not assumed: `validate_palette.js` puts this product's success green
+   and critical red at ΔE 2.1 under deuteranopia in light mode (26.2 to normal
+   vision). Green-vs-red is THE colour-vision collision and no amount of palette
+   tuning fixes it — a deuteranopic lead could not tell a healthy agent from a
+   broken one on the Agents page I built.
+
+   So every status carries a GLYPH and a LABEL, and the card rail carries a
+   BORDER STYLE, so the state survives with the colour channel switched off
+   entirely. Colour is then a fast path for those who can use it, not the fact.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.1rem var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-neutral-tint);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+/* The glyph is the redundant channel. Shapes are chosen to differ in SILHOUETTE,
+   not just colour: a filled disc, a hollow ring, a triangle, a square. */
+.status-glyph {
+  font-size: 0.8em;
+  line-height: 1;
+}
+
+.status[data-status="measured"] { background: var(--color-success-tint); color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 34%, transparent); }
+.status[data-status="attention"] { background: var(--color-warning-tint); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 34%, transparent); }
+.status[data-status="critical"] { background: var(--color-critical-tint); color: var(--color-critical); border-color: color-mix(in srgb, var(--color-critical) 34%, transparent); }
+
+/* Card rails get a STYLE difference too, so a rail is never colour-alone either. */
+.entity-card[data-confidence="measured"]  { border-left-style: solid; }
+.entity-card[data-confidence="attention"] { border-left-style: dashed; }
+.entity-card[data-confidence="critical"]  { border-left-style: double; border-left-width: 4px; }

@@ -13,6 +13,7 @@ export type Route =
   | { page: "proof" }
   | { page: "work-item"; id: string }
   | { page: "agents" }
+  | { page: "knowledge-all"; kind: string }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -76,16 +77,11 @@ export const navGroups: NavGroup[] = [
     links: [
       { label: "Overview", href: "/overview" },
       { label: "System Map", href: "/system-map" },
-      { label: "Features", href: "/features" },
-      { label: "Components", href: "/components" },
-      { label: "Flows", href: "/flows" },
-      { label: "Runbooks", href: "/runbooks" },
-      { label: "Decisions", href: "/decisions" },
-      { label: "Contracts", href: "/contracts" },
-      { label: "Data Models", href: "/data-models" },
-      { label: "Invariants", href: "/invariants" },
-      { label: "Incidents", href: "/incidents" },
-      { label: "Documents", href: "/documents" },
+      // ONE entry, not ten. Features/Components/Flows/Runbooks/Decisions/Contracts/
+      // Data Models/Invariants/Incidents/Documents were ten sidebar peers rendering the
+      // identical page with a different filter — navigation ten items wide to express one
+      // page and one parameter. Their URLs still resolve; they preselect the kind.
+      { label: "Knowledge", href: "/knowledge" },
     ],
   },
 ];
@@ -150,6 +146,9 @@ export function parseRoute(input: string): Route {
       break;
     case "agents":
       if (segments.length === 1) return { page: "agents" };
+      break;
+    case "knowledge":
+      if (segments.length === 1) return { page: "knowledge-all", kind: query.get("kind") ?? "all" };
       break;
     case "overview":
       if (segments.length === 1) return { page: "overview" };
@@ -231,6 +230,8 @@ export function routeToPath(route: Route): string {
       return "/proof";
     case "agents":
       return "/agents";
+    case "knowledge-all":
+      return route.kind === "all" ? "/knowledge" : `/knowledge?kind=${encodeURIComponent(route.kind)}`;
     case "overview":
       return "/overview";
     case "system-map":

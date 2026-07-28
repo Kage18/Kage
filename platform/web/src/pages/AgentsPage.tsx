@@ -9,12 +9,16 @@
 import React from "react";
 import type { AgentDto, AgentsReportDto } from "../api/types";
 
-// Mapped onto the shared confidence ladder rather than a private palette, so an agent's
-// health reads the same way as a metric's or a work item's.
-const STATE_COPY: Record<AgentDto["status"], { label: string; tone: string; meaning: string }> = {
-  active: { label: "Active", tone: "measured", meaning: "working, and Kage is capturing it" },
-  idle: { label: "Idle", tone: "neutral", meaning: "wired and has worked before, nothing recent" },
-  silent: { label: "Never seen", tone: "critical", meaning: "wired, but Kage has never observed it" },
+// Status carries a GLYPH as well as colour and a label, because colour alone does not survive
+// colour-vision deficiency. Measured, not assumed: the palette validator puts this product's
+// success green and critical red at ΔE 2.1 under deuteranopia (26.2 to normal vision) — a
+// deuteranopic lead reading this page could not tell a working agent from a broken one.
+//
+// The glyphs differ in SILHOUETTE, not just hue: a filled disc, a hollow ring, a triangle.
+const STATE_COPY: Record<AgentDto["status"], { label: string; tone: string; glyph: string; meaning: string }> = {
+  active: { label: "Active", tone: "measured", glyph: "●", meaning: "working, and Kage is capturing it" },
+  idle: { label: "Idle", tone: "neutral", glyph: "○", meaning: "wired and has worked before, nothing recent" },
+  silent: { label: "Never seen", tone: "critical", glyph: "▲", meaning: "wired, but Kage has never observed it" },
 };
 
 function relative(iso: string | null): string {
@@ -36,7 +40,8 @@ function AgentCard({ agent }: { agent: AgentDto }): React.ReactElement {
       <div className="agent-card-head">
         {/* An agent name is an identifier the machine knows, not prose. */}
         <span className="evidence agent-name">{agent.agent}</span>
-        <span className="pill" data-tone={state.tone === "neutral" ? undefined : state.tone}>
+        <span className="status" data-status={state.tone === "neutral" ? undefined : state.tone}>
+          <span className="status-glyph" aria-hidden="true">{state.glyph}</span>
           {state.label}
         </span>
       </div>
@@ -97,9 +102,10 @@ export function AgentsPage({ report }: { report: AgentsReportDto }): React.React
       ) : (
         <>
           <div className="agent-summary">
-            <span className="pill" data-tone="measured">{working} working</span>
+            <span className="status" data-status="measured"><span className="status-glyph" aria-hidden="true">●</span>{working} working</span>
             {needsAttention > 0 ? (
-              <span className="pill" data-tone="critical">
+              <span className="status" data-status="critical">
+                <span className="status-glyph" aria-hidden="true">▲</span>
                 {needsAttention} need attention
               </span>
             ) : (

@@ -85,6 +85,9 @@ describe("navLinks", () => {
     expect(navGroups.map((g) => g.label)).toEqual(["Operate", "Agents", "Knowledge"]);
     expect(navGroups[0].links.map((l) => l.label)).toEqual(["Attention", "Work", "Proof"]);
     expect(navGroups[1].links.map((l) => l.label)).toEqual(["Agents", "Agent Tasks", "Review Queue"]);
+    // Ten knowledge kinds collapsed into ONE entry. They were ten sidebar peers rendering the
+    // identical page with a different filter — navigation ten items wide to express one page
+    // and one parameter. Their URLs still resolve and preselect the kind.
     expect(navLinks.map((l) => l.label)).toEqual([
       "Attention",
       "Work",
@@ -94,17 +97,9 @@ describe("navLinks", () => {
       "Review Queue",
       "Overview",
       "System Map",
-      "Features",
-      "Components",
-      "Flows",
-      "Runbooks",
-      "Decisions",
-      "Contracts",
-      "Data Models",
-      "Invariants",
-      "Incidents",
-      "Documents",
+      "Knowledge",
     ]);
+    expect(navLinks.length).toBe(9);
   });
 
   test("every nav href parses back to a real (non not-found) route", () => {

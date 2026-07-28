@@ -29,6 +29,7 @@ import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { AgentsPage } from "./pages/AgentsPage";
+import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
@@ -423,6 +424,61 @@ function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement
   );
 }
 
+// Loads every knowledge kind at once so the chips can carry real counts and a search can span
+// all of them. Ten small parallel reads on a local daemon, and the alternative — loading only
+// the selected kind — is what made the old ten-tab IA feel like ten separate products.
+const KNOWLEDGE_KINDS: Array<{ kind: string; label: string }> = [
+  { kind: "features", label: "Features" },
+  { kind: "components", label: "Components" },
+  { kind: "flows", label: "Flows" },
+  { kind: "runbooks", label: "Runbooks" },
+  { kind: "decisions", label: "Decisions" },
+  { kind: "contracts", label: "Contracts" },
+  { kind: "data-models", label: "Data Models" },
+  { kind: "invariants", label: "Invariants" },
+  { kind: "incidents", label: "Incidents" },
+  { kind: "documents", label: "Documents" },
+];
+
+function KnowledgeContainer({ api, kind }: { api: KageApiClient; kind: string }): React.ReactElement {
+  const [kinds, setKinds] = useState<KnowledgeKind[]>(
+    KNOWLEDGE_KINDS.map((k) => ({ ...k, list: null, count: null })),
+  );
+  const [selected, setSelected] = useState(kind);
+
+  useEffect(() => { setSelected(kind); }, [kind]);
+
+  useEffect(() => {
+    let live = true;
+    for (const entry of KNOWLEDGE_KINDS) {
+      const load = entry.kind === "features"
+        ? api.features().then((f) => ({ kind: "feature", entities: f.features }) as EntityListDto)
+        : api.knowledgeList(entry.kind);
+      load
+        .then((list) => {
+          if (!live) return;
+          setKinds((prev) => prev.map((k) =>
+            k.kind === entry.kind ? { ...k, list, count: list.entities.length } : k));
+        })
+        // A kind that fails to load reports zero rather than hanging on "…" forever; the
+        // others still render, because one bad kind must not blank the page.
+        .catch(() => {
+          if (!live) return;
+          setKinds((prev) => prev.map((k) => (k.kind === entry.kind ? { ...k, count: 0 } : k)));
+        });
+    }
+    return () => { live = false; };
+  }, [api]);
+
+  const select = useCallback((next: string) => {
+    setSelected(next);
+    const path = next === "all" ? "/knowledge" : `/knowledge?kind=${encodeURIComponent(next)}`;
+    window.history.pushState({}, "", withBase(path));
+  }, []);
+
+  return <KnowledgePage kinds={kinds} selected={selected} onSelect={select} />;
+}
+
 function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ report: AgentsReportDto | null; error: string | null }>({ report: null, error: null });
   useEffect(() => {
@@ -571,6 +627,8 @@ function RoutedPage({
       return <WorkItemContainer api={api} id={route.id} />;
     case "agents":
       return <AgentsContainer api={api} />;
+    case "knowledge-all":
+      return <KnowledgeContainer api={api} kind={route.kind} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;
