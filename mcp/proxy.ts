@@ -11,6 +11,7 @@
 // COMPRESSION (the Headroom savings number) is deliberately a later layer — this slice
 // proves the plumbing + the "agent gets smarter across sessions with no setup" magic.
 
+import { rememberUpstreamCredentials } from "./vnext/compiler/proxy-provider.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
@@ -503,6 +504,25 @@ export function startProxy(projectDir: string, options: ProxyOptions = {}): Serv
     headers["accept-encoding"] = "identity"; // read the body plaintext for the receipt; upstream returns identity
     headers["content-length"] = String(outBody.length);
     if (isMessages) headers["host"] = upstreamUrl.host;
+
+    // Borrow the caller's credential for the compiler's semantic pass. In-memory only, auth
+    // headers only, and only from a real /v1/messages call — so Kage can consult a model on
+    // the user's behalf without ever holding a key of its own. See compiler/proxy-provider.ts.
+    if (isMessages) {
+      try {
+        const model = (() => {
+          try { return String((JSON.parse(outBody.toString("utf8")) as { model?: unknown }).model ?? ""); }
+          catch { return ""; }
+        })();
+        if (model) {
+          const flat: Record<string, string> = {};
+          for (const [key, value] of Object.entries(headers)) {
+            if (typeof value === "string") flat[key] = value;
+          }
+          rememberUpstreamCredentials({ upstream: upstreamUrl, headers: flat, model });
+        }
+      } catch { /* credential capture is opportunistic; it must never affect the forward */ }
+    }
 
     const doRequest = upstreamUrl.protocol === "http:" ? httpRequest : httpsRequest;
     const upstreamReq = doRequest(
