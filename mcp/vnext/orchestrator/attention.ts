@@ -31,7 +31,17 @@ export interface AttentionInputs {
   /** Approved packets that contradict another packet, with the ids they contradict. */
   contradictions: Array<{ packet_id: string; title: string; contradicts: string[] }>;
   /** Memory the lifecycle report already grades as untrustworthy. */
-  stale_critical: Array<{ packet_id: string; title: string; reason: string }>;
+  stale_critical: Array<{
+    packet_id: string;
+    title: string;
+    reason: string;
+    /**
+     * Recalls in the last 30 days. This is what makes one stale claim more urgent than
+     * another: a stale claim still being served to agents is actively causing the rework
+     * this product exists to prevent, while one nobody reads is merely untidy.
+     */
+    uses_30d: number;
+  }>;
 }
 
 const BASE_SEVERITY: Record<AttentionKind, number> = {
@@ -43,6 +53,21 @@ const BASE_SEVERITY: Record<AttentionKind, number> = {
 };
 
 const PARKED_AFTER_DAYS = 14;
+
+// Recalls per month at which a claim counts as "heavily used" — roughly daily on a working
+// month. Severity scales linearly up to this and then stops.
+//
+// The reference point matters more than it looks. A first attempt multiplied uses by 3, which
+// saturated at 10 recalls; on this repo's real distribution (20 down to 0) that flattened the
+// top EIGHT items to an identical score and reproduced exactly the tied ranking it was meant
+// to fix. Scale against the top of a plausible range, not against a number that feels big.
+const HEAVILY_USED_PER_MONTH = 20;
+const MAX_USE_WEIGHT = 30;
+
+function useWeight(uses30d: number): number {
+  if (uses30d <= 0) return 0;
+  return Math.min(MAX_USE_WEIGHT, Math.round((uses30d / HEAVILY_USED_PER_MONTH) * MAX_USE_WEIGHT));
+}
 
 function ageDays(now: string, since: string | undefined): number {
   const from = Date.parse(since ?? now);
@@ -106,7 +131,8 @@ export function deriveAttention(inputs: AttentionInputs): AttentionItem[] {
   for (const conflict of inputs.contradictions) {
     items.push({
       kind: "contradiction",
-      severity: BASE_SEVERITY.contradiction,
+      // A claim that contradicts four others poisons four answers, not one.
+      severity: BASE_SEVERITY.contradiction + Math.min(15, conflict.contradicts.length * 3),
       ref: conflict.packet_id,
       summary: `"${conflict.title}" contradicts ${conflict.contradicts.length} other claim(s)`,
       actions: ["keep one (supersede)", "scope both"],
@@ -114,11 +140,17 @@ export function deriveAttention(inputs: AttentionInputs): AttentionItem[] {
   }
 
   for (const stale of inputs.stale_critical) {
+    // Recent use is the cost-of-delay term. Capped so a single very hot packet cannot bury
+    // every other kind of decision, but allowed to outrank an unclaimed build — a wrong
+    // answer being served right now genuinely is the more urgent problem.
+    const served = useWeight(stale.uses_30d);
     items.push({
       kind: "stale_critical",
-      severity: BASE_SEVERITY.stale_critical,
+      severity: BASE_SEVERITY.stale_critical + served,
       ref: stale.packet_id,
-      summary: `"${stale.title}" — ${stale.reason}`,
+      summary: stale.uses_30d > 0
+        ? `"${stale.title}" — ${stale.reason} (recalled ${stale.uses_30d}x in 30d)`
+        : `"${stale.title}" — ${stale.reason}`,
       actions: ["reverify", "supersede", "retire"],
     });
   }
@@ -159,11 +191,24 @@ export function loadAttentionInputs(projectDir: string): AttentionInputs {
 
   let staleCritical: AttentionInputs["stale_critical"] = [];
   try {
-    const lifecycle = kageMemoryLifecycle(projectDir) as unknown as { items?: Array<{ id: string; title: string; health: string; reasons?: string[] }> };
-    staleCritical = (lifecycle.items ?? [])
+    // No structural cast here. The previous `as unknown as {...}` invented a shape the
+    // lifecycle report does not have — `id` instead of `packet_id`, `reasons` instead of
+    // `stale_reasons` — and the assertion stopped the compiler from ever noticing. The
+    // result: every stale row shipped with NO ref (unactionable, and colliding React keys)
+    // and a reason that only ever restated "stale". Use the real exported type so the
+    // compiler checks the field names.
+    staleCritical = kageMemoryLifecycle(projectDir).items
       .filter((entry) => entry.health === "stale" || entry.health === "disputed")
+      // Rank before truncating: taking the first ten and THEN sorting would drop the most
+      // urgent items whenever there are more than ten.
+      .sort((a, b) => b.uses_30d - a.uses_30d)
       .slice(0, 10)
-      .map((entry) => ({ packet_id: entry.id, title: entry.title, reason: entry.reasons?.[0] ?? entry.health }));
+      .map((entry) => ({
+        packet_id: entry.packet_id,
+        title: entry.title,
+        reason: entry.stale_reasons[0] ?? entry.reason ?? entry.health,
+        uses_30d: entry.uses_30d,
+      }));
   } catch {
     // Lifecycle unavailable degrades the queue's depth, never its correctness.
   }
