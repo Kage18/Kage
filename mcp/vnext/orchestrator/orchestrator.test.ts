@@ -188,6 +188,37 @@ test("the CLI path stays correct when the kernel already transitioned", () => {
 // `building` forever. Merging is observable: if the correlated commits are reachable from
 // the default branch, the work landed — no command, no click.
 
+// ── The branch cap must never hide the branch you are standing on ───────────
+// Found on the Kage repo itself: 92 branches, a cap of 20, and branches read in the order
+// `for-each-ref` returned them — alphabetical. The branch actually being worked on sorted
+// well past the cap, so the developer's own commits were invisible to the board and the item
+// sat at `claimed` while the work was plainly happening.
+
+test("the checked-out branch is scanned even past the branch cap", () => {
+  const project = tempRepo();
+  const workId = seedWorkItem(project);
+  assert.equal(claimWorkItem(project, workId, "alice").ok, true);
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+
+  // Enough decoy branches to overflow the cap several times over, all sorting BEFORE the
+  // working branch alphabetically so an alphabetical scan would never reach it.
+  for (let i = 0; i < 40; i += 1) {
+    git(project, "checkout", "-qb", `aaa-decoy-${String(i).padStart(3, "0")}`, "main");
+  }
+
+  git(project, "checkout", "-qb", "zzz-working-branch", "main");
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 42;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: real work\n\n[kage:${workId}]`);
+
+  const item = deriveWorkState(project).items.find((entry) => entry.work_id === workId);
+  assert.equal(
+    item?.derived_stage,
+    "building",
+    "the branch that is checked out must be observed no matter how many others exist",
+  );
+});
+
 // ── Verifying: the stage local git cannot see ───────────────────────────────
 // A branch with an open PR is in review, which is a different decision for a lead than
 // "still being written". Git alone cannot tell those apart — it needs a PR observer, so the

@@ -83,31 +83,56 @@ const COMMITS_PER_BRANCH = 30;
 // Caps keep this O(small) on real repositories; the board is a glance, not an audit.
 function observedCommits(projectDir: string): ObservedCommit[] {
   const base = defaultBranch(projectDir);
-  const refs = git(projectDir, "for-each-ref", "--format=%(refname:short)", "refs/heads");
+  // Ordered by most recent commit, NOT alphabetically. With the old ordering a repo with more
+  // branches than the cap scanned the alphabetically-first ones and silently skipped the rest
+  // — on this repo, 92 branches meant the branch actually being worked on was never read, so
+  // the board could not see the developer's own commits.
+  const refs = git(projectDir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads");
   if (!refs) return [];
   const commits: ObservedCommit[] = [];
 
+  // `--name-only` returns the changed paths in the SAME call. This used to fork a separate
+  // `git diff-tree` per commit, so a board load cost up to 20 branches x 30 commits = 600
+  // extra processes and took 6-7 seconds on every request. One spawn per branch now.
   const readRange = (branch: string, range: string, merged: boolean): void => {
-    const raw = git(projectDir, "log", "-n", String(COMMITS_PER_BRANCH), "--format=%H%x1f%cI%x1f%B%x1e", range);
+    const raw = git(
+      projectDir,
+      "log",
+      "-n",
+      String(COMMITS_PER_BRANCH),
+      "--no-renames",
+      "--name-only",
+      "--format=\x1e%H\x1f%cI\x1f%B\x1f",
+      range,
+    );
     if (!raw) return;
     for (const record of raw.split("\x1e")) {
       if (!record.trim()) continue;
-      const [hash, at, message] = record.split("\x1f");
+      const [hash, at, message, paths = ""] = record.split("\x1f");
       if (!hash?.trim() || !message) continue;
-      const changed = git(projectDir, "diff-tree", "--no-commit-id", "--name-only", "-r", hash.trim());
       commits.push({
         hash: hash.trim(),
         branch,
         message,
-        changed_paths: (changed ?? "").split("\n").map((line) => line.trim()).filter(Boolean),
+        changed_paths: paths.split("\n").map((line) => line.trim()).filter(Boolean),
         at: at?.trim() || new Date().toISOString(),
         merged,
       });
     }
   };
 
-  for (const branch of refs.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, BRANCH_CAP)) {
-    if (branch === base) continue;
+  const ordered = refs.split("\n").map((line) => line.trim()).filter(Boolean);
+  // The checked-out branch is never optional. Recency ordering already puts it near the front
+  // in practice, but "the work I am doing right now is on the board" must not depend on that.
+  const current = git(projectDir, "rev-parse", "--abbrev-ref", "HEAD")?.trim();
+  const scanned = new Set<string>();
+  if (current && current !== "HEAD" && current !== base) scanned.add(current);
+  for (const branch of ordered) {
+    if (scanned.size >= BRANCH_CAP) break;
+    if (branch !== base) scanned.add(branch);
+  }
+
+  for (const branch of scanned) {
     readRange(branch, base ? `${base}..${branch}` : branch, false);
   }
   if (base) readRange(base, base, true);

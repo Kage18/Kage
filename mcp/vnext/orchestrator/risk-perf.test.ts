@@ -17,7 +17,10 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { kageRisk } from "../../kernel.js";
+import { capture, kageRisk } from "../../kernel.js";
+import { deriveWorkState } from "./derive.js";
+import { buildWorkBoard } from "./board.js";
+import { appendCommandEvent } from "./events.js";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
@@ -90,6 +93,63 @@ test("risk over several targets does not fork a git process per commit per file"
     false,
     "a file that never changed alongside the target must not be a partner",
   );
+});
+
+// The board re-derives on every request, so its git cost is paid per page load. It forked a
+// `git diff-tree` per commit to learn which files changed — up to 20 branches x 30 commits =
+// 600 extra processes — and `GET /v2/work` took 6-7 seconds every single time. `--name-only`
+// answers the same question inside the log call that was already being made.
+test("deriving the board does not fork a git process per commit", () => {
+  const project = historyRepo();
+  capture({
+    projectDir: project,
+    type: "proposal",
+    title: "Make tenantLimit configurable",
+    body: "We should let each tenant configure tenantLimit so high-volume tenants can tune it themselves.",
+    paths: ["src/limits.ts"],
+  });
+
+  const { result, spawns } = countingGitSpawns(() => deriveWorkState(project));
+
+  // The fixture has 13 commits on one branch. Per-commit forking would put this in the dozens.
+  assert.ok(spawns <= 10, `derivation forked ${spawns} git processes — the per-commit storm is back`);
+  // Correctness is not traded for it: blast paths still come through, which is what
+  // weak correlation is matched on.
+  assert.equal(result.items.length, 1);
+});
+
+// Caching the board is only acceptable if it can never serve a stale answer, so the signature
+// covers every input the board reads: branch tips, the command log, and per-file packet
+// mtimes. Per-FILE deliberately, because a directory's mtime does not change when a file
+// inside it is rewritten in place.
+//
+// The two assertions below are the ones the board cache actually governs. An in-place packet
+// edit is NOT asserted here, and that is not an oversight: `loadApprovedPackets` memoizes in
+// the kernel, so a packet rewritten behind Kage's back stays stale one layer down no matter
+// what this cache does. The packet mtime remains in the signature as correct, cheap defence
+// for when that layer is fixed.
+test("the board cache is invalidated by new commits and new commands", () => {
+  const project = historyRepo();
+  const workId = capture({
+    projectDir: project,
+    type: "proposal",
+    title: "Make tenantLimit configurable",
+    body: "We should let each tenant configure tenantLimit so high-volume tenants can tune it themselves.",
+    paths: ["src/limits.ts"],
+  }).packet!.id;
+
+  assert.equal(buildWorkBoard(project).items[0].stage, "proposed");
+
+  // A command must be seen immediately — this is the click-to-render path in the app.
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+  assert.equal(buildWorkBoard(project).items[0].stage, "claimed", "a new command must invalidate the cache");
+
+  // A commit must be seen too.
+  git(project, "checkout", "-qb", "feat/limits-work");
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 99;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: work\n\n[kage:${workId}]`);
+  assert.equal(buildWorkBoard(project).items[0].stage, "building", "a new commit must invalidate the cache");
 });
 
 // Global hotspots were empty in EVERY install and nothing reported it: the query passed
