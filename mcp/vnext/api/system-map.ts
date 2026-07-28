@@ -175,11 +175,27 @@ export function buildSystemMap(
   }
 
   // Lay out shown nodes: x by lane column, y by row within the lane (in deterministic order).
+  //
+  // Columns are assigned only to lanes that actually HAVE nodes. The six lanes are a fixed
+  // vocabulary, but most repositories do not populate all of them — this one has zero
+  // features, data models and owners — and reserving a column for each empty lane pushed the
+  // real content off the right edge of the viewport while half the canvas sat blank.
+  // Lane ORDER is preserved; only the empty gaps are closed.
+  const occupied = new Set<string>();
+  for (const entity of laneEntities) {
+    if (shown.has(entity.entity_id)) occupied.add(entity.kind);
+  }
+  const columnOf = new Map<string, number>();
+  for (const lane of SYSTEM_MAP_LANES) {
+    if (occupied.has(lane)) columnOf.set(lane, columnOf.size);
+  }
+
   const laneCursors = new Map<string, number>();
   const nodeById = new Map<string, SystemMapNodeDto>();
   for (const entity of laneEntities) {
     if (!shown.has(entity.entity_id)) continue;
     const laneIndex = LANE_INDEX.get(entity.kind)!;
+    const column = columnOf.get(entity.kind) ?? laneIndex;
     const row = laneCursors.get(entity.kind) ?? 0;
     laneCursors.set(entity.kind, row + 1);
     const node: SystemMapNodeDto = {
@@ -188,7 +204,7 @@ export function buildSystemMap(
       slug: entity.slug,
       canonical_name: entity.canonical_name,
       lane: entity.kind as SystemMapLane,
-      x: LANE_X_ORIGIN + laneIndex * LANE_X_STEP,
+      x: LANE_X_ORIGIN + column * LANE_X_STEP,
       y: NODE_Y_ORIGIN + row * NODE_Y_STEP,
       health: healthFor(model.claimsForEntity(entity.entity_id)),
       href: hrefFor(entity),

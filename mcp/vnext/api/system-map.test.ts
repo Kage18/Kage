@@ -232,3 +232,36 @@ test("an empty repository yields an honest empty map, not a crash", () => {
   assert.equal(map.edges.length, 0);
   assert.equal(map.truncated, false);
 });
+
+// Six lanes are a fixed vocabulary, but most repositories populate only some of them.
+// Reserving a column for every EMPTY lane pushed real content off the right edge of the
+// viewport while half the canvas sat blank — on the Kage repo three of six lanes are empty,
+// so the diagram wasted 40% of its width and clipped the component labels.
+test("empty lanes do not reserve a column, and lane order is preserved", () => {
+  const model = new Repository(migratedDatabase());
+  // The `sequence` view roots at `flow`. `feature` is FIRST in the lane vocabulary and is
+  // deliberately left empty, so it must not reserve the leading column.
+  model.upsertEntity(entity({ entity_id: "flow-1", kind: "flow", canonical_name: "Checkout", slug: "checkout" }));
+  model.upsertEntity(entity({ entity_id: "comp-1", kind: "component", canonical_name: "API", slug: "api" }));
+  model.addRelation({
+    relation_id: randomUUID(),
+    repository_id: REPO,
+    from_entity_id: "flow-1",
+    relation_type: "depends_on",
+    to_entity_id: "comp-1",
+    evidence_id: null,
+    created_at: NOW,
+  });
+
+  const map = buildSystemMap(model, REPO, "sequence");
+  const placed = map.lanes.flatMap((lane) => lane.nodes);
+  const flowNode = placed.find((n) => n.entity_id === "flow-1");
+  const compNode = placed.find((n) => n.entity_id === "comp-1");
+  assert.ok(flowNode, "the flow node must be laid out");
+  assert.ok(compNode, "the component node must be laid out");
+
+  // The empty `feature` lane must not push `flow` off the origin.
+  assert.equal(flowNode!.x, 40, `the first OCCUPIED lane starts at the origin, got ${flowNode!.x}`);
+  // Order still follows the vocabulary, and the columns are adjacent — no blank gap between.
+  assert.equal(compNode!.x - flowNode!.x, 240, "occupied lanes are adjacent columns");
+});

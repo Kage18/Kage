@@ -4,7 +4,7 @@ import { IntegrationStrip } from "../components/IntegrationStrip";
 import { MetricCard } from "../components/MetricCard";
 
 // The repository value overview. It LEADS with the value Kage has actually measured for this repo —
-// recalls served, stale claims caught, knowledge captured — because that is the honest, provable
+// recalls served, stale claims withheld, knowledge captured — because that is the honest, provable
 // story and it is the reason a lead keeps the tool. The provider-cost metrics (net context cost,
 // verified reuse) come AFTER, and an unmeasured one shows the concrete step that unlocks it rather
 // than a dead "Unavailable". Nothing here is fabricated: measured numbers are measured, estimates are
@@ -105,10 +105,15 @@ function ValueHero({ report }: { report: TeamReportDto }): React.ReactElement {
           value={compactNumber(value.recalls_served)}
           note="Measured — memory the agents reused instead of rediscovering"
         />
+        {/* Labelled "withheld", not "caught". The ledger has BOTH, and they mean different
+            things: `stale_caught` counts packets newly invalidated when their cited code moved,
+            while this counts WITHHOLDING EVENTS at recall time — the same stale packet is
+            withheld again on every recall. Showing one field's number under the other's name
+            overstated it by roughly an order of magnitude on this repo (6,418 vs 730). */}
         <StatTile
-          label="Stale claims caught"
+          label="Stale claims withheld"
           value={compactNumber(value.stale_withheld)}
-          note="Measured — memory withheld because its cited code moved"
+          note="Measured — times a stale memory was kept out of an agent's context"
         />
         <StatTile
           label="Knowledge captured"

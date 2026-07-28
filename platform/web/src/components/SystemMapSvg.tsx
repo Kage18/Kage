@@ -13,6 +13,15 @@ import { HEALTH_LABELS } from "./health";
 const NODE_WIDTH = 168;
 const NODE_HEIGHT = 52;
 const PADDING = 48;
+
+// Roughly what fits in NODE_WIDTH at the node label's size. Deliberately conservative — the
+// clip path is the hard guarantee, this just avoids a word being sliced mid-glyph.
+const LABEL_CHARS = 22;
+
+function truncateLabel(name: string): string {
+  if (name.length <= LABEL_CHARS) return name;
+  return `${name.slice(0, LABEL_CHARS - 1).trimEnd()}…`;
+}
 const ZOOM_STEP = 0.2;
 const MIN_ZOOM = 0.4;
 const MAX_ZOOM = 2.4;
@@ -85,6 +94,15 @@ export function SystemMapSvg({ model, selectedId, onSelect }: SystemMapSvgProps)
           height={height * zoom}
           viewBox={`0 0 ${width} ${height}`}
         >
+          <defs>
+            {/* One clip region per node. SVG text neither wraps nor clips on its own, so long
+                entity names ran straight across the neighbouring node and made the diagram
+                unreadable. Clipping is exact regardless of font metrics; the character budget
+                below is a nicety on top of it, not the guarantee. */}
+            <clipPath id="kage-node-label">
+              <rect x={0} y={0} width={NODE_WIDTH - 20} height={NODE_HEIGHT} />
+            </clipPath>
+          </defs>
           <g>
             {model.edges.map((edge) => {
               const from = byId.get(edge.from_entity_id);
@@ -126,13 +144,18 @@ export function SystemMapSvg({ model, selectedId, onSelect }: SystemMapSvgProps)
                   onKeyDown={(event) => onNodeKeyDown(event, node)}
                 >
                   <rect x={node.x} y={node.y} width={NODE_WIDTH} height={NODE_HEIGHT} rx={8} />
-                  <text x={node.x + 12} y={node.y + 22} className="system-map-node-name">
-                    {node.canonical_name}
-                  </text>
-                  <text x={node.x + 12} y={node.y + 40} className="system-map-node-meta">
-                    {node.kind} · {HEALTH_LABELS[node.health]}
-                    {node.truncated ? " · +more" : ""}
-                  </text>
+                  {/* The full name is always available to assistive tech via aria-label above
+                      and on hover via <title>; only the DRAWN text is shortened. */}
+                  <title>{node.canonical_name}</title>
+                  <g transform={`translate(${node.x + 12}, ${node.y})`} clipPath="url(#kage-node-label)">
+                    <text x={0} y={22} className="system-map-node-name">
+                      {truncateLabel(node.canonical_name)}
+                    </text>
+                    <text x={0} y={40} className="system-map-node-meta">
+                      {node.kind} · {HEALTH_LABELS[node.health]}
+                      {node.truncated ? " · +more" : ""}
+                    </text>
+                  </g>
                 </g>
               );
             })}

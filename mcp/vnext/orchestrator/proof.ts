@@ -116,7 +116,7 @@ export function buildProof(projectDir: string): ProofReportDto {
       label: "Stale claims withheld",
       value: totals ? totals.stale_withheld : null,
       unit: "count",
-      formula: "ledger events where memory was withheld because its cited code had moved",
+      formula: "count of WITHHOLDING EVENTS at recall time — one stale claim withheld on ten recalls counts ten, so this is not a count of distinct claims",
       ...(totals ? {} : { unlock: LEDGER_UNLOCK }),
     },
     {
