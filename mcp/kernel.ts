@@ -12321,22 +12321,126 @@ function commitCategory(subject: string): string {
   return "other";
 }
 
+// ── One history pass, not one per file per commit ────────────────────────────
+//
+// Every per-file git signal (churn, recency, ownership, co-change) is answerable from a single
+// `git log --name-only` walk. Asking git per file — and, for co-change, per commit per file —
+// cost `kageRisk` 118 SECONDS on this repo and made `kage plan` never return.
+//
+// The window is capped so a very long history cannot make this unbounded; when the cap bites,
+// the report says so rather than quietly reporting counts as if they were totals.
+const HISTORY_WINDOW_COMMITS = 5000;
+
+interface HistoryCommit {
+  at: number;
+  author: string;
+  paths: string[];
+}
+
+interface GitHistoryIndex {
+  commitsByPath: Map<string, HistoryCommit[]>;
+  /** True when history was longer than the window, so counts are floors rather than totals. */
+  truncated: boolean;
+  available: boolean;
+}
+
+const EMPTY_HISTORY: GitHistoryIndex = { commitsByPath: new Map(), truncated: false, available: false };
+
+function buildGitHistoryIndex(projectDir: string): GitHistoryIndex {
+  // \x1e separates commits and \x1f separates fields, so neither can collide with a path,
+  // an author name, or a commit message.
+  const raw = readGit(projectDir, [
+    "log",
+    `-n`,
+    String(HISTORY_WINDOW_COMMITS),
+    "--no-renames",
+    "--name-only",
+    "--format=\x1e%cI\x1f%an <%ae>\x1f",
+  ]);
+  if (raw === null) return EMPTY_HISTORY;
+
+  const commitsByPath = new Map<string, HistoryCommit[]>();
+  let commits = 0;
+  for (const record of raw.split("\x1e")) {
+    if (!record.trim()) continue;
+    commits += 1;
+    // Each record is `<iso-date>\x1f<author>\x1f\n\n<path>\n<path>…`.
+    const [isoDate, author, body = ""] = record.split("\x1f");
+    const at = Date.parse((isoDate ?? "").trim());
+    const paths = body.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!paths.length) continue; // merge commits carry no file list
+    const commit: HistoryCommit = {
+      at: Number.isFinite(at) ? at : 0,
+      author: (author ?? "").trim(),
+      paths,
+    };
+    for (const path of new Set(paths)) {
+      const bucket = commitsByPath.get(path);
+      if (bucket) bucket.push(commit);
+      else commitsByPath.set(path, [commit]);
+    }
+  }
+  return { commitsByPath, truncated: commits >= HISTORY_WINDOW_COMMITS, available: true };
+}
+
+// Memoized on HEAD rather than on a clock. A TTL would make the index go stale inside a test
+// that commits and immediately re-reads; HEAD is exact — new commit, new key, fresh index —
+// and costs one cheap `rev-parse` per lookup instead of ~86 log walks per file.
+// Working-tree edits deliberately do not invalidate: this index describes committed history.
+let historyIndexCache: { project: string; head: string; index: GitHistoryIndex } | null = null;
+
+// The cache key must be cheap enough to check on every lookup, and `git rev-parse HEAD` is
+// not — it was itself 500 spawns per risk report. HEAD is readable straight off the
+// filesystem in microseconds, so read it there and keep the spawn only for the cases the
+// files cannot answer (packed refs, worktrees, a `.git` file).
+function headShaWithoutSpawning(projectDir: string): string | null {
+  try {
+    const gitDir = join(projectDir, ".git");
+    if (!statSync(gitDir).isDirectory()) return gitHead(projectDir);
+    const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    if (!head.startsWith("ref: ")) return head || null; // detached HEAD stores the sha itself
+    const refPath = join(gitDir, head.slice(5).trim());
+    if (!existsSync(refPath)) return gitHead(projectDir); // packed-refs
+    return readFileSync(refPath, "utf8").trim() || null;
+  } catch {
+    return gitHead(projectDir);
+  }
+}
+
+function gitHistoryIndex(projectDir: string): GitHistoryIndex {
+  const head = headShaWithoutSpawning(projectDir);
+  if (!head) return EMPTY_HISTORY;
+  if (historyIndexCache && historyIndexCache.project === projectDir && historyIndexCache.head === head) {
+    return historyIndexCache.index;
+  }
+  const index = buildGitHistoryIndex(projectDir);
+  historyIndexCache = { project: projectDir, head, index };
+  return index;
+}
+
+// Answered from the shared index. This was the second-largest source of the storm: ownership
+// and hotspot reporting call it once per file in the code graph, which was ~500 log walks.
+// Only the two `since` windows the callers actually use are supported, because a general
+// date parser here would be inventing capability nothing asks for.
 function gitCommitCountForPath(projectDir: string, path: string, since?: string): number {
-  const args = ["log", "--format=%H"];
-  if (since) args.push(`--since=${since}`);
-  args.push("--", path);
-  return gitLines(projectDir, args).length;
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!since) return commits.length;
+  const days = since.startsWith("30") ? 30 : 90;
+  const cutoff = Date.now() - days * DAY_MS_RISK;
+  return commits.filter((commit) => commit.at >= cutoff).length;
 }
 
 function gitPrimaryOwnerForPath(projectDir: string, path: string): Pick<GitFileSignal, "primary_owner" | "primary_owner_pct" | "contributor_count"> {
-  const authors = gitLines(projectDir, ["log", "--format=%an <%ae>", "--", path]);
-  if (!authors.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
   const counts = new Map<string, number>();
-  for (const author of authors) counts.set(author, (counts.get(author) ?? 0) + 1);
+  for (const commit of commits) {
+    if (commit.author) counts.set(commit.author, (counts.get(commit.author) ?? 0) + 1);
+  }
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     primary_owner: ranked[0]?.[0] ?? null,
-    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / authors.length).toFixed(2)) : null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
     contributor_count: ranked.length,
   };
 }
@@ -12350,14 +12454,16 @@ function gitAuthorCountsForPath(projectDir: string, path: string, since?: string
   return counts;
 }
 
+// Was `1 + 80` git spawns per file — a log walk to find the commits, then a `git show` for
+// every one of them. The same answer falls out of the shared history index for free.
 function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths: Set<string>): Array<{ file_path: string; count: number }> {
-  const commits = gitLines(projectDir, ["log", "--format=%H", "-n", "80", "--", path]);
   const counts = new Map<string, number>();
-  for (const commit of commits) {
-    const changed = gitLines(projectDir, ["show", "--name-only", "--format=", "--no-renames", commit])
-      .filter((candidate) => candidate !== path && graphPaths.has(candidate));
-    if (changed.length > 200) continue;
-    for (const file of new Set(changed)) counts.set(file, (counts.get(file) ?? 0) + 1);
+  for (const commit of gitHistoryIndex(projectDir).commitsByPath.get(path) ?? []) {
+    if (commit.paths.length > 200) continue;
+    for (const candidate of new Set(commit.paths)) {
+      if (candidate === path || !graphPaths.has(candidate)) continue;
+      counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    }
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -12365,19 +12471,62 @@ function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths
     .map(([file_path, count]) => ({ file_path, count }));
 }
 
+const DAY_MS_RISK = 86_400_000;
+
+// Every field below comes from the shared history index — no git process is forked here at
+// all. Previously this function alone cost roughly 86 spawns per file.
 function gitFileSignal(projectDir: string, path: string, graphPaths: Set<string>): GitFileSignal {
-  const total = gitCommitCountForPath(projectDir, path);
-  const owner = gitPrimaryOwnerForPath(projectDir, path);
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) {
+    return {
+      file_path: path,
+      commit_count_total: 0,
+      commit_count_30d: 0,
+      commit_count_90d: 0,
+      last_commit_at: null,
+      primary_owner: null,
+      primary_owner_pct: null,
+      contributor_count: 0,
+      co_change_partners: [],
+    };
+  }
+
+  const now = Date.now();
+  const authors = new Map<string, number>();
+  const partners = new Map<string, number>();
+  let within30 = 0;
+  let within90 = 0;
+  let newest = 0;
+
+  for (const commit of commits) {
+    if (commit.author) authors.set(commit.author, (authors.get(commit.author) ?? 0) + 1);
+    const age = now - commit.at;
+    if (commit.at && age <= 30 * DAY_MS_RISK) within30 += 1;
+    if (commit.at && age <= 90 * DAY_MS_RISK) within90 += 1;
+    if (commit.at > newest) newest = commit.at;
+    // Sweeping commits say nothing about coupling — the old code skipped them at >200 files
+    // and that judgement is preserved.
+    if (commit.paths.length > 200) continue;
+    for (const partner of new Set(commit.paths)) {
+      if (partner === path || !graphPaths.has(partner)) continue;
+      partners.set(partner, (partners.get(partner) ?? 0) + 1);
+    }
+  }
+
+  const ranked = [...authors.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     file_path: path,
-    commit_count_total: total,
-    commit_count_30d: gitCommitCountForPath(projectDir, path, "30 days ago"),
-    commit_count_90d: gitCommitCountForPath(projectDir, path, "90 days ago"),
-    last_commit_at: gitLines(projectDir, ["log", "-1", "--format=%cI", "--", path])[0] ?? null,
-    primary_owner: owner.primary_owner,
-    primary_owner_pct: owner.primary_owner_pct,
-    contributor_count: owner.contributor_count,
-    co_change_partners: gitCoChangePartnersForPath(projectDir, path, graphPaths),
+    commit_count_total: commits.length,
+    commit_count_30d: within30,
+    commit_count_90d: within90,
+    last_commit_at: newest ? new Date(newest).toISOString() : null,
+    primary_owner: ranked[0]?.[0] ?? null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
+    contributor_count: ranked.length,
+    co_change_partners: [...partners.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 5)
+      .map(([file_path, count]) => ({ file_path, count })),
   };
 }
 
@@ -12389,12 +12538,21 @@ function gitChangedFiles(projectDir: string): string[] {
     .filter((path) => !isNoisePath(path));
 }
 
+// Hotspots were ALWAYS empty, in every install, and nothing said so. The old query passed
+// `--format=__KAGE_COMMIT__`, and git treats a format string containing no `%` as the NAME of
+// a built-in format — so it exited with "invalid --pretty format" on every call, `gitLines`
+// swallowed the failure, and the feature silently returned nothing. On this repo that was
+// 6,585 file-change lines discarded.
+//
+// Reading the shared index instead removes both the bug and the spawn.
 function globalGitHotspots(projectDir: string, graph: CodeGraph): KageRiskReport["global_hotspots"] {
   const graphPaths = new Set(graph.files.map((file) => file.path));
+  const cutoff = Date.now() - 90 * DAY_MS_RISK;
   const counts = new Map<string, number>();
-  for (const line of gitLines(projectDir, ["log", "--since=90 days ago", "--name-only", "--format=__KAGE_COMMIT__", "-n", "1000"])) {
-    if (line === "__KAGE_COMMIT__" || !graphPaths.has(line)) continue;
-    counts.set(line, (counts.get(line) ?? 0) + 1);
+  for (const [path, commits] of gitHistoryIndex(projectDir).commitsByPath) {
+    if (!graphPaths.has(path)) continue;
+    const recent = commits.filter((commit) => commit.at >= cutoff).length;
+    if (recent > 0) counts.set(path, recent);
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
