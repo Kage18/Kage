@@ -570,3 +570,38 @@ The metrics are deliberately chosen to be able to make Kage look bad:
 **A competitor's numbers are never estimated or read off its documentation.** If the tool is
 not installed, its column reads `not measured` and names the command that would produce it —
 the same rule the product's own Proof page follows.
+
+### Result, run 2026-07-28 against Graphify 0.9.29
+
+Both tools cold, on an identical copy of this repo (400 source files, no `node_modules`,
+no `.git`, no build output). Graphify indexed via `graphify update . --no-cluster` — its
+deterministic AST path, no LLM, which is the like-for-like comparison against Kage's code graph.
+
+| | Kage | Graphify 0.9.29 |
+|---|---|---|
+| build (cold) | **1.3s** | 9.0s |
+| symbols / nodes | **14,176** | 6,079 |
+| files covered | 386 | **400** |
+| coverage | 96.5% | **100.0%** |
+| all edges | 14,706 | **16,012** |
+| **edge resolution** | **97.2%** | 93.9% |
+| relation kinds | 2 (calls, imports) | **14** |
+
+**Where Kage wins:** 7× faster cold, 2.3× the symbols, and a higher share of edges that can
+actually be traversed.
+
+**Where Graphify wins, and it genuinely does:** full file coverage where Kage misses 14 files,
+and a far richer relation vocabulary — `contains`, `imports_from`, `method`, `indirect_call`,
+`re_exports` and more, against Kage's two. A graph that only knows "calls" and "imports" cannot
+answer questions those other edges answer.
+
+**A caveat that cuts against us.** Graphify's resolution rate moves with which relation kinds
+you count: 93.9% over all edges, but 97.7% over a narrow calls/imports/references subset —
+slightly ABOVE Kage's 97.2%. The all-edges figure is reported as the headline because it is
+definition-free and cannot be tuned by choosing a flattering subset.
+
+**Two measurement bugs found and fixed while producing this**, both of which would have
+flattered Kage: the first run compared Kage WARM (0.4s) against Graphify cold (9.0s), and the
+first parser guessed `edges`/`from`/`to` for Graphify's schema — it is `links`/`source`/`target`
+— silently reporting ZERO for a tool that had just logged 6,079 nodes. A zero from a wrong key
+name is indistinguishable from a zero from a bad tool.

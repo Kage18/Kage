@@ -27,7 +27,7 @@
 //   node benchmarks/code-graph-headtohead.mjs [--project <dir>] [--json]
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 
@@ -45,7 +45,9 @@ function readArg(flag) {
 const SOURCE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|kt|swift|c|h|cpp|cs|php)$/;
 
 function measureKage() {
-  const kernel = require(join(projectDir, "mcp", "dist", "kernel.js"));
+  // The kernel comes from THIS repo, not the target — otherwise the benchmark can only ever
+  // measure Kage itself, which defeats the point of pointing it at another project.
+  const kernel = require(join(import.meta.dirname, "..", "mcp", "dist", "kernel.js"));
   const started = Date.now();
   const graph = kernel.buildCodeGraph(projectDir);
   const build_seconds = (Date.now() - started) / 1000;
@@ -75,9 +77,41 @@ function measureKage() {
   };
 }
 
+// Graphify writes `graphify-out/graph.json` next to the project it indexed. Its real schema is
+// `{ nodes: [{id, source_file, ...}], links: [{source, target, relation, ...}] }` — NOT
+// `edges`/`from`/`to`, which a first attempt here assumed and which silently produced a ZERO
+// for a tool that had just reported 6,079 nodes. A zero from a wrong key name looks exactly
+// like a zero from a bad tool, which is how a benchmark quietly lies in its author's favour.
+function measureGraphifyGraph(graphPath) {
+  const graph = JSON.parse(readFileSync(graphPath, "utf8"));
+  const nodes = graph.nodes ?? [];
+  const links = graph.links ?? [];
+  const ids = new Set(nodes.map((node) => node.id));
+  // The SAME definition Kage is held to: both ends must resolve to a known node.
+  const resolved = links.filter((link) => ids.has(link.source) && ids.has(link.target));
+  return {
+    tool: "graphify",
+    measured: true,
+    nodes: nodes.length,
+    files_covered: new Set(nodes.map((node) => node.source_file).filter(Boolean)).size,
+    edges: links.length,
+    edge_resolution: links.length ? resolved.length / links.length : null,
+    relation_kinds: new Set(links.map((link) => link.relation)).size,
+  };
+}
+
 // A competitor is measured only if it is actually installed. Absent, the column says so and
 // names the command that would produce it — never a number read off a landing page.
 function measureGraphify() {
+  // Prefer a graph it already produced for this project.
+  const graphPath = join(projectDir, "graphify-out", "graph.json");
+  if (existsSync(graphPath)) {
+    try {
+      return measureGraphifyGraph(graphPath);
+    } catch (error) {
+      return { tool: "graphify", measured: false, reason: `graph.json unreadable: ${String(error)}` };
+    }
+  }
   const probes = [
     () => execFileSync("graphify", ["--version"], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] }).trim(),
     () => execFileSync("npx", ["--no-install", "graphify", "--version"], { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "ignore"] }).trim(),
@@ -95,9 +129,9 @@ function measureGraphify() {
   }
   return {
     tool: "graphify",
-    installed: false,
-    reason: "not installed on this machine",
-    unlock: "git clone https://github.com/safishamsi/graphify && (cd graphify && ./graphify install)",
+    measured: false,
+    reason: "no graphify-out/graph.json for this project",
+    unlock: "pip install graphifyy && graphify update <project> --no-cluster",
   };
 }
 
@@ -120,9 +154,12 @@ if (asJson) {
   console.log(`  build             ${kage.build_seconds.toFixed(2)}s`);
   console.log(`  parsers           ${kage.parsers.join(", ")}`);
   console.log("\nGRAPHIFY");
-  if (graphify.installed) {
-    console.log(`  version           ${graphify.version}`);
-    console.log(`  ${graphify.note}`);
+  if (graphify.measured) {
+    console.log(`  nodes             ${graphify.nodes.toLocaleString()}`);
+    console.log(`  files covered     ${graphify.files_covered}`);
+    console.log(`  edges             ${graphify.edges.toLocaleString()}`);
+    console.log(`  edge resolution   ${pct(graphify.edge_resolution)}   same definition as above`);
+    console.log(`  relation kinds    ${graphify.relation_kinds}`);
   } else {
     console.log(`  not measured      ${graphify.reason}`);
     console.log(`  to measure it     ${graphify.unlock}`);
