@@ -86,6 +86,8 @@ describe("navLinks", () => {
     expect(navLinks.map((l) => l.label)).toEqual([
       "Attention",
       "Work",
+      // Proof sits third: the two operating pages first, then the page that justifies them.
+      "Proof",
       "Overview",
       "System Map",
       "Features",

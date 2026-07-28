@@ -1207,6 +1207,42 @@ a {
   line-height: 1.4;
 }
 
+/* Proof page. A measured number is the loudest thing on the card; an unmeasured one recedes
+   to muted body weight so the eye never reads "Not measured" as a result. */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-3);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-6);
+}
+.metric-grid > li {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+.metric-value {
+  margin: var(--space-2) 0;
+  font-size: 2rem;
+  line-height: 1.1;
+  font-weight: var(--font-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent);
+}
+/* An unmeasured metric must not look like a result. Same weight as body text and the muted
+   colour, so the accent green stays reserved for numbers Kage actually measured. */
+.metric-value.muted {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
+}
+.metric-grid > li.metric-unmeasured {
+  border-style: dashed;
+  background: transparent;
+}
+
 /* Ledger detail cards. */
 .ledger-detail {
   display: grid;

@@ -6,6 +6,7 @@
 import type {
   AttentionQueueDto,
   WorkBoardDto,
+  ProofReportDto,
   CommandResultDto, TeamReportDto,
   EntityDetailDto,
   EntityListDto,
@@ -50,6 +51,7 @@ export interface KageApiClient {
   components(): Promise<EntityListDto>;
   attention(): Promise<AttentionQueueDto>;
   work(): Promise<WorkBoardDto>;
+  proof(): Promise<ProofReportDto>;
   command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto>;
   /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
   knowledgeList(kind: string): Promise<EntityListDto>;
@@ -123,6 +125,10 @@ export class KageApi implements KageApiClient {
 
   work(): Promise<WorkBoardDto> {
     return this.get<WorkBoardDto>("/v2/work");
+  }
+
+  proof(): Promise<ProofReportDto> {
+    return this.get<ProofReportDto>("/v2/proof");
   }
 
   // The command loop: the app never mutates state, it issues a decision. The response

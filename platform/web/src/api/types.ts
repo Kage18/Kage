@@ -650,6 +650,25 @@ export interface WorkBoardDto {
   totals: Record<string, number>;
 }
 
+// ── Proof (orchestrator §8) ──────────────────────────────────────────────────
+// `value: null` is a first-class state, not an error: it means the metric was never measured,
+// and `unlock` says what would make it measurable. The page must never render a null as 0.
+export interface ProofMetricDto {
+  id: string;
+  label: string;
+  value: number | null;
+  unit: "count" | "days" | "percent" | "tokens";
+  formula: string;
+  unlock?: string;
+}
+
+export interface ProofReportDto {
+  project_dir: string;
+  generated_at: string;
+  metrics: ProofMetricDto[];
+  cycle_times: Array<{ work_id: string; title: string; days: number }>;
+}
+
 export interface CommandResultDto {
   ok: boolean;
   error?: string;

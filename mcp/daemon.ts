@@ -1195,6 +1195,15 @@ export async function startViewer(projectDir: string, options: { host?: string; 
         .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
       return;
     }
+    // Proof: what Kage measurably did. Derived from the same stage log the board reads plus
+    // the value ledger, so it can never disagree with the board — and unmeasured metrics come
+    // back null with an unlock, never as a zero dressed up as a result.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/proof") {
+      import("./vnext/orchestrator/proof.js")
+        .then(({ buildProof }) => json(res, 200, buildProof(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `proof unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
     // The command loop (tech design §13): the app never mutates state directly. It issues a
     // command, which is validated, appended to the log, and reduced — every surface then
     // re-derives from the same events the CLI writes.

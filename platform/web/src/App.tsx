@@ -4,6 +4,7 @@ import type { TeamReportDto,
   AttentionItemDto,
   AttentionQueueDto,
   WorkBoardDto,
+  ProofReportDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
@@ -23,6 +24,7 @@ import { BillingPage } from "./pages/BillingPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
+import { ProofPage } from "./pages/ProofPage";
 import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
@@ -401,6 +403,20 @@ function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement
   return <AttentionPage items={state.items} />;
 }
 
+function ProofContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [state, setState] = useState<{ report: ProofReportDto | null; error: string | null }>({ report: null, error: null });
+  useEffect(() => {
+    let live = true;
+    api.proof()
+      .then((report: ProofReportDto) => { if (live) setState({ report, error: null }); })
+      .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [api]);
+  if (state.error) return <p className="empty-state">Proof unavailable: {state.error}</p>;
+  if (!state.report) return <p className="empty-state">Measuring…</p>;
+  return <ProofPage report={state.report} />;
+}
+
 function EntityListContainer({
   api,
   title,
@@ -500,6 +516,8 @@ function RoutedPage({
       return <AttentionContainer api={api} />;
     case "work":
       return <WorkContainer api={api} />;
+    case "proof":
+      return <ProofContainer api={api} />;
     case "overview":
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;

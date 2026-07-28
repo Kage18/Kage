@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 export type Route =
   | { page: "attention" }
   | { page: "work" }
+  | { page: "proof" }
   | { page: "overview" }
   | { page: "system-map"; view: string }
   | { page: "features" }
@@ -45,6 +46,7 @@ export interface NavLink {
 export const navLinks: NavLink[] = [
   { label: "Attention", href: "/attention" },
   { label: "Work", href: "/work" },
+  { label: "Proof", href: "/proof" },
   { label: "Overview", href: "/overview" },
   { label: "System Map", href: "/system-map" },
   { label: "Features", href: "/features" },
@@ -110,6 +112,9 @@ export function parseRoute(input: string): Route {
       break;
     case "work":
       if (segments.length === 1) return { page: "work" };
+      break;
+    case "proof":
+      if (segments.length === 1) return { page: "proof" };
       break;
     case "overview":
       if (segments.length === 1) return { page: "overview" };
@@ -185,6 +190,8 @@ export function routeToPath(route: Route): string {
       return "/attention";
     case "work":
       return "/work";
+    case "proof":
+      return "/proof";
     case "overview":
       return "/overview";
     case "system-map":
