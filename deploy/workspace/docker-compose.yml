@@ -61,7 +61,7 @@ services:
       # passing its own 127.0.0.1 healthcheck. Exposure is narrowed at the publish line below, not here.
       KAGE_WORKSPACE_HOST: "0.0.0.0"
       # The probe fails a pod that is still migrating or is pointed at a database another build owns.
-      KAGE_WORKSPACE_EXPECTED_MIGRATION: ${KAGE_WORKSPACE_EXPECTED_MIGRATION:-12}
+      KAGE_WORKSPACE_EXPECTED_MIGRATION: ${KAGE_WORKSPACE_EXPECTED_MIGRATION:-13}
     # Published on the HOST LOOPBACK by default: the service speaks plain HTTP, so put a TLS terminator in
     # front of it and have that terminator reach 127.0.0.1. Set KAGE_WORKSPACE_PUBLISH_ADDR=0.0.0.0 only
     # to deliberately expose plain HTTP on every host interface.

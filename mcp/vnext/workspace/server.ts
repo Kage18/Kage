@@ -73,6 +73,7 @@ import {
 } from "./enterprise/oidc.js";
 import { verifySignature } from "./github/signature.js";
 import { handleWebhook } from "./github/webhooks.js";
+import { ingestGitHubEvent } from "./github/ingest.js";
 import type { GitHubAppConfig } from "./github/config.js";
 
 const REVIEW_ACTIONS: ReadonlySet<string> = new Set<ReviewAction>(["accept", "reject", "supersede"]);
@@ -801,9 +802,12 @@ async function handleGitHubWebhook(
     {
       db,
       secret: options.github.webhook_secret,
-      // The delivery ledger is the durable record for this phase; event fan-out lives in the ingest
-      // modules (github/checks.ts, github/auth.ts) and is added as those events are handled.
-      process: async () => {},
+      // Was `async () => {}`: every verified event was ledgered and then DISCARDED, which is
+      // why `verifying` — the one stage local git cannot see, because git has no concept of a
+      // pull request — was unreachable for any team on the GitHub App.
+      process: async (verified) => {
+        await ingestGitHubEvent(db, verified);
+      },
     },
     {
       rawBody,

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Db } from "./db.js";
 
 /** Highest migration version shipped in this build; `migrate()` brings a database up to it. */
-export const LATEST_MIGRATION = 12;
+export const LATEST_MIGRATION = 13;
 
 // A fixed, service-wide key for the migration advisory lock. boot.ts runs migrate() in EVERY replica
 // before that replica listens, so `docker compose up --scale workspace=3` and any Deployment with
