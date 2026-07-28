@@ -1195,6 +1195,34 @@ export async function startViewer(projectDir: string, options: { host?: string; 
         .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
       return;
     }
+    // Acting on an attention item. Only `reverify` is offered, and deliberately so: it is the
+    // one queue action that is a genuine single decision. `supersede` requires choosing a
+    // replacement packet, and `retire` has no kernel operation at all — offering buttons for
+    // either would be offering buttons that cannot work.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/attention/reverify") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const ref = String(body.ref ?? "").trim();
+          const actor = String(body.actor ?? "").trim();
+          if (!ref) { json(res, 400, { ok: false, error: "an attention item ref is required" }); return; }
+          const { reverifyMemory } = await import("./kernel.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          const result = reverifyMemory(projectRoot, ref, { verifiedBy: actor || "portal" });
+          // reverifyMemory refuses to rubber-stamp a packet whose cited code is all gone.
+          // That refusal is a RESULT, not a server error, and the caller must see the reason.
+          json(res, result.ok ? 200 : 409, {
+            ok: result.ok,
+            error: result.ok ? undefined : result.errors[0],
+            result,
+            attention: attentionQueue(projectRoot),
+          });
+        } catch (error) {
+          json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
     // Proof: what Kage measurably did. Derived from the same stage log the board reads plus
     // the value ledger, so it can never disagree with the board — and unmeasured metrics come
     // back null with an unlock, never as a zero dressed up as a result.

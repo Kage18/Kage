@@ -400,7 +400,19 @@ function AttentionContainer({ api }: { api: KageApiClient }): React.ReactElement
   }, [api]);
   if (state.error) return <p className="empty-state">Attention queue unavailable: {state.error}</p>;
   if (state.items === null) return <p className="empty-state">Deriving…</p>;
-  return <AttentionPage items={state.items} />;
+  return (
+    <AttentionPage
+      items={state.items}
+      onReverify={(ref) =>
+        api.reverify(ref, "portal").then((result) => {
+          // The re-derived queue comes back with the response, so the row that was just
+          // resolved disappears without a second round trip.
+          if (result.attention) setState({ items: result.attention, error: null });
+          return result;
+        })
+      }
+    />
+  );
 }
 
 function ProofContainer({ api }: { api: KageApiClient }): React.ReactElement {

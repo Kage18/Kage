@@ -7,6 +7,7 @@ import type {
   AttentionQueueDto,
   WorkBoardDto,
   ProofReportDto,
+  AttentionActionResultDto,
   CommandResultDto, TeamReportDto,
   EntityDetailDto,
   EntityListDto,
@@ -52,6 +53,7 @@ export interface KageApiClient {
   attention(): Promise<AttentionQueueDto>;
   work(): Promise<WorkBoardDto>;
   proof(): Promise<ProofReportDto>;
+  reverify(ref: string, actor: string): Promise<AttentionActionResultDto>;
   command(input: { kind: string; work_id: string; actor: string; note?: string }): Promise<CommandResultDto>;
   /** One generic reader for the knowledge kinds surfaced under their own browse tabs. */
   knowledgeList(kind: string): Promise<EntityListDto>;
@@ -129,6 +131,17 @@ export class KageApi implements KageApiClient {
 
   proof(): Promise<ProofReportDto> {
     return this.get<ProofReportDto>("/v2/proof");
+  }
+
+  // A refusal (409) is a RESULT the operator needs to read — reverify declines to
+  // rubber-stamp a packet whose cited code is gone — so it is returned, not thrown.
+  async reverify(ref: string, actor: string): Promise<AttentionActionResultDto> {
+    const response = await fetch(`${this.baseUrl}/v2/attention/reverify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+      body: JSON.stringify({ ref, actor }),
+    });
+    return (await response.json()) as AttentionActionResultDto;
   }
 
   // The command loop: the app never mutates state, it issues a decision. The response

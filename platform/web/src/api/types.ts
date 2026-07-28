@@ -650,6 +650,26 @@ export interface WorkBoardDto {
   totals: Record<string, number>;
 }
 
+// Acting on an attention item. Only `reverify` is exposed: it is the one queue action that
+// is a single decision. `supersede` needs a replacement packet chosen, and `retire` has no
+// kernel operation — the page says so rather than offering buttons that cannot work.
+export interface ReverifyResultDto {
+  ok: boolean;
+  packet_id: string;
+  refreshed_paths: string[];
+  missing_paths: string[];
+  changed_paths: string[];
+  was_stale: boolean;
+  errors: string[];
+}
+
+export interface AttentionActionResultDto {
+  ok: boolean;
+  error?: string;
+  result?: ReverifyResultDto;
+  attention?: AttentionItemDto[];
+}
+
 // ── Proof (orchestrator §8) ──────────────────────────────────────────────────
 // `value: null` is a first-class state, not an error: it means the metric was never measured,
 // and `unlock` says what would make it measurable. The page must never render a null as 0.
