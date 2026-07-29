@@ -8,10 +8,22 @@ function route(url: string, hasActiveRepo = true) {
 }
 
 test("the portal's API calls are forwarded to the repository's daemon", () => {
-  for (const path of ["/v2/attention", "/v2/work", "/kage/events", "/health"]) {
+  for (const path of ["/v2/attention", "/v2/work", "/health"]) {
     const decision = route(`kage://app${path}`);
     assert.equal(decision.kind, "forward", `${path} must reach the daemon`);
   }
+});
+
+// THE bug this rule exists to prevent, measured on a running app rather than reasoned about:
+// forwarding the SSE feed through the scheme leaked one of Electron's ~6-per-host sockets on every
+// EventSource reconnect, because `net.fetch` of an endpoint that never ends is never released.
+// After six reconnects the pool was exhausted and every other request queued indefinitely — the
+// log showed requests started and never completed, and lsof showed exactly 6 established sockets.
+// That was "the pages take ages to load".
+test("the live feed is never forwarded — a stream would leak a socket per reconnect", () => {
+  const decision = route("kage://app/kage/events");
+  assert.equal(decision.kind, "deny", "forwarding this exhausts the connection pool");
+  assert.match(decision.kind === "deny" ? decision.reason : "", /IPC/);
 });
 
 test("a forwarded request keeps its query string", () => {

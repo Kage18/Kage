@@ -25,6 +25,7 @@ import {
 } from "electron";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { get as httpGet } from "node:http";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -283,6 +284,66 @@ async function addRepositoryByDialog(): Promise<void> {
   state = result.state;
   persist();
   await startRepo(result.repo!.path);
+}
+
+// ── The live feed ────────────────────────────────────────────────────────────────────────────
+//
+// ONE subscription per active repository, held in main and pushed to the renderer over IPC.
+//
+// The renderer used to open this itself through the `kage://` scheme, and that leaked a socket on
+// every EventSource reconnect: forwarding an endpoint that never ends never releases the
+// connection, and Electron allows roughly six per host. Six reconnects exhausted the pool and every
+// other request queued forever. Node's own http client is used rather than `net.fetch` precisely
+// because the response stream is ours to destroy.
+
+let liveFeed: { repo: string; destroy: () => void } | null = null;
+
+function stopLiveFeed(): void {
+  liveFeed?.destroy();
+  liveFeed = null;
+}
+
+function startLiveFeed(repo: string, port: number): void {
+  if (liveFeed?.repo === repo) return;
+  stopLiveFeed();
+
+  let stopped = false;
+  let retry: NodeJS.Timeout | undefined;
+
+  const connectOnce = (): void => {
+    if (stopped) return;
+    const request = httpGet({ host: "127.0.0.1", port, path: "/kage/events" }, (response) => {
+      response.setEncoding("utf8");
+      let buffer = "";
+      response.on("data", (chunk: string) => {
+        buffer += chunk;
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          try {
+            const event = JSON.parse(line.slice(5).trim()) as { type?: string };
+            if (event.type === "work_changed") window?.webContents.send("kage:changed");
+          } catch { /* a heartbeat or a partial frame is not an error */ }
+        }
+      });
+      // A closed stream is normal (the daemon restarts, the machine sleeps). Reconnect slowly —
+      // this is a background signal, not a request anybody is waiting on.
+      response.on("end", () => { if (!stopped) retry = setTimeout(connectOnce, 3000); });
+    });
+    request.on("error", () => { if (!stopped) retry = setTimeout(connectOnce, 3000); });
+    liveFeed = {
+      repo,
+      destroy: () => {
+        stopped = true;
+        clearTimeout(retry);
+        request.destroy();
+      },
+    };
+  };
+
+  connectOnce();
 }
 
 // ── Agent sessions ───────────────────────────────────────────────────────────────────────────
@@ -625,6 +686,8 @@ app.whenReady().then(async () => {
     state = core.openRepo(state, path);
     persist();
     await startRepo(path);
+    const opened = core.activeRepo(state);
+    if (opened) startLiveFeed(opened.path, opened.port);
     return publicState();
   });
 
@@ -636,7 +699,10 @@ app.whenReady().then(async () => {
   // even though the daemon comes up a second later. So the active repository's daemon is awaited
   // BEFORE the window exists.
   const active = core.activeRepo(state);
-  if (active) await startRepo(active.path);
+  if (active) {
+    await startRepo(active.path);
+    startLiveFeed(active.path, active.port);
+  }
 
   window = createWindow();
 
@@ -657,6 +723,7 @@ app.on("window-all-closed", () => { /* stay resident */ });
 // A daemon — or a running agent, or its proxy — outliving the app is a process nobody can find to
 // kill. Agents first: they are the ones that cost money while nobody is watching.
 app.on("before-quit", () => {
+  stopLiveFeed();
   for (const id of [...sessions.keys()]) stopSession(id);
   supervisor?.stopAll();
 });

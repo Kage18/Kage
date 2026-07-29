@@ -43,6 +43,13 @@ contextBridge.exposeInMainWorld("kageDesktop", {
     ipcRenderer.invoke("kage:sessions:start", input),
   stopSession: (id: string): Promise<DesktopSession[]> => ipcRenderer.invoke("kage:sessions:stop", id),
 
+  /** Fires when this repository's memory or work changed. One subscription, held in main. */
+  onChanged: (listener: () => void): (() => void) => {
+    const handler = () => listener();
+    ipcRenderer.on("kage:changed", handler);
+    return () => ipcRenderer.removeListener("kage:changed", handler);
+  },
+
   onSessions: (listener: (sessions: DesktopSession[]) => void): (() => void) => {
     const handler = (_event: unknown, next: DesktopSession[]) => listener(next);
     ipcRenderer.on("kage:sessions", handler);

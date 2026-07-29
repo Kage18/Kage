@@ -235,3 +235,49 @@ test("a repository with recent churn reports hotspots rather than silently nothi
   assert.ok(top.commit_count_90d >= 12, `expected the real churn count, got ${top.commit_count_90d}`);
   assert.ok(top.primary_owner, "a hotspot names who owns it");
 });
+
+// Derivation is the shared floor under Attention, Proof, the Board and work-item detail. Measured
+// on the Kage repository before this cache: 1.4s cold, and FIVE callers each paid it — opening the
+// app spent it three times before a single screen rendered. Endpoint timings, cold daemon:
+// attention 2.4s -> first-hit only, proof 2.1s -> 0.20s, work?knowledge=0 0.88s -> 0.10s, and
+// every second visit under 0.3s.
+test("derivation is computed once and reused until its inputs actually change", () => {
+  const project = historyRepo();
+  const workId = capture({
+    projectDir: project,
+    type: "proposal",
+    title: "Make tenantLimit configurable",
+    body: "Let each tenant tune tenantLimit.",
+    paths: ["src/limits.ts"],
+  }).packet!.id;
+
+  const first = deriveWorkState(project);
+  const second = deriveWorkState(project);
+  // Same object identity: the second call did no work at all.
+  assert.equal(second, first, "an unchanged repository must not be re-derived");
+
+  // A command is one of the three inputs, so it must invalidate — this is the click-to-render path.
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+  const afterCommand = deriveWorkState(project);
+  assert.notEqual(afterCommand, first, "a new command must re-derive");
+  assert.equal(afterCommand.items[0].derived_stage, "claimed");
+
+  // So must a commit.
+  git(project, "checkout", "-qb", "feat/derive-cache");
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 3;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: work\n\n[kage:${workId}]`);
+  const afterCommit = deriveWorkState(project);
+  assert.notEqual(afterCommit, afterCommand, "a new commit must re-derive");
+  assert.equal(afterCommit.items[0].derived_stage, "building");
+});
+
+// Supplying a PR observer changes what `verifying` can reach, so it cannot share a cache entry
+// with a derivation that had none.
+test("a derivation with a PR observer is not served from the cache of one without", () => {
+  const project = historyRepo();
+  capture({ projectDir: project, type: "proposal", title: "T", body: "B", paths: ["src/limits.ts"] });
+  const without = deriveWorkState(project);
+  const with_ = deriveWorkState(project, { openPullRequestBranches: () => new Set(["feat/x"]) });
+  assert.notEqual(with_, without, "the observer is part of the cache key");
+});

@@ -10,6 +10,7 @@
 // knowing anything about them.
 
 import React, { useEffect, useState } from "react";
+import { desktop } from "../desktop";
 
 export const WORK_CHANGED_EVENT = "kage:work-changed";
 
@@ -44,6 +45,19 @@ export function LiveIndicator(): React.ReactElement {
       setConnection("unavailable");
       return;
     }
+    // In the desktop app the signal arrives over IPC: main holds ONE connection to the daemon.
+    // The renderer used to open this stream itself through the `kage://` scheme, and that leaked
+    // one of Electron's ~6-per-host sockets on every reconnect until the pool was exhausted and
+    // every request queued forever. A browser still gets real SSE — no custom scheme in the way.
+    const bridge = desktop();
+    if (bridge) {
+      setConnection("live");
+      return bridge.onChanged(() => {
+        setLast("changed just now");
+        window.dispatchEvent(new CustomEvent(WORK_CHANGED_EVENT));
+      });
+    }
+
     const source = new EventSource("/kage/events");
     source.onopen = () => setConnection("live");
     source.onerror = () => setConnection("unavailable");

@@ -42,6 +42,8 @@ export interface KageDesktop {
   getSessions(): Promise<DesktopSession[]>;
   startSession(input: { work_id: string | null; work_title: string | null; agent: string; prompt: string }): Promise<{ ok: boolean; error?: string }>;
   stopSession(id: string): Promise<DesktopSession[]>;
+  /** Fires when this repository's memory or work changed. One connection, held in main. */
+  onChanged(listener: () => void): () => void;
   onSessions(listener: (sessions: DesktopSession[]) => void): () => void;
 }
 

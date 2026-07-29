@@ -13,6 +13,8 @@
 // from the GitHub App. Absent observers degrade DERIVATION DEPTH, never correctness (tenet T4).
 
 import { execFileSync } from "node:child_process";
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { loadApprovedPackets, type MemoryPacket } from "../../kernel.js";
 import { readCommandEvents, type CommandEvent } from "./events.js";
 import { correlateCommit, type Correlation, type WorkItemRef } from "./correlate.js";
@@ -160,7 +162,53 @@ export interface DeriveOptions {
   openPullRequestBranches?: () => Set<string>;
 }
 
+// Derivation is the shared floor under Attention, Proof, the Board and work-item detail — FIVE
+// callers, all of which paid for it separately. Measured on this repository: 1.4s cold, 0.78s
+// warm, essentially all of it in the branch scan (`observedCommits`) and the correlation loop;
+// packets and commands together are under 30ms. Opening the app therefore cost it three times
+// before a single screen had rendered.
+//
+// The signature is the same one the board cache uses, and for the same reason: derivation reduces
+// over commits (git), commands (the log) and proposals (packets), so it is stale exactly when one
+// of those three changes and never otherwise. Whether a PR observer was supplied is part of the
+// key because it decides whether `verifying` can be reached at all.
+interface DeriveCacheEntry {
+  signature: string;
+  projection: WorkStateProjection;
+}
+let deriveCache: { project: string; entry: DeriveCacheEntry } | null = null;
+
+function deriveSignature(projectDir: string, withPrObserver: boolean): string {
+  const parts: string[] = [withPrObserver ? "pr" : "no-pr"];
+  parts.push(git(projectDir, "rev-parse", "HEAD") ?? "no-git");
+  parts.push(git(projectDir, "for-each-ref", "--format=%(objectname)", "refs/heads") ?? "");
+  const stamp = (path: string): void => {
+    try {
+      const info = statSync(path);
+      parts.push(`${path}:${info.mtimeMs}:${info.size}`);
+    } catch { /* absent is itself a stable input */ }
+  };
+  stamp(join(projectDir, ".agent_memory", "work", "commands.jsonl"));
+  const packets = join(projectDir, ".agent_memory", "packets");
+  try {
+    // Per-file, not the directory: a directory's mtime does not change when a file is edited in
+    // place, so keying on it would serve a stale projection after any packet edit.
+    for (const name of readdirSync(packets).sort()) stamp(join(packets, name));
+  } catch { /* no packets yet */ }
+  return parts.join("|");
+}
+
 export function deriveWorkState(projectDir: string, options: DeriveOptions = {}): WorkStateProjection {
+  const signature = deriveSignature(projectDir, !!options.openPullRequestBranches);
+  if (deriveCache && deriveCache.project === projectDir && deriveCache.entry.signature === signature) {
+    return deriveCache.entry.projection;
+  }
+  const projection = computeWorkState(projectDir, options);
+  deriveCache = { project: projectDir, entry: { signature, projection } };
+  return projection;
+}
+
+function computeWorkState(projectDir: string, options: DeriveOptions): WorkStateProjection {
   const proposals = loadApprovedPackets(projectDir).filter((packet) => packet.type === "proposal");
   const commands = readCommandEvents(projectDir);
   const commits = observedCommits(projectDir);

@@ -28,6 +28,14 @@ import type {
   TasksDto,
 } from "./types";
 
+/**
+ * Backoff between retries: 250ms, 500ms, 1s, 2s — about 3.75s of patience in total, which covers a
+ * cold daemon start without making a genuinely dead one feel hung.
+ */
+function delay(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+}
+
 // The six authorized review mutations, as their URL action segments.
 export type ReviewAction =
   | "accept"
@@ -93,11 +101,42 @@ export class KageApi implements KageApiClient {
     this.token = token;
   }
 
-  async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      headers: { authorization: `Bearer ${this.token}` },
-    });
-    if (!response.ok) throw new Error(`Kage API ${response.status}`);
+  /**
+   * A read, with a bounded retry on the failures that mean "not ready yet" rather than "wrong".
+   *
+   * This exists because of a real dead end: in the desktop app the daemon is started by the app
+   * itself, and on a cold repository it can take longer to accept connections than the window
+   * takes to load. The first `/v2/overview` then failed, and with no retry the window sat on
+   * "Loading repository knowledge…" FOREVER — while the daemon answered that same request in
+   * 0.13s a second later. Only relaunching the app cleared it.
+   *
+   * Retried: a network error (nothing listening yet) and 502/503/504 (the app's protocol handler
+   * reports a daemon that is not answering as 502, and "no repository is open" as 503). NOT
+   * retried: 4xx, which means the request itself is wrong and will be just as wrong next time.
+   */
+  async get<T>(path: string, attempt = 0): Promise<T> {
+    const RETRYABLE = new Set([502, 503, 504]);
+    const MAX_ATTEMPTS = 5;
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        headers: { authorization: `Bearer ${this.token}` },
+      });
+    } catch (error) {
+      // Nothing listening yet. This is the common case while a daemon is still starting.
+      if (attempt >= MAX_ATTEMPTS - 1) throw error;
+      await delay(attempt);
+      return this.get<T>(path, attempt + 1);
+    }
+
+    if (!response.ok) {
+      if (RETRYABLE.has(response.status) && attempt < MAX_ATTEMPTS - 1) {
+        await delay(attempt);
+        return this.get<T>(path, attempt + 1);
+      }
+      throw new Error(`Kage API ${response.status}`);
+    }
     return response.json() as Promise<T>;
   }
 

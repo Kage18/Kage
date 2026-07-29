@@ -17,7 +17,20 @@
 // which is the whole reason it lives here and not in `platform/desktop`.
 
 /** Prefixes the portal fetches from its own origin, which belong to the repository's daemon. */
-const API_PREFIXES = ["/v2/", "/kage/", "/health"];
+const API_PREFIXES = ["/v2/", "/health"];
+
+/**
+ * The live feed is NOT forwarded. It is a Server-Sent Events stream, and forwarding it through the
+ * custom scheme leaked a connection per reconnect: each `net.fetch` of an endpoint that never ends
+ * held one of Electron's ~6-per-host sockets open forever. After six reconnects every other request
+ * QUEUED indefinitely — measured on a running app as 6 established sockets to the daemon and
+ * requests logged as started but never completed. That is what "the pages take ages to load"
+ * actually was.
+ *
+ * The app subscribes once in the main process and pushes changes over IPC instead. A browser still
+ * gets real SSE from the daemon that serves it, because there is no custom scheme in the way.
+ */
+export const LIVE_FEED_PATH = "/kage/events";
 
 export type ProtocolDecision =
   /** Proxy to the active repository's daemon, preserving method and body. */
@@ -74,6 +87,12 @@ export function routeDesktopRequest(input: RouteInput): ProtocolDecision {
   // `../`. That is the case this check exists for, and it is why the check must run after decoding.
   if (pathname.includes("..")) {
     return { kind: "deny", reason: "path traversal" };
+  }
+
+  // Answered, not forwarded, and not an error: the renderer's EventSource sees a closed stream and
+  // stops. In the app the live signal arrives over IPC.
+  if (pathname === LIVE_FEED_PATH) {
+    return { kind: "deny", reason: "the live feed is delivered over IPC in the desktop app" };
   }
 
   if (API_PREFIXES.some((prefix) => pathname === prefix.replace(/\/$/, "") || pathname.startsWith(prefix))) {
