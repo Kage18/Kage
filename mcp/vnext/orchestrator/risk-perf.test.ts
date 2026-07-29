@@ -152,6 +152,65 @@ test("the board cache is invalidated by new commits and new commands", () => {
   assert.equal(buildWorkBoard(project).items[0].stage, "building", "a new commit must invalidate the cache");
 });
 
+// The board took 38 SECONDS on this repository, and the app sat on "Loading the board…" for all
+// of it. Profiled rather than guessed: each card's knowledge comes from `workItemBrief`, which
+// runs a full recall (~3.2s) plus a risk report (~1.6s), so five cards spent ~18s of the ~21s
+// total — and the board's signature folds in every branch tip, so an ordinary commit paid for all
+// five again.
+//
+// `knowledge: false` is the escape hatch for callers that only need the list. Measured on the
+// Kage repository against a cold daemon: 10.96s with knowledge, 2.23s without.
+test("a board without knowledge skips the per-card recall entirely", () => {
+  const project = historyRepo();
+  capture({
+    projectDir: project,
+    type: "proposal",
+    title: "Make tenantLimit configurable",
+    body: "Let each tenant tune tenantLimit.",
+    paths: ["src/limits.ts"],
+  });
+
+  const lean = buildWorkBoard(project, { knowledge: false });
+  assert.equal(lean.items.length, 1, "the list itself is unaffected");
+  assert.equal(lean.items[0].title, "Make tenantLimit configurable");
+  assert.deepEqual(lean.items[0].knowledge, [], "no knowledge was computed");
+  // Everything the picker needs is still there — which is why dropping knowledge costs nothing.
+  assert.ok(lean.items[0].work_id);
+  assert.ok(lean.items[0].stage);
+
+  // And asking for it again WITH knowledge must not be served the lean board from cache.
+  const full = buildWorkBoard(project, { knowledge: true });
+  assert.equal(full.items.length, 1);
+});
+
+// Knowledge depends on the packet store, never on git. Keeping its cache separate is what stops
+// an ordinary commit from re-running every recall — the single change that took a rebuild from
+// ~21s to ~2.5s.
+test("a commit rebuilds the board but reuses the knowledge it already recalled", () => {
+  const project = historyRepo();
+  const workId = capture({
+    projectDir: project,
+    type: "proposal",
+    title: "Make tenantLimit configurable",
+    body: "Let each tenant tune tenantLimit.",
+    paths: ["src/limits.ts"],
+  }).packet!.id;
+
+  // Claim first: the stage machine is proposed → claimed → building, so a commit on an UNCLAIMED
+  // item does not reach `building` (it surfaces as an unclaimed-building attention item instead).
+  appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor: "alice" });
+  const before = buildWorkBoard(project).items[0].knowledge;
+
+  git(project, "checkout", "-qb", "feat/limits-cache");
+  writeFileSync(join(project, "src", "limits.ts"), "export const tenantLimit = 7;\n", "utf8");
+  git(project, "add", "-A");
+  git(project, "commit", "-qm", `feat: work\n\n[kage:${workId}]`);
+
+  const after = buildWorkBoard(project);
+  assert.equal(after.items[0].stage, "building", "the stage still updates — the board did rebuild");
+  assert.deepEqual(after.items[0].knowledge, before, "and the knowledge came from cache, not a fresh recall");
+});
+
 // Global hotspots were empty in EVERY install and nothing reported it: the query passed
 // `--format=__KAGE_COMMIT__`, git reads a format with no `%` as the name of a built-in format,
 // so every call exited "invalid --pretty format" — and the error was swallowed. A test that

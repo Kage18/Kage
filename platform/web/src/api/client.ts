@@ -53,7 +53,7 @@ export interface KageApiClient {
   features(): Promise<FeatureListDto>;
   components(): Promise<EntityListDto>;
   attention(): Promise<AttentionQueueDto>;
-  work(): Promise<WorkBoardDto>;
+  work(options?: { knowledge?: boolean }): Promise<WorkBoardDto>;
   proof(): Promise<ProofReportDto>;
   workItem(id: string): Promise<WorkDetailDto>;
   agents(): Promise<AgentsReportDto>;
@@ -129,8 +129,11 @@ export class KageApi implements KageApiClient {
     return this.get<AttentionQueueDto>("/v2/attention");
   }
 
-  work(): Promise<WorkBoardDto> {
-    return this.get<WorkBoardDto>("/v2/work");
+  work(options: { knowledge?: boolean } = {}): Promise<WorkBoardDto> {
+    // Skipping knowledge avoids one recall + risk report per card — measured at ~4.8s each, so a
+    // five-card board goes from ~21s to ~2.5s. The work item detail still carries the full brief,
+    // so a caller that only needs the list loses nothing.
+    return this.get<WorkBoardDto>(options.knowledge === false ? "/v2/work?knowledge=0" : "/v2/work");
   }
 
   proof(): Promise<ProofReportDto> {

@@ -529,7 +529,9 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
     setSheetOpen(true);
     setItems(null);
     api
-      .work()
+      // The picker needs id, title and stage — nothing else. Asking for knowledge here would
+      // make opening the sheet wait on five full recalls for data it never renders.
+      .work({ knowledge: false })
       .then((board) => {
         setItems(board.items);
         // Default to the first item that is not already finished — the common intent.

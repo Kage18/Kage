@@ -1232,8 +1232,12 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     // The Work board: derived stages + brief knowledge + estimates. Kernel-side like
     // attention, so it works on any Node build.
     if (req.method === "GET" && requestUrl.pathname === "/v2/work") {
+      // `?knowledge=0` skips one recall + risk report PER CARD — measured at ~4.8s each, which is
+      // most of a cold board. Callers that only need the list (picking an item to start an agent
+      // on) ask for it; the work item detail route still carries the full brief.
+      const knowledge = requestUrl.searchParams.get("knowledge") !== "0";
       import("./vnext/orchestrator/board.js")
-        .then(({ buildWorkBoard }) => json(res, 200, buildWorkBoard(projectRoot)))
+        .then(({ buildWorkBoard }) => json(res, 200, buildWorkBoard(projectRoot, { knowledge })))
         .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
       return;
     }
