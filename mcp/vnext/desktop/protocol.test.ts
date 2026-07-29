@@ -125,7 +125,65 @@ test("forwarding always targets loopback", () => {
 // caught it. Same class of fault as the 4.0.0 portal that 404'd for every npm user.
 //
 // So: everything the shell loads must resolve with node builtins alone.
-test("the modules the desktop shell loads pull no third-party dependency", async () => {
+// The FIRST version of this test checked only `vnext/desktop/*.js` and passed while the packaged
+// app was silently broken: the dispatcher dynamically imports the orchestrator, which imports
+// `kernel.js`, which requires `typescript` and `web-tree-sitter`. In the packaged app every derived
+// route — attention, board, proof — therefore 503'd, and the UI degraded to empty bands that looked
+// like "nothing to show" rather than "this failed". Checking one directory was checking the wrong
+// thing; what matters is the transitive closure the worker actually reaches.
+test("every module the worker can reach resolves, or its dependency is bundled", async () => {
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { join, dirname, resolve } = await import("node:path");
+
+  // Walked from the dispatcher outward, following relative requires, exactly as the worker does.
+  const root = resolve(__dirname, "..", "..");
+  const seen = new Set<string>();
+  const bare = new Map<string, string>();
+  const queue = [join(__dirname, "api-dispatch.js")];
+
+  while (queue.length) {
+    const file = queue.pop()!;
+    if (seen.has(file) || !existsSync(file)) continue;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    // BOTH forms. The compiler emits `require()` for static imports and keeps native
+    // `import()` for dynamic ones — the dispatcher uses dynamic imports throughout, so a
+    // require-only matcher walks nothing and passes vacuously. That is exactly how the first
+    // version of this guard passed while the packaged app was broken.
+    for (const match of source.matchAll(/(?:require|import)\("([^"]+)"\)/g)) {
+      const spec = match[1];
+      if (spec.startsWith("node:")) continue;
+      if (spec.startsWith(".")) {
+        queue.push(resolve(dirname(file), spec));
+        continue;
+      }
+      bare.set(spec, file.slice(root.length + 1));
+    }
+  }
+
+  assert.ok(seen.size > 5, "the walk must actually reach the orchestrator, not stop at the entry");
+
+  // Anything third-party must either be SHIPPED or be genuinely optional.
+  //
+  // Shipped: listed in the desktop app's extraResources, which electron-builder copies into
+  // Resources/kage/node_modules. Miss one and the packaged app 503s that whole route.
+  const BUNDLED = new Set(["typescript", "web-tree-sitter"]);
+  // Optional: imported inside a try/catch that degrades with a stated message, and not installed
+  // by default. `@xenova/transformers` is the local-embeddings backend — absent, recall falls back
+  // rather than failing, so shipping 100+ MB for it would be paying for nothing.
+  const OPTIONAL = new Set(["@xenova/transformers"]);
+
+  for (const [spec, from] of bare) {
+    const pkg = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
+    if (OPTIONAL.has(pkg)) continue;
+    assert.ok(
+      BUNDLED.has(pkg),
+      `${from} requires "${pkg}", which the packaged app does not ship — add it to extraResources in platform/desktop/package.json`,
+    );
+  }
+});
+
+test("the desktop modules themselves pull no third-party dependency", async () => {
   const { readFileSync, readdirSync } = await import("node:fs");
   const { join } = await import("node:path");
 
