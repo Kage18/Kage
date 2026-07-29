@@ -19,8 +19,9 @@ import { withBase } from "../router";
 
 /** A session this app started. Streaming state arrives over IPC; see the desktop SessionManager. */
 export interface RunningSession {
+  session_id: string;
   agent: string;
-  work_title: string;
+  work_title: string | null;
   /** Seconds since the session started. */
   elapsed_s: number;
   /** The latest step the agent reported, already summarised. */
@@ -78,33 +79,50 @@ export function RunStrip({ ticks, compact = false }: { ticks: RunningSession["ti
   );
 }
 
-function RunningBand({ sessions }: { sessions: RunningSession[] }): ReactElement {
+function RunningBand({
+  sessions,
+  onStop,
+}: {
+  sessions: RunningSession[];
+  onStop?: (id: string) => void;
+}): ReactElement {
   if (sessions.length === 0) {
     return (
       <p className="activity-empty">
-        No agent is running. Start one on a work item from the <a href={withBase("/work")}>board</a>,
-        or run one yourself with <code>kage run -- claude</code> and it will appear here.
+        No agent is running. Start one on a work item, or run one yourself with{" "}
+        <code>kage run -- claude</code> and it will appear here.
       </p>
     );
   }
   return (
     <ul className="running-list">
-      {sessions.map((session) => (
-        <li key={`${session.agent}:${session.work_title}`} className="running-session">
-          <div className="running-head">
-            <span className="fact">{session.agent}</span>
-            <span className="running-title">{session.work_title}</span>
-            <span className="fact running-clock">{clock(session.elapsed_s)}</span>
-          </div>
-          <RunStrip ticks={session.ticks} />
-          <div className="running-foot">
-            <span className="fact running-step">{session.step ?? "starting…"}</span>
-            <span className="fact running-recalls" data-confidence="measured">
-              {session.ticks.filter((tick) => tick.recall).length} recalls
-            </span>
-          </div>
-        </li>
-      ))}
+      {sessions.map((session) => {
+        const recalls = session.ticks.filter((tick) => tick.recall).length;
+        return (
+          <li key={session.session_id} className="running-session">
+            <div className="running-head">
+              <span className="fact">{session.agent}</span>
+              <span className="running-title">{session.work_title ?? "free-form task"}</span>
+              <span className="fact running-clock">{clock(session.elapsed_s)}</span>
+            </div>
+            <RunStrip ticks={session.ticks} />
+            <div className="running-foot">
+              <span className="fact running-step">{session.step ?? "starting…"}</span>
+              {/* A recall count of zero is left as a dash: no green tick has been recorded, and
+                  "0 recalls" would read as a measurement that memory did not help, when what is
+                  true is that attribution has not been wired for this run. */}
+              <span className="fact running-recalls" data-confidence={recalls > 0 ? "measured" : "unknown"}>
+                {recalls > 0 ? `${recalls} recalls` : "—"}
+              </span>
+              {onStop && (
+                <button type="button" className="running-stop" onClick={() => onStop(session.session_id)}>
+                  Stop
+                </button>
+              )}
+            </div>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -130,11 +148,18 @@ export function ActivityPage({
   attention,
   tasks,
   agents,
+  canStartAgents = false,
+  onStartAgent,
+  onStopSession,
 }: {
   sessions?: RunningSession[];
   attention: AttentionItemDto[];
   tasks: TaskSummaryDto[];
   agents: AgentsReportDto | null;
+  /** Only the desktop app can spawn a process, so the browser never offers the button. */
+  canStartAgents?: boolean;
+  onStartAgent?: () => void;
+  onStopSession?: (id: string) => void;
 }): ReactElement {
   // Only the most urgent decision appears here. The rest live on Needs you — the home screen
   // surfaces the blocker without becoming the queue.
@@ -146,7 +171,15 @@ export function ActivityPage({
     <section aria-label="Activity">
       <h1 className="visually-hidden">Activity</h1>
 
-      <RunningBand sessions={sessions} />
+      {canStartAgents && (
+        <div className="activity-actions">
+          <button type="button" className="activity-start" onClick={onStartAgent}>
+            Start an agent
+          </button>
+        </div>
+      )}
+
+      <RunningBand sessions={sessions} onStop={onStopSession} />
 
       {blocking && (
         <div className="activity-blocking">

@@ -4,6 +4,7 @@ import type { TeamReportDto,
   AttentionItemDto,
   AttentionQueueDto,
   WorkBoardDto,
+  WorkCardDto,
   ProofReportDto,
   WorkDetailDto,
   AgentsReportDto,
@@ -31,6 +32,8 @@ import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { AgentsPage } from "./pages/AgentsPage";
 import { ActivityPage } from "./pages/ActivityPage";
+import { StartAgentSheet } from "./components/StartAgentSheet";
+import { buildBrief, desktop, type Brief, type DesktopSession } from "./desktop";
 import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
@@ -492,6 +495,16 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
   const [attention, setAttention] = useState<AttentionItemDto[]>([]);
   const [tasks, setTasks] = useState<TaskSummaryDto[]>([]);
   const [agents, setAgents] = useState<AgentsReportDto | null>(null);
+  const [sessions, setSessions] = useState<DesktopSession[]>([]);
+
+  // Start-an-agent state. All of it is desktop-only; in a browser the sheet never opens because
+  // the button that opens it is not rendered.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [items, setItems] = useState<WorkCardDto[] | null>(null);
+  const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
+  const [brief, setBrief] = useState<Brief | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     api.attention().then((queue: AttentionQueueDto) => setAttention(queue.items)).catch(() => setAttention([]));
@@ -502,7 +515,96 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
   useEffect(reload, [reload]);
   useLiveRefresh(reload);
 
-  return <ActivityPage attention={attention} tasks={tasks} agents={agents} />;
+  // Live sessions are pushed from the main process as the agent streams; the initial fetch covers
+  // a window opened while something was already running.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    void bridge.getSessions().then(setSessions);
+    return bridge.onSessions(setSessions);
+  }, []);
+
+  const openSheet = useCallback(() => {
+    setStartError(null);
+    setSheetOpen(true);
+    setItems(null);
+    api
+      .work()
+      .then((board) => {
+        setItems(board.items);
+        // Default to the first item that is not already finished — the common intent.
+        const first = board.items.find((item) => item.stage !== "done") ?? board.items[0];
+        if (first) setSelectedWorkId(first.work_id);
+      })
+      .catch(() => setItems([]));
+  }, [api]);
+
+  // The brief is re-composed whenever the selection changes, so the preview can never describe a
+  // different item than the one that will run.
+  useEffect(() => {
+    if (!sheetOpen || !selectedWorkId) return;
+    setBrief(null);
+    let live = true;
+    api
+      .workItem(selectedWorkId)
+      .then((detail) => { if (live) setBrief(buildBrief(detail)); })
+      .catch(() => { if (live) setStartError("Could not assemble a brief for that item."); });
+    return () => { live = false; };
+  }, [api, sheetOpen, selectedWorkId]);
+
+  const start = useCallback(
+    (agent: string) => {
+      const bridge = desktop();
+      if (!bridge || !brief) return;
+      setStarting(true);
+      setStartError(null);
+      void bridge
+        .startSession({
+          work_id: selectedWorkId,
+          // Main cannot resolve a work id to a title, so the title travels with the request and
+          // comes back on the session — the running card names the work, not an opaque id.
+          work_title: (items ?? []).find((item) => item.work_id === selectedWorkId)?.title ?? null,
+          agent,
+          prompt: brief.prompt,
+        })
+        .then((result) => {
+          setStarting(false);
+          if (result.ok) setSheetOpen(false);
+          else setStartError(result.error ?? "The agent could not be started.");
+        })
+        .catch((error: unknown) => {
+          setStarting(false);
+          setStartError(error instanceof Error ? error.message : String(error));
+        });
+    },
+    [brief, selectedWorkId, items],
+  );
+
+  return (
+    <>
+      <ActivityPage
+        sessions={sessions}
+        attention={attention}
+        tasks={tasks}
+        agents={agents}
+        canStartAgents={desktop() !== null}
+        onStartAgent={openSheet}
+        onStopSession={(id) => void desktop()?.stopSession(id).then(setSessions)}
+      />
+      {sheetOpen && (
+        <StartAgentSheet
+          items={items}
+          brief={brief}
+          selectedWorkId={selectedWorkId}
+          onSelectWork={setSelectedWorkId}
+          onStart={start}
+          onCancel={() => setSheetOpen(false)}
+          busy={starting}
+          error={startError}
+        />
+      )}
+    </>
+  );
 }
 
 function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {

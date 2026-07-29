@@ -30,7 +30,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { cliPathFor, loadKageCore, resolveCoreDir, type DesktopState, type KageCore } from "./kage-core.js";
+import {
+  cliPathFor,
+  loadKageCore,
+  resolveCoreDir,
+  type AgentSession,
+  type DesktopState,
+  type KageCore,
+} from "./kage-core.js";
 
 // The scheme must be registered as privileged BEFORE the app is ready, or fetch/XHR from the
 // renderer is blocked and every API call the portal makes fails silently.
@@ -278,6 +285,159 @@ async function addRepositoryByDialog(): Promise<void> {
   await startRepo(result.repo!.path);
 }
 
+// ── Agent sessions ───────────────────────────────────────────────────────────────────────────
+//
+// Each session gets its OWN proxy on its own port. That is not defensiveness, it is what makes
+// the run strip honest: the proxy generates its session id once per process, so every receipt and
+// observation from that proxy belongs to this session by construction. Sharing one proxy would
+// leave only timing to attribute recalls by, and a guess drawn as a measurement is exactly what
+// this product exists to prevent.
+
+interface LiveSession {
+  session: AgentSession;
+  repo: string;
+  /** Echoed back from the start request: main has no way to resolve a work id to a title. */
+  workTitle: string | null;
+  proxyPort: number;
+  agentProcess: ReturnType<typeof spawn>;
+  proxyProcess: ReturnType<typeof spawn>;
+  startedAt: number;
+}
+
+const sessions = new Map<string, LiveSession>();
+const SESSION_PORT_BASE = 8800;
+
+function freeSessionPort(): number {
+  const taken = new Set([...sessions.values()].map((s) => s.proxyPort));
+  for (let port = SESSION_PORT_BASE; port < SESSION_PORT_BASE + 200; port += 1) {
+    if (!taken.has(port)) return port;
+  }
+  throw new Error("no free port for a session proxy");
+}
+
+function publicSessions() {
+  return [...sessions.values()].map((live) => ({
+    session_id: live.session.session_id,
+    work_id: live.session.work_id,
+    work_title: live.workTitle,
+    agent: live.session.agent,
+    state: live.session.state,
+    elapsed_s: Math.round((Date.now() - live.startedAt) / 1000),
+    step: [...live.session.events].reverse().find((e) => e.kind === "tool")?.summary ?? null,
+    // No recall data is supplied yet, so the strip shows tool ticks and NO recall marks rather
+    // than inventing them. Wiring the proxy's per-turn injection record is the next step.
+    ticks: core.stripTicks(live.session.events),
+  }));
+}
+
+function pushSessions(): void {
+  window?.webContents.send("kage:sessions", publicSessions());
+}
+
+function endSession(id: string, exitCode: number | null): void {
+  const live = sessions.get(id);
+  if (!live) return;
+  live.session = core.closeSession(live.session, exitCode);
+  try {
+    live.proxyProcess.kill("SIGTERM");
+  } catch {
+    /* already gone */
+  }
+  pushSessions();
+  // Keep the finished session visible briefly, then let Activity's "Earlier" band take over from
+  // the receipt store — which is the durable record.
+  setTimeout(() => {
+    sessions.delete(id);
+    pushSessions();
+  }, 5_000);
+}
+
+async function startSession(input: {
+  repo: string;
+  work_id: string | null;
+  work_title: string | null;
+  agent: string;
+  prompt: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const launch = core.agentCommand(input.agent, input.prompt);
+  if (!launch) return { ok: false, error: `Kage does not know how to run "${input.agent}" headlessly.` };
+
+  const proxyPort = freeSessionPort();
+  const sessionId = `kage-${Date.now()}-${proxyPort}`;
+
+  // The proxy first, in assist mode — assist is what injects memory, which is the entire point of
+  // running the agent through Kage rather than directly.
+  const proxyProcess = spawn(
+    resolveNodeBinary(),
+    [cliPathFor(coreDir), "proxy", "--project", input.repo, "--port", String(proxyPort), "--mode", "assist"],
+    { cwd: input.repo, stdio: "ignore" },
+  );
+
+  // Spawning is not listening. Wait, or the agent's first request hits a closed port.
+  let listening = false;
+  for (let attempt = 0; attempt < 50 && !listening; attempt += 1) {
+    await new Promise((r) => setTimeout(r, 200));
+    listening = await probePort(proxyPort);
+  }
+  if (!listening) {
+    proxyProcess.kill("SIGTERM");
+    return { ok: false, error: `the session proxy did not start on ${proxyPort}` };
+  }
+
+  const agentProcess = spawn(launch.command, launch.args, {
+    cwd: input.repo,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...core.agentEnv(proxyPort) },
+  });
+
+  const live: LiveSession = {
+    session: core.newSession({ session_id: sessionId, work_id: input.work_id, agent: input.agent }),
+    repo: input.repo,
+    workTitle: input.work_title,
+    proxyPort,
+    agentProcess,
+    proxyProcess,
+    startedAt: Date.now(),
+  };
+  sessions.set(sessionId, live);
+  pushSessions();
+
+  // The agent emits one JSON object per line. Buffer across chunk boundaries — a naive
+  // split-per-chunk drops the event that straddles two reads, which is most of the interesting
+  // ones on a busy run.
+  let buffer = "";
+  agentProcess.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      for (const event of core.parseStreamLine(line)) {
+        live.session = core.applyEvent(live.session, event);
+      }
+    }
+    pushSessions();
+  });
+
+  agentProcess.on("error", (error) => {
+    live.session = core.applyEvent(live.session, { kind: "error", summary: error.message });
+    endSession(sessionId, null);
+  });
+  agentProcess.on("exit", (code) => endSession(sessionId, code));
+
+  return { ok: true };
+}
+
+function stopSession(id: string): void {
+  const live = sessions.get(id);
+  if (!live) return;
+  try {
+    live.agentProcess.kill("SIGTERM");
+  } catch {
+    /* already gone */
+  }
+  // `exit` fires and endSession does the rest, including reaping the proxy.
+}
+
 // ── Alerts ───────────────────────────────────────────────────────────────────────────────────
 
 const POLL_MS = 30_000;
@@ -408,6 +568,16 @@ app.whenReady().then(async () => {
     persist();
     return publicState();
   });
+  ipcMain.handle("kage:sessions", () => publicSessions());
+  ipcMain.handle("kage:sessions:start", (_event, input: { work_id: string | null; work_title: string | null; agent: string; prompt: string }) => {
+    const active = core.activeRepo(state);
+    if (!active) return { ok: false, error: "no repository is open" };
+    return startSession({ ...input, repo: active.path });
+  });
+  ipcMain.handle("kage:sessions:stop", (_event, id: string) => {
+    stopSession(id);
+    return publicSessions();
+  });
   ipcMain.handle("kage:repos:switch", async (_event, path: string) => {
     state = core.openRepo(state, path);
     persist();
@@ -441,5 +611,9 @@ app.whenReady().then(async () => {
 // quit — it hides. Quit is explicit, from the tray or Cmd+Q.
 app.on("window-all-closed", () => { /* stay resident */ });
 
-// A daemon outliving the app is a process nobody can find to kill.
-app.on("before-quit", () => supervisor?.stopAll());
+// A daemon — or a running agent, or its proxy — outliving the app is a process nobody can find to
+// kill. Agents first: they are the ones that cost money while nobody is watching.
+app.on("before-quit", () => {
+  for (const id of [...sessions.keys()]) stopSession(id);
+  supervisor?.stopAll();
+});

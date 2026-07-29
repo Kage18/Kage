@@ -86,6 +86,24 @@ export interface SpawnedProcess {
   kill(signal?: string): void;
 }
 
+export type SessionState = "starting" | "running" | "exited" | "failed";
+
+export interface SessionEvent {
+  seq: number;
+  kind: "started" | "tool" | "text" | "result" | "error";
+  summary: string;
+}
+
+export interface AgentSession {
+  session_id: string;
+  work_id: string | null;
+  agent: string;
+  state: SessionState;
+  exit_code: number | null;
+  cost_usd: number | null;
+  events: SessionEvent[];
+}
+
 export interface KageCore {
   emptyState(): DesktopState;
   loadState(home: string): DesktopState;
@@ -124,6 +142,16 @@ export interface KageCore {
   /** The daemon's own hardened portal resolver — traversal-safe, with SPA fallback. */
   resolvePortalDir(baseDir: string): string;
   resolveAppAsset(appDir: string, pathname: string): string | null;
+
+  // Agent sessions. The rules — which agents may launch, how a stream becomes readable events,
+  // and that a non-zero exit overrides a stream claiming success — all live in the tested core.
+  newSession(spec: { session_id: string; work_id: string | null; agent: string }): AgentSession;
+  agentCommand(agent: string, prompt: string): { command: string; args: string[] } | null;
+  agentEnv(proxyPort: number): Record<string, string>;
+  parseStreamLine(line: string): Array<Omit<SessionEvent, "seq">>;
+  applyEvent(session: AgentSession, event: Omit<SessionEvent, "seq">): AgentSession;
+  closeSession(session: AgentSession, exitCode: number | null): AgentSession;
+  stripTicks(events: readonly SessionEvent[], recallTurns?: ReadonlySet<number>): Array<{ recall: boolean; weight: number }>;
 }
 
 export function loadKageCore(resourcesPath: string): KageCore {
@@ -133,6 +161,7 @@ export function loadKageCore(resourcesPath: string): KageCore {
   const protocolMod = require(join(dir, "vnext", "desktop", "protocol.js"));
   const alerts = require(join(dir, "vnext", "desktop", "alerts.js"));
   const supervisor = require(join(dir, "vnext", "desktop", "supervisor.js"));
+  const sessionMod = require(join(dir, "vnext", "desktop", "session.js"));
   const daemon = require(join(dir, "daemon.js"));
   /* eslint-enable @typescript-eslint/no-var-requires */
 
@@ -150,6 +179,13 @@ export function loadKageCore(resourcesPath: string): KageCore {
     DaemonSupervisor: supervisor.DaemonSupervisor,
     resolvePortalDir: daemon.resolvePortalDir,
     resolveAppAsset: daemon.resolveAppAsset,
+    newSession: sessionMod.newSession,
+    agentCommand: sessionMod.agentCommand,
+    agentEnv: sessionMod.agentEnv,
+    parseStreamLine: sessionMod.parseStreamLine,
+    applyEvent: sessionMod.applyEvent,
+    closeSession: sessionMod.closeSession,
+    stripTicks: sessionMod.stripTicks,
   };
 }
 

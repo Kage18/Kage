@@ -34,4 +34,29 @@ contextBridge.exposeInMainWorld("kageDesktop", {
     ipcRenderer.on("kage:state", handler);
     return () => ipcRenderer.removeListener("kage:state", handler);
   },
+
+  // Agent sessions. Starting one is the only verb here that spends money, so it carries the
+  // fully-composed prompt the user was shown — main never rewrites or augments it, which is what
+  // makes the brief preview a promise rather than an illustration.
+  getSessions: (): Promise<DesktopSession[]> => ipcRenderer.invoke("kage:sessions"),
+  startSession: (input: { work_id: string | null; work_title: string | null; agent: string; prompt: string }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("kage:sessions:start", input),
+  stopSession: (id: string): Promise<DesktopSession[]> => ipcRenderer.invoke("kage:sessions:stop", id),
+
+  onSessions: (listener: (sessions: DesktopSession[]) => void): (() => void) => {
+    const handler = (_event: unknown, next: DesktopSession[]) => listener(next);
+    ipcRenderer.on("kage:sessions", handler);
+    return () => ipcRenderer.removeListener("kage:sessions", handler);
+  },
 });
+
+export interface DesktopSession {
+  session_id: string;
+  work_id: string | null;
+  work_title: string | null;
+  agent: string;
+  state: "starting" | "running" | "exited" | "failed";
+  elapsed_s: number;
+  step: string | null;
+  ticks: Array<{ recall: boolean; weight: number }>;
+}
