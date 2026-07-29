@@ -10,6 +10,7 @@
 
 import React, { useState } from "react";
 import type { AttentionItemDto, AttentionActionResultDto } from "../api/types";
+import { withBase } from "../router";
 
 const KIND_LABEL: Record<AttentionItemDto["kind"], string> = {
   unclaimed_building: "unclaimed work",
@@ -54,47 +55,54 @@ export function AttentionPage({
   };
 
   return (
-    <section>
-      <header className="page-header">
-        <h1>Attention</h1>
-        <p className="page-subtitle">
-          Decisions only a human can make, ranked by cost of delay. Everything else runs
-          without you — the goal state of this page is empty.
-        </p>
-      </header>
+    <section aria-label="Needs you">
+      <h1 className="visually-hidden">Needs you</h1>
+      <p className="board-lede">Ranked by what each one costs while it waits.</p>
+
       {items.length === 0 ? (
-        <p className="empty-state">
-          Nothing needs you. Stages derive from evidence, memory is healthy, and no claimed
-          work overlaps. Check <a href="/app/work">Work</a> for what is in flight.
+        <p className="activity-empty">
+          Nothing needs you. Stages derive from evidence, memory is healthy, and no claimed work
+          overlaps. The <a href={withBase("/work")}>board</a> has what is in flight.
         </p>
       ) : (
-        <ul className="entity-list">
+        <ul className="decision-list">
           {items.map((item) => (
-            <li
-              key={`${item.kind}:${item.ref}`}
-              className="entity-card"
-              // Every row here is by definition something a human must decide.
-              data-confidence="attention"
-            >
-              <div className="entity-card-header">
-                <span className="pill" data-tone="attention">{KIND_LABEL[item.kind] ?? item.kind}</span>
-                {/* Severity is a computed rank, so it reads as evidence rather than prose. */}
-                <span className="evidence">severity {item.severity}</span>
+            <li key={`${item.kind}:${item.ref}`} className="decision">
+              {/* The severity number is visible because the RANKING has to be auditable — a queue
+                  that sorts by a number it will not show is asking to be trusted blindly. */}
+              <span className="fact decision-severity" data-status={item.severity >= 80 ? "critical" : "attention"}>
+                {Math.round(item.severity)}
+              </span>
+              <div className="decision-body">
+                <p className="decision-summary">{item.summary}</p>
+                <p className="fact decision-kind">{KIND_LABEL[item.kind] ?? item.kind}</p>
+
+                <div className="decision-actions">
+                  {/* One bordered action per row, and only where a single click is genuinely the
+                      whole decision. Reverify is: it re-anchors a claim against the code as it
+                      stands, and the kernel refuses to rubber-stamp one whose cited code is gone.
+                      Supersede needs a replacement chosen and retire has no operation behind it,
+                      so those are named as next steps rather than dressed up as buttons that
+                      would fail on click. */}
+                  {item.kind === "stale_critical" && onReverify && (
+                    <button
+                      type="button"
+                      className="board-action"
+                      disabled={pending === item.ref}
+                      onClick={() => runReverify(item.ref)}
+                    >
+                      {pending === item.ref ? "Reverifying…" : "Reverify"}
+                    </button>
+                  )}
+                  <span className="fact decision-next">
+                    {item.kind === "stale_critical"
+                      ? "or supersede (needs a replacement) · retire"
+                      : item.actions.join(" · ")}
+                  </span>
+                </div>
+
+                {outcomes[item.ref] ? <p className="fact decision-outcome">{outcomes[item.ref]}</p> : null}
               </div>
-              <p>{item.summary}</p>
-              <div className="entity-card-header">
-                {item.kind === "stale_critical" && onReverify ? (
-                  <button type="button" disabled={pending === item.ref} onClick={() => runReverify(item.ref)}>
-                    {pending === item.ref ? "Reverifying…" : "Reverify"}
-                  </button>
-                ) : null}
-                <span className="muted">
-                  {item.kind === "stale_critical"
-                    ? "or: supersede (needs a replacement packet) · retire"
-                    : `next: ${item.actions.join(" · ")}`}
-                </span>
-              </div>
-              {outcomes[item.ref] ? <p className="muted">{outcomes[item.ref]}</p> : null}
             </li>
           ))}
         </ul>

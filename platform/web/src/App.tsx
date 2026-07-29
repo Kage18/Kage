@@ -40,7 +40,6 @@ import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
-import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ReviewQueuePage, type ReviewDecisionInput, type ReviewMutationFeedback } from "./pages/ReviewQueuePage";
 import { RunbookPage } from "./pages/RunbookPage";
@@ -77,7 +76,7 @@ function NotFoundPage({ path }: { path: string }): React.ReactElement {
         No portal section matches <code>{path}</code>.
       </p>
       <p>
-        <a href={withBase("/overview")}>Return to Overview</a>
+        <a href={withBase("/activity")}>Return to Activity</a>
       </p>
     </section>
   );
@@ -87,34 +86,6 @@ function NotFoundPage({ path }: { path: string }): React.ReactElement {
 // lazily (only when the System Map section is open) and re-fetched when the view or focus changes,
 // so it NEVER sits on the context-delivery critical path. Switching views navigates the URL (which
 // resets focus); expanding a node sets a focus that re-roots the two-hop window in place.
-// T5 — lazy team-value loader (lead dashboard + IC injection transparency). Fetched only when the
-// overview is open, never on the context-delivery critical path; a fetch failure renders the
-// panel's honest unavailable state (null), never a fake healthy report.
-// The Overview route. It needs BOTH the overview DTO (already loaded by App) and the value ledger
-// (fetched here), because the redesigned page leads with the measured ledger value and shows the
-// overview's provider-cost metrics beneath it. The ledger is fetched lazily and the page renders as
-// soon as the overview is present; a null ledger renders an honest "could not assemble" line, never a
-// blank hero.
-function OverviewContainer({ api, overview }: { api: KageApiClient; overview: OverviewDto }): React.ReactElement {
-  const [report, setReport] = useState<TeamReportDto | null | undefined>(undefined);
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .teamReport()
-      .then((body) => {
-        if (!cancelled) setReport(body.report);
-      })
-      .catch(() => {
-        if (!cancelled) setReport(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
-  // `undefined` = still loading the ledger; render the page with report=null only once we know.
-  return <OverviewPage overview={overview} report={report === undefined ? null : report} />;
-}
-
 function SystemMapContainer({
   api,
   view,
@@ -355,7 +326,21 @@ function WorkContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [pending, setPending] = useState<string | null>(null);
   const [actor, setActor] = useState("local-operator");
 
+  // Two-phase, because the knowledge on each card is the expensive part: one full recall plus a
+  // risk report PER CARD, measured at ~4.8s each. Waiting for all of it before showing anything
+  // meant staring at "Deriving…" for the better part of a minute on a cold daemon.
+  //
+  // So the cards land first (~2s) and their knowledge fills in behind. The second response is a
+  // superset of the first, so nothing shown ever changes underneath the reader — it only gains.
   const reload = useCallback(() => {
+    api.work({ knowledge: false })
+      .then((fast: WorkBoardDto) => {
+        // Never overwrite a board that already has knowledge with one that does not — the live
+        // refresh and this initial load can otherwise race and visibly strip the cards.
+        setBoard((current) => (current?.items.some((item) => item.knowledge.length > 0) ? current : fast));
+      })
+      .catch(() => { /* the full request below reports the error */ });
+
     api.work()
       .then((next: WorkBoardDto) => setBoard(next))
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -638,18 +623,26 @@ function WorkItemContainer({ api, id }: { api: KageApiClient; id: string }): Rea
   return <WorkItemPage detail={state.detail} />;
 }
 
+// Proof absorbed Overview, so it now loads BOTH the derived proof report and the value ledger.
+// The two used to live on separate pages showing the same measured value in two visual languages.
+// The ledger fails independently: a null one renders an honest absence, never a zero.
 function ProofContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ report: ProofReportDto | null; error: string | null }>({ report: null, error: null });
+  const [ledger, setLedger] = useState<TeamReportDto | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
     api.proof()
       .then((report: ProofReportDto) => { if (live) setState({ report, error: null }); })
       .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
+    api.teamReport()
+      .then((body) => { if (live) setLedger(body.report); })
+      .catch(() => { if (live) setLedger(null); });
     return () => { live = false; };
   }, [api]);
   if (state.error) return <p className="empty-state">Proof unavailable: {state.error}</p>;
   if (!state.report) return <p className="empty-state">Measuring…</p>;
-  return <ProofPage report={state.report} />;
+  // `undefined` means the ledger is still in flight; render the page once we actually know.
+  return <ProofPage report={state.report} ledger={ledger === undefined ? null : ledger} />;
 }
 
 function EntityListContainer({
@@ -762,10 +755,13 @@ function RoutedPage({
     case "knowledge-all":
       return <KnowledgeContainer api={api} kind={route.kind} />;
     case "overview":
+      // Overview was absorbed into Proof — they showed the same measured value in two visual
+      // languages. The route still resolves so a bookmark keeps working; it just lands on the one
+      // page that makes the claim.
       if (needsOnboarding(overview)) {
         return <OnboardingPage detectedRepository={overview.repository} />;
       }
-      return <OverviewContainer api={api} overview={overview} />;
+      return <ProofContainer api={api} />;
     case "system-map":
       return <SystemMapContainer api={api} view={(route.view as SystemMapView) ?? "feature"} />;
     case "features":

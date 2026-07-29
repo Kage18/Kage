@@ -140,11 +140,16 @@ button:disabled {
   transform: translateY(0);
 }
 
+/* An app scrolls its CONTENT, never its chrome. The document itself does not scroll: the rail and
+   the main region each own their overflow, so the navigation is always where you left it. Letting
+   the whole page scroll took the sidebar off-screen on any long board — which is a web page's
+   behaviour, not an app's. */
 .shell-body {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
-  align-items: start;
-  min-height: 100vh;
+  align-items: stretch;
+  height: 100vh;
+  overflow: hidden;
 }
 
 @media (max-width: 48rem) {
@@ -159,7 +164,8 @@ button:disabled {
   flex-direction: column;
   padding: var(--space-4) 0 var(--space-5);
   border-right: 1px solid var(--color-border);
-  min-height: 100vh;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .shell-nav {
@@ -254,6 +260,9 @@ button:disabled {
   padding: var(--space-6);
   max-width: var(--content-max-width);
   width: 100%;
+  /* The one scrolling region. See `.shell-body`. */
+  height: 100vh;
+  overflow-y: auto;
 }
 
 /* ---- Repository switcher ---- */
@@ -2236,3 +2245,296 @@ code {
 }
 
 .sheet-start:disabled { opacity: 0.45; }
+
+/* ── Proof ───────────────────────────────────────────────────────────────────────────────────
+   One display figure, then rows. Rows rather than cards because a column of figures is a table
+   the eye can scan, and a card around every fact on a page made entirely of facts is just noise. */
+
+.proof-lead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-2);
+}
+
+.proof-lead-figure {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-display);
+  line-height: 1;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.proof-lead-caption {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  letter-spacing: var(--tracking-sans);
+  line-height: 1.4;
+}
+
+.proof-lead-note {
+  margin: 0 0 var(--space-6);
+  color: var(--lum-quiet);
+}
+
+.proof-rows {
+  list-style: none;
+  margin: 0 0 var(--space-5);
+  padding: 0;
+}
+
+.proof-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Unmeasured rows are dashed, so the boundary between "measured" and "not" is visible at a glance
+   even before you read the dash. */
+.proof-rows-unmeasured .proof-row { border-top-style: dashed; }
+
+.proof-row-label {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+.proof-row-value {
+  font-size: var(--font-size-lg);
+  min-width: 5rem;
+  text-align: right;
+}
+
+.proof-row-value[data-confidence="measured"] { color: var(--color-accent); }
+/* Estimated never wears the measured colour: a model and a count must not look alike. */
+.proof-row-value[data-confidence="estimated"] { color: var(--color-text); }
+.proof-row-value[data-confidence="unknown"] { color: var(--lum-quiet); }
+
+.proof-row-note {
+  width: 16rem;
+  text-align: right;
+  color: var(--lum-quiet);
+}
+
+.proof-honesty {
+  margin: 0 0 var(--space-8);
+  font-size: var(--font-size-sm);
+  color: var(--lum-quiet);
+  letter-spacing: var(--tracking-sans);
+}
+
+.proof-cycle {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.proof-cycle li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+}
+
+.proof-cycle-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+/* ── Board ─────────────────────────────────────────────────────────────────────────────────── */
+
+.board-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.board-lede {
+  flex: 1;
+  margin: 0 0 var(--space-6);
+  font-size: var(--font-size-sm);
+  color: var(--lum-quiet);
+  letter-spacing: var(--tracking-sans);
+}
+
+.board-head .board-lede { margin-bottom: 0; }
+
+.board-actor {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.board-actor input {
+  width: 8rem;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.board-group { margin-bottom: var(--space-6); }
+
+.board-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+.board-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* A rail, not a card: the Board is the one dense list view where whitespace alone cannot scale,
+   which is exactly the case the rail vocabulary was kept for. */
+.board-card {
+  border-left: var(--rail-width) solid var(--lum-unknown);
+  padding: 2px 0 2px var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.board-card[data-confidence="measured"] { border-left-color: var(--color-accent); }
+.board-card[data-confidence="derived"] { border-left-color: var(--lum-derived); }
+.board-card[data-confidence="attention"] { border-left-color: var(--color-warning); }
+/* Being built by nobody: dashed AND critical, so it survives colour being switched off. */
+.board-card[data-confidence="critical"] {
+  border-left-color: var(--color-critical);
+  border-left-style: dashed;
+}
+
+.board-card-title {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text);
+  text-decoration: none;
+  letter-spacing: var(--tracking-sans);
+}
+
+.board-card-title:hover { color: var(--color-accent); }
+
+.board-card-evidence,
+.board-card-estimate {
+  margin: 0;
+  color: var(--lum-quiet);
+}
+
+.board-card-knowledge {
+  list-style: none;
+  margin: var(--space-2) 0;
+  padding: 0;
+}
+
+.board-card-knowledge li {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+  padding: 1px 0;
+}
+
+.board-card-knowledge li::before {
+  content: "●";
+  margin-right: var(--space-2);
+  font-size: 0.6em;
+  vertical-align: middle;
+  color: var(--color-accent);
+}
+
+.board-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.board-action,
+.board-action-quiet {
+  padding: var(--space-1) var(--space-3);
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--tracking-sans);
+}
+
+/* One bordered action per row; the rest are plain text. Two competing buttons is how a page stops
+   telling you what it wants you to do. */
+.board-action-quiet {
+  border-color: transparent;
+  padding-left: 0;
+  padding-right: 0;
+  color: var(--color-text-muted);
+}
+
+.board-action:disabled,
+.board-action-quiet:disabled { opacity: 0.4; }
+
+/* ── Needs you ─────────────────────────────────────────────────────────────────────────────── */
+
+.decision-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.decision {
+  display: flex;
+  gap: var(--space-3);
+  padding-bottom: var(--space-5);
+  margin-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.decision:last-child { border-bottom: 0; }
+
+.decision-severity {
+  width: 2rem;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.decision-severity[data-status="critical"] { color: var(--color-critical); }
+.decision-severity[data-status="attention"] { color: var(--color-warning); }
+
+.decision-body { min-width: 0; flex: 1; }
+
+.decision-summary {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  letter-spacing: var(--tracking-sans);
+}
+
+.decision-kind,
+.decision-next,
+.decision-outcome {
+  margin: 0;
+  color: var(--lum-quiet);
+}
+
+.decision-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.decision-outcome { margin-top: var(--space-2); color: var(--color-text-muted); }

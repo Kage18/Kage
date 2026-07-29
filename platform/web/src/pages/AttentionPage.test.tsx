@@ -65,7 +65,7 @@ describe("Attention actions", () => {
   // Only actions that a single click can actually complete are offered as buttons.
   test("actions with no one-click operation are named, not offered as buttons", () => {
     render(<AttentionPage items={[staleItem()]} onReverify={async () => ({ ok: true })} />);
-    expect(screen.getByText(/supersede \(needs a replacement packet\)/)).toBeTruthy();
+    expect(screen.getByText(/supersede \(needs a replacement\)/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /supersede/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /retire/i })).toBeNull();
   });
