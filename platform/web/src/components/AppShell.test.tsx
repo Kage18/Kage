@@ -11,21 +11,15 @@ describe("AppShell", () => {
         <div />
       </AppShell>,
     );
-    // Group headings orient before the links do.
-    for (const group of ["Operate", "Agents", "Knowledge"]) {
-      expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
+    // Groups are separated by SPACE, not by a rendered caption — uppercase letterspaced headings
+    // were the noisiest thing on the sidebar. The grouping survives for assistive tech as a
+    // labelled list, so a screen-reader user still gets the structure a sighted reader gets from
+    // the spacing.
+    for (const group of ["Now", "Work", "Memory"]) {
+      expect(screen.getByRole("list", { name: group })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: group })).not.toBeInTheDocument();
     }
-    for (const label of [
-      "Attention",
-      "Work",
-      "Proof",
-      "Agents",
-      "Agent Tasks",
-      "Review Queue",
-      "Overview",
-      "System Map",
-      "Knowledge",
-    ]) {
+    for (const label of ["Activity", "Needs you", "Board", "Proof", "Knowledge", "System map", "Review"]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
   });
@@ -53,11 +47,11 @@ describe("AppShell", () => {
         <div />
       </AppShell>,
     );
-    expect(screen.getByRole("link", { name: "Review Queue" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Activity" })).not.toHaveAttribute(
       "aria-current",
     );
   });

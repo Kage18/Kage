@@ -22,8 +22,12 @@ describe("portal base mounting", () => {
 });
 
 describe("parseRoute", () => {
-  test("the root is Attention — the app opens on decisions, not a dashboard", () => {
-    expect(parseRoute("/")).toEqual({ page: "attention" });
+  // The landing page moved from Attention to Activity when the agents half finally got a surface.
+  // Activity carries the most urgent decision inline, so opening on it does not hide the blocker —
+  // which was the whole reason Attention led before.
+  test("the root is Activity — the app opens on what the agents are doing", () => {
+    expect(parseRoute("/")).toEqual({ page: "activity" });
+    expect(parseRoute("/activity")).toEqual({ page: "activity" });
     expect(parseRoute("/attention")).toEqual({ page: "attention" });
     expect(parseRoute("/overview")).toEqual({ page: "overview" });
   });
@@ -80,26 +84,34 @@ describe("parseRoute", () => {
 
 describe("navLinks", () => {
   test("declares the full information architecture, grouped, in order", () => {
-    // Grouped rather than flat: a seventeen-item list is a wiki, and the grouping IS the
-    // product claim — you OPERATE, the AGENTS work, the KNOWLEDGE accumulates.
-    expect(navGroups.map((g) => g.label)).toEqual(["Operate", "Agents", "Knowledge"]);
-    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Attention", "Work", "Proof"]);
-    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Agents", "Agent Tasks", "Review Queue"]);
-    // Ten knowledge kinds collapsed into ONE entry. They were ten sidebar peers rendering the
-    // identical page with a different filter — navigation ten items wide to express one page
-    // and one parameter. Their URLs still resolve and preselect the kind.
+    // Three nouns: what is happening NOW, the WORK it happens to, the MEMORY it produces.
+    expect(navGroups.map((g) => g.label)).toEqual(["Now", "Work", "Memory"]);
+    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Activity", "Needs you"]);
+    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Board", "Proof"]);
     expect(navLinks.map((l) => l.label)).toEqual([
-      "Attention",
-      "Work",
+      "Activity",
+      "Needs you",
+      "Board",
       "Proof",
-      "Agents",
-      "Agent Tasks",
-      "Review Queue",
-      "Overview",
-      "System Map",
       "Knowledge",
+      "System map",
+      "Review",
     ]);
-    expect(navLinks.length).toBe(9);
+    expect(navLinks.length).toBe(7);
+  });
+
+  // A deliberate contract change, not a loosened test. What left the sidebar, and why:
+  //   Agents + Agent Tasks  folded into Activity — an agent reaches a repository three ways
+  //                         (launched here, finished with a receipt, observed elsewhere) and
+  //                         three sidebar entries for one subject is not an architecture.
+  //   Overview              folded into Proof — both showed the same measured value, in two
+  //                         different visual languages.
+  //   Billing, Integrations, Costs, Settings  deleted: each read nothing real.
+  test("no sidebar entry survives that reads nothing real", () => {
+    const labels = navLinks.map((l) => l.label);
+    for (const gone of ["Agents", "Agent Tasks", "Overview", "Billing", "Integrations", "Costs", "Settings"]) {
+      expect(labels).not.toContain(gone);
+    }
   });
 
   test("every nav href parses back to a real (non not-found) route", () => {

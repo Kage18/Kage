@@ -1,0 +1,30 @@
+{
+  "name": "@kage-core/kage-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kage — the desktop app. An orchestrator of memory and agents that runs while you work.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && electron dist/main.js",
+    "dist:mac": "npm run build && electron-builder --mac --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.0"
+  },
+  "build": {
+    "appId": "com.kagecore.kage",
+    "productName": "Kage",
+    "files": ["dist/**/*", "assets/**/*"],
+    "extraResources": [
+      { "from": "../../mcp/dist", "to": "kage/dist" },
+      { "from": "../../mcp/viewer", "to": "kage/viewer" }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"]
+    }
+  }
+}

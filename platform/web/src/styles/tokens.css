@@ -1,38 +1,72 @@
 /*
- * Kage knowledge portal — semantic design tokens.
+ * Kage — semantic design tokens.
  *
- * Every color, space, radius, and type step is a CSS custom property so components reference
- * meaning (`--color-surface`, `--color-critical`) rather than raw values. The palette is tuned for
- * a minimum WCAG AA contrast ratio against its paired background, and status is NEVER conveyed by
- * color alone — the StatusBadge pairs each color with an icon and a text label.
+ * THE THEME IS THE NAME. Kage means shadow, and this product's central question is how much is
+ * known. Those are the same idea, so: illumination is certainty. What the system verified is lit,
+ * what it derived is half-lit, what was never measured recedes into the ground. The interface is
+ * dark because darkness is the UNKNOWN — not because dark mode is fashionable.
  *
- * A light and a dark scheme are provided. `prefers-color-scheme` selects the default; a
- * `:root[data-theme=...]` override lets an explicit toggle win in either direction.
+ * That turns the confidence ladder from a colour code into a LUMINANCE ladder, and it is the one
+ * idea every other decision here follows from.
+ *
+ * Single scheme, deliberately. A light variant would have to invert the metaphor — "certainty is
+ * darker" — which is not the same idea wearing different clothes, it is a different idea. The
+ * design commits to one visual world rather than shipping a second one that argues with it.
  */
 
 :root {
-  /* Neutral surfaces and text (light scheme). */
-  --color-background: #f7f8fa;
-  --color-surface: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-text: #1a1d21;
-  --color-text-muted: #565c66;
-  --color-border: #d5d9e0;
-  --color-border-strong: #b4bac4;
+  color-scheme: dark;
 
-  /* Accent + status. Each has AA-contrast text-on-color and a subtle tint background. */
-  --color-accent: #177a4d;
-  --color-accent-contrast: #ffffff;
-  --color-focus: #0f5c39;
+  /* ── The luminance ladder ──────────────────────────────────────────────────
+     Six rungs from lit to ground. Everything from `context` up clears WCAG AA
+     on the ground. `quiet` and `unknown` sit below it BY DESIGN and carry no
+     information a reader needs — an unmeasured value renders as a dash, and the
+     dash is the message. */
+  --lum-measured: #5fe0a4;  /* the system observed this */
+  --lum-derived: #c3cabf;   /* inferred from evidence it can cite */
+  --lum-context: #838a80;   /* supporting prose */
+  --lum-quiet: #4a504a;     /* present, deliberately receded */
+  --lum-unknown: #252a25;   /* never measured — barely above ground */
+  --lum-ground: #0a0c0b;    /* shadow */
 
-  --color-success: #1f7a45;
-  --color-success-tint: #e4f4ea;
-  --color-warning: #8a5a00;
-  --color-warning-tint: #fbefd6;
-  --color-critical: #b3261e;
-  --color-critical-tint: #fbe5e3;
-  --color-neutral: #565c66;
-  --color-neutral-tint: #eceef1;
+  /* Surfaces. They lift by almost nothing: depth here is light, not elevation. */
+  --color-background: var(--lum-ground);
+  --color-surface: #101312;
+  --color-surface-raised: #161917;
+  --color-text: #f2f5f0;
+  --color-text-muted: var(--lum-context);
+  --color-border: #1b1f1c;
+  --color-border-strong: #2e332e;
+
+  /* One accent, and it means "measured". It is the brightest thing in the room,
+     which is the theme stated literally. */
+  --color-accent: var(--lum-measured);
+  --color-accent-contrast: #06120c;
+  --color-focus: #7ae9b6;
+
+  --color-success: var(--lum-measured);
+  --color-success-tint: #0f2a1e;
+  /* Warm lights in a cold room — the only hues that are not the accent. */
+  --color-warning: #d9a93f;
+  --color-warning-tint: #2b2311;
+  --color-critical: #e07a8c;
+  --color-critical-tint: #2e161c;
+  --color-neutral: var(--lum-context);
+  --color-neutral-tint: #161917;
+
+  /* The ladder, named by meaning rather than by value, so components never
+     reference a rung directly. `unknown` must never be able to LOOK like
+     `measured`: no colour, no weight, a dashed edge. */
+  --confidence-measured: var(--lum-measured);
+  --confidence-derived: var(--lum-derived);
+  --confidence-attention: var(--color-warning);
+  --confidence-critical: var(--color-critical);
+  --confidence-unknown: var(--lum-quiet);
+  --confidence-unknown-edge: var(--lum-unknown);
+
+  /* Evidence chips: mono facts the machine observed. Distinct from a status pill. */
+  --evidence-bg: rgba(95, 224, 164, 0.07);
+  --evidence-border: rgba(95, 224, 164, 0.22);
 
   /* Spacing scale (4px base). */
   --space-1: 0.25rem;
@@ -43,179 +77,48 @@
   --space-6: 2rem;
   --space-8: 3rem;
 
-  /* Radii. */
   --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
 
-  /* Typography.
-     Two families, two JOBS — this is a signal, not a style choice:
-       sans = prose a human reads and interprets
-       mono = something the machine OBSERVED — a hash, a branch, a path, a count
-     Reading a commit hash in the same face as a sentence hides which of the two you are
-     looking at, and this product is entirely about that distinction. */
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* ── Two voices ────────────────────────────────────────────────────────────
+     IBM Plex Mono is the MACHINE's voice; IBM Plex Sans is the HUMAN's.
+     Headings, numbers, identifiers, branches, paths, statuses and nav labels are
+     mono; only prose a person reads as prose is sans. This inverts the usual
+     hierarchy on purpose — in this product the headline content IS machine
+     output, so the display face should be the one that says so.
 
-  /* A 1.2 ratio off a 15px base, plus a display step reserved for measured figures. An
-     operator tool needs a compressed scale: too many sizes and nothing reads as primary. */
-  --font-size-xs: 0.6875rem;   /* structural labels, group headings */
-  --font-size-sm: 0.8125rem;   /* metadata, evidence, secondary */
+     One superfamily, so the pairing is designed rather than assembled. Both are
+     bundled and self-hosted: the portal ships a strict CSP and the desktop app
+     loads nothing remote, so a font CDN would silently fall back to system-ui. */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* A compressed scale off a 15px base. An operator tool needs few sizes: too
+     many and nothing reads as primary. */
+  --font-size-xs: 0.6875rem;   /* structural labels */
+  --font-size-sm: 0.8125rem;   /* metadata, evidence */
   --font-size-base: 0.9375rem; /* body */
   --font-size-lg: 1.0625rem;   /* card titles */
-  --font-size-xl: 1.375rem;    /* section headings */
-  --font-size-2xl: 1.75rem;    /* page title */
-  --font-size-display: 2.5rem; /* a MEASURED number, and nothing else */
+  --font-size-xl: 1.3125rem;   /* section headings */
+  --font-size-2xl: 1.625rem;   /* page title */
+  --font-size-display: 2.75rem;/* a MEASURED number, and nothing else */
 
-  --line-height-base: 1.5;
-  /* Data lines sit tighter than prose — a column of numbers on prose leading reads as a list
-     of unrelated facts rather than a table. */
+  --line-height-base: 1.55;
   --line-height-data: 1.3;
-  --tracking-label: 0.08em;
+  --tracking-label: 0.06em;
+  /* Light type on a dark ground needs slightly positive tracking to breathe. */
+  --tracking-sans: 0.2px;
 
   --font-weight-normal: 400;
-  --font-weight-medium: 550;
-  --font-weight-bold: 700;
+  --font-weight-medium: 500;
+  --font-weight-bold: 600;
 
-  /* Elevation. */
-  --shadow-sm: 0 1px 2px rgba(16, 20, 28, 0.08);
-  --shadow-md: 0 4px 12px rgba(16, 20, 28, 0.12);
+  /* Elevation is nearly absent by design — light does the separating, not shadow. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.55);
 
-  /* Layout. */
-  --sidebar-width: 14rem;
+  --sidebar-width: 13rem;
   --content-max-width: 78rem;
-  /* The rail on an active nav item and on a status-bearing card. One value so the two read
-     as the same idea: "this one is the subject". */
-  --rail-width: 3px;
+  --rail-width: 2px;
 }
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* v6 brand alignment: the portal's dark scheme shares the site/viewer near-black greens and
-       reserves the verified green for accent + success — one look across every Kage surface. */
-    --color-background: #121413;
-    --color-surface: #1a1d1b;
-    --color-surface-raised: #212522;
-    --color-text: #edefe9;
-    --color-text-muted: #a4aba1;
-    --color-border: #2c302c;
-    --color-border-strong: #41463f;
-
-    --color-accent: #43c98a;
-    --color-accent-contrast: #0e1411;
-    --color-focus: #5fdca0;
-
-    --color-success: #43c98a;
-    --color-success-tint: #14291f;
-    --color-warning: #d9a93f;
-    --color-warning-tint: #2f2712;
-    --color-critical: #e07a8c;
-    --color-critical-tint: #33171d;
-    --color-neutral: #a4aba1;
-    --color-neutral-tint: #212522;
-
-
-    /* ── The confidence ladder ────────────────────────────────────────────────
-       Kage's product claim is honesty about what is KNOWN, so certainty is the
-       primary visual dimension — not decoration. Four rungs, used everywhere:
-
-         measured   a number the system observed        accent, display weight
-         derived    inferred from evidence it can cite  normal text + evidence chip
-         attention  a human has to decide               amber rail
-         unknown    never measured                      muted, dashed, never bold
-
-       The rule that matters: `unknown` must never be able to LOOK like `measured`.
-       It gets no colour, no weight, and a dashed edge, so a glance can't mistake it. */
-    --confidence-measured: var(--color-accent);
-    --confidence-derived: var(--color-text);
-    --confidence-attention: var(--color-warning);
-    --confidence-critical: var(--color-critical);
-    --confidence-unknown: var(--color-text-muted);
-    --confidence-unknown-edge: var(--color-border-strong);
-    /* Evidence chips: mono facts the machine observed. Distinct from a status pill. */
-    --evidence-bg: rgba(67, 201, 138, 0.09);
-    --evidence-border: rgba(67, 201, 138, 0.28);
-
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
-  }
-}
-
-/* Explicit theme overrides win over the media query in both directions. */
-:root[data-theme="light"] {
-  color-scheme: light;
-  --color-background: #f7f8fa;
-  --color-surface: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-text: #1a1d21;
-  --color-text-muted: #565c66;
-  --color-border: #d5d9e0;
-  --color-border-strong: #b4bac4;
-  --color-accent: #177a4d;
-  --color-accent-contrast: #ffffff;
-  --color-focus: #0f5c39;
-  --color-success: #1f7a45;
-  --color-success-tint: #e4f4ea;
-  --color-warning: #8a5a00;
-  --color-warning-tint: #fbefd6;
-  --color-critical: #b3261e;
-  --color-critical-tint: #fbe5e3;
-  --color-neutral: #565c66;
-  --color-neutral-tint: #eceef1;
-
-  /* The confidence ladder — see the dark scheme for the full rationale. */
-  --confidence-measured: var(--color-accent);
-  --confidence-derived: var(--color-text);
-  --confidence-attention: var(--color-warning);
-  --confidence-critical: var(--color-critical);
-  --confidence-unknown: var(--color-text-muted);
-  --confidence-unknown-edge: var(--color-border-strong);
-  --evidence-bg: rgba(23, 122, 77, 0.07);
-  --evidence-border: rgba(23, 122, 77, 0.25);
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --color-background: #121413;
-  --color-surface: #1a1d1b;
-  --color-surface-raised: #212522;
-  --color-text: #edefe9;
-  --color-text-muted: #a4aba1;
-  --color-border: #2c302c;
-  --color-border-strong: #41463f;
-  --color-accent: #43c98a;
-  --color-accent-contrast: #0e1411;
-  --color-focus: #5fdca0;
-  --color-success: #43c98a;
-  --color-success-tint: #14291f;
-  --color-warning: #d9a93f;
-  --color-warning-tint: #2f2712;
-  --color-critical: #e07a8c;
-  --color-critical-tint: #33171d;
-  --color-neutral: #a4aba1;
-  --color-neutral-tint: #212522;
-}
-
-:root[data-theme="dark"] {
-    /* ── The confidence ladder ────────────────────────────────────────────────
-       Kage's product claim is honesty about what is KNOWN, so certainty is the
-       primary visual dimension — not decoration. Four rungs, used everywhere:
-
-         measured   a number the system observed        accent, display weight
-         derived    inferred from evidence it can cite  normal text + evidence chip
-         attention  a human has to decide               amber rail
-         unknown    never measured                      muted, dashed, never bold
-
-       The rule that matters: `unknown` must never be able to LOOK like `measured`.
-       It gets no colour, no weight, and a dashed edge, so a glance can't mistake it. */
-    --confidence-measured: var(--color-accent);
-    --confidence-derived: var(--color-text);
-    --confidence-attention: var(--color-warning);
-    --confidence-critical: var(--color-critical);
-    --confidence-unknown: var(--color-text-muted);
-    --confidence-unknown-edge: var(--color-border-strong);
-    /* Evidence chips: mono facts the machine observed. Distinct from a status pill. */
-    --evidence-bg: rgba(67, 201, 138, 0.09);
-    --evidence-border: rgba(67, 201, 138, 0.28);
-}
-

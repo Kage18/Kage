@@ -140,25 +140,11 @@ button:disabled {
   transform: translateY(0);
 }
 
-.shell-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-3) var(--space-5);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.shell-brand {
-  font-weight: var(--font-weight-bold);
-  font-size: var(--font-size-base);
-  letter-spacing: -0.01em;
-}
-
 .shell-body {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
   align-items: start;
+  min-height: 100vh;
 }
 
 @media (max-width: 48rem) {
@@ -167,46 +153,101 @@ button:disabled {
   }
 }
 
-.shell-nav {
-  padding: var(--space-4) var(--space-3);
+/* The rail holds the banner, the nav and the live indicator in one column. */
+.shell-rail {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) 0 var(--space-5);
   border-right: 1px solid var(--color-border);
-  background: var(--color-surface);
-  min-height: calc(100vh - 4rem);
+  min-height: 100vh;
 }
 
-.shell-nav ul {
+.shell-nav {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Mark + repository, at the top of the sidebar rather than in a banner across the window. A
+   near-empty title bar is what a native Mac app looks like. */
+.shell-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-5);
+}
+
+.shell-mark {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
+/* Groups are separated by SPACE, not by a rendered caption. */
+.nav-group {
   list-style: none;
-  margin: 0;
+  margin: 0 0 var(--space-4);
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+}
+
+.nav-group:last-of-type {
+  margin-bottom: 0;
 }
 
 .shell-nav a {
-  display: block;
-  padding: var(--space-2) var(--space-3);
-  /* A left rail, not a filled pill. A solid accent block shouts, competes with the accent
-     used for MEASURED values, and makes navigation look more important than the data. */
-  border-left: var(--rail-width) solid transparent;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-4);
+  /* Mono: a section name is a place in the machine, not prose. */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.02em;
   color: var(--color-text-muted);
   text-decoration: none;
-  font-size: var(--font-size-base);
-  line-height: var(--line-height-data);
+  line-height: 1.9;
 }
 
+/* Deliberately NO web-style hover highlight on rows: macOS list items do not light up under the
+   pointer, and doing it is one of the fastest tells that a window is a web page. Colour alone
+   moves, and only slightly. */
 .shell-nav a:hover {
   color: var(--color-text);
-  background: var(--color-neutral-tint);
 }
 
-/* Active section: the rail AND full-strength text AND weight — three signals, so it never
-   depends on colour alone. */
+/* Active section: a soft fill plus full-strength text. One emphasis device, not three — an
+   earlier pass had a rail here AND a rail on the running card AND a rail on alerts, so none of
+   them meant anything. */
 .shell-nav a[aria-current="page"] {
-  border-left-color: var(--color-accent);
   background: var(--color-surface-raised);
   color: var(--color-text);
-  font-weight: var(--font-weight-medium);
+}
+
+.shell-nav-foot {
+  margin-top: auto;
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+/* ── Desktop window chrome ───────────────────────────────────────────────────────────────────
+   Only in the app: the traffic lights are inset over the top-left, so the identity row clears
+   them and the sidebar head becomes the window's drag region. `data-kage-desktop` is stamped on
+   the root element by the Electron preload, so the web portal is untouched. */
+:root[data-kage-desktop="true"] .shell-identity {
+  padding-top: 30px;
+  -webkit-app-region: drag;
+}
+
+:root[data-kage-desktop="true"] .shell-identity button,
+:root[data-kage-desktop="true"] .shell-identity a {
+  -webkit-app-region: no-drag;
+}
+
+/* Content clears the title-bar band too, so the first line of the page sits on the same optical
+   baseline as the repository name rather than jammed against the window edge. */
+:root[data-kage-desktop="true"] .shell-main {
+  padding-top: 44px;
 }
 
 .shell-main {
@@ -217,26 +258,43 @@ button:disabled {
 
 /* ---- Repository switcher ---- */
 
+/* The repository control sits in the sidebar head, inside 13rem. It must never push the sidebar
+   wide or spill over the content: a repository id like `repository:local` plus a branch is easily
+   wider than the rail it lives in, so both lines truncate rather than wrap or overflow.
+   No `cursor: pointer` — desktop controls do not use the hand cursor, and it is the single fastest
+   tell that a window is a web page. */
 .repo-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  background: none;
+  border: 0;
   color: var(--color-text);
   font: inherit;
-  cursor: pointer;
+  text-align: left;
+}
+
+.repo-switcher .repo-name,
+.repo-switcher .repo-branch {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .repo-switcher .repo-name {
-  font-weight: var(--font-weight-medium);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--tracking-sans);
 }
 
 .repo-switcher .repo-branch {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
+  color: var(--lum-quiet);
+  font-size: var(--font-size-xs);
   font-family: var(--font-mono);
 }
 
@@ -1408,20 +1466,10 @@ button:disabled {
   white-space: nowrap;
 }
 
-/* Grouped navigation. The group label is quiet and structural; it orients without
-   competing with the links it introduces. */
-.nav-group + .nav-group {
-  margin-top: var(--space-5);
-}
-.nav-group-label {
-  margin: 0 0 var(--space-2);
-  padding: 0 var(--space-3);
-  font-size: 0.6875rem;
-  font-weight: var(--font-weight-bold);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
+/* Navigation grouping lives with the rest of the shell, above. The rendered `.nav-group-label`
+   caption that used to sit here is gone: uppercase letterspaced group headings are
+   enterprise-dashboard house style, and a gap communicates the same grouping silently. The group
+   name survives as `aria-label` on each list, so assistive tech keeps the structure. */
 
 /* ── Agents ─────────────────────────────────────────────────────────────── */
 
@@ -1609,8 +1657,8 @@ button:disabled {
   line-height: 1.55;
 }
 
-/* A structural label: quiet, spaced, uppercase. Orients without competing. */
-.nav-group-label,
+/* A structural label: quiet, spaced, uppercase. Orients without competing. Used inside content
+   where a band genuinely needs naming — never in the sidebar, where a gap does the job. */
 .section-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-bold);
@@ -1845,3 +1893,149 @@ code {
 .entity-card[data-confidence="measured"]  { border-left-style: solid; }
 .entity-card[data-confidence="attention"] { border-left-style: dashed; }
 .entity-card[data-confidence="critical"]  { border-left-style: double; border-left-width: 4px; }
+
+/* ── Activity: the home screen ───────────────────────────────────────────────────────────────
+   Bands separated by space, not by borders or cards. The only lit things on this screen are the
+   ones that were actually measured: the recall ticks, and the count beside them. */
+
+/* A machine-observed fact, PLAIN. Distinct from `.evidence`, which is the tinted-and-bordered chip
+   treatment — that is for evidence quoted inline inside prose, where it needs to separate itself
+   from the sentence around it. A column of agent names in chips reads as a row of buttons. */
+.fact {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-band {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  color: var(--lum-quiet);
+}
+
+.activity-empty {
+  margin: 0 0 var(--space-8);
+  max-width: 56ch;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+}
+
+.running-list,
+.finished-list,
+.observed-list {
+  list-style: none;
+  margin: 0 0 var(--space-8);
+  padding: 0;
+}
+
+.running-session + .running-session { margin-top: var(--space-6); }
+
+.running-head,
+.running-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.running-title {
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+  letter-spacing: var(--tracking-sans);
+}
+
+.running-clock,
+.running-recalls { margin-left: auto; }
+
+.running-step {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lum-quiet);
+}
+
+/* The run strip. A tick is a tool call; a full-height accent tick is a moment memory reached the
+   agent. Nothing here is smoothed or interpolated — one rect per recorded event. */
+.run-strip {
+  display: block;
+  margin: var(--space-3) 0;
+  overflow: visible;
+}
+
+.run-tick { fill: var(--lum-unknown); }
+.run-tick-recall { fill: var(--color-accent); }
+
+.activity-blocking {
+  display: flex;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-8);
+}
+
+.activity-severity {
+  padding-top: 2px;
+  background: none;
+  border: 0;
+}
+
+.activity-severity[data-status="critical"] { color: var(--color-critical); }
+.activity-severity[data-status="attention"] { color: var(--color-warning); }
+
+.activity-blocking-summary {
+  margin: 0 0 var(--space-1);
+  color: var(--color-text);
+  letter-spacing: var(--tracking-sans);
+}
+
+.activity-blocking-link {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.finished-list li,
+.observed-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+}
+
+.finished-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  letter-spacing: var(--tracking-sans);
+}
+
+.finished-title:hover { color: var(--color-text); }
+.finished-meta,
+.finished-agent { color: var(--lum-quiet); }
+.finished-agent { width: 5rem; text-align: right; }
+
+/* Three columns that line up down the list: who, whether it is working, what it produced. Fixed
+   widths rather than `margin-left: auto`, so the counts form a column instead of drifting to the
+   far edge of a wide window and leaving a lake of space in the middle. */
+.observed-agent .fact:first-child { width: 9rem; flex-shrink: 0; }
+
+.observed-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 9rem;
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.observed-state[data-status="measured"] { color: var(--color-success); }
+.observed-state[data-status="critical"] { color: var(--color-critical); }
+
+.observed-count[data-confidence="measured"] { color: var(--color-accent); }
+.observed-count[data-confidence="unknown"] { color: var(--lum-quiet); }

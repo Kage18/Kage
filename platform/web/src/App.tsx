@@ -17,6 +17,7 @@ import type { TeamReportDto,
   SystemMapDto,
   SystemMapView,
   TaskReceiptDto,
+  TaskSummaryDto,
   TasksDto,
 } from "./api/types";
 import { AppShell } from "./components/AppShell";
@@ -29,6 +30,7 @@ import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { AgentsPage } from "./pages/AgentsPage";
+import { ActivityPage } from "./pages/ActivityPage";
 import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
@@ -479,6 +481,30 @@ function KnowledgeContainer({ api, kind }: { api: KageApiClient; kind: string })
   return <KnowledgePage kinds={kinds} selected={selected} onSelect={select} />;
 }
 
+// Activity, the landing screen. It joins three independent feeds — what needs a human, what
+// finished, and which agents have been observed at all — because agents reach a repository three
+// ways and a home screen that shows one of them is lying by omission.
+//
+// Each feed fails on its own: a missing agents report empties one band rather than blanking the
+// page. Running sessions arrive from the desktop app over IPC and are absent in the browser, where
+// the band states what would put something in it.
+function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement {
+  const [attention, setAttention] = useState<AttentionItemDto[]>([]);
+  const [tasks, setTasks] = useState<TaskSummaryDto[]>([]);
+  const [agents, setAgents] = useState<AgentsReportDto | null>(null);
+
+  const reload = useCallback(() => {
+    api.attention().then((queue: AttentionQueueDto) => setAttention(queue.items)).catch(() => setAttention([]));
+    api.tasks().then((body: TasksDto) => setTasks(body.tasks)).catch(() => setTasks([]));
+    api.agents().then((report: AgentsReportDto) => setAgents(report)).catch(() => setAgents(null));
+  }, [api]);
+
+  useEffect(reload, [reload]);
+  useLiveRefresh(reload);
+
+  return <ActivityPage attention={attention} tasks={tasks} agents={agents} />;
+}
+
 function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {
   const [state, setState] = useState<{ report: AgentsReportDto | null; error: string | null }>({ report: null, error: null });
   useEffect(() => {
@@ -617,6 +643,8 @@ function RoutedPage({
   api: KageApiClient;
 }): React.ReactElement {
   switch (route.page) {
+    case "activity":
+      return <ActivityContainer api={api} />;
     case "attention":
       return <AttentionContainer api={api} />;
     case "work":

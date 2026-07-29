@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 
 export type Route =
+  | { page: "activity" }
   | { page: "attention" }
   | { page: "work" }
   | { page: "proof" }
@@ -51,37 +52,41 @@ export interface NavGroup {
   links: NavLink[];
 }
 
-// Grouped, because a flat list of seventeen links is a wiki and this is an operating surface.
-// The grouping IS the product claim: you OPERATE (decisions and work), you see the AGENTS doing
-// it, and you read the KNOWLEDGE they produce. Order within a group is fixed, and the first
-// group is the one you land in.
+// Seven items in three groups, and a screen is here ONLY if it reads live data.
+//
+// The groups are the three nouns the product is made of — what is happening NOW, the WORK it is
+// happening to, and the MEMORY it produces and consumes. They are separated by whitespace rather
+// than by rendered headings: letterspaced group captions are enterprise-dashboard house style and
+// were the noisiest thing on the sidebar. `label` is kept for assistive tech only.
+//
+// What went, and why: Agents and Agent Tasks folded into Activity (three ways an agent reaches a
+// repository, one screen); Overview folded into Proof (they showed the same measured value in two
+// visual languages); Billing, Integrations, Costs and Settings were deleted outright because each
+// read nothing real — the reasons are recorded below.
 export const navGroups: NavGroup[] = [
   {
-    label: "Operate",
+    label: "Now",
     links: [
-      { label: "Attention", href: "/attention" },
-      { label: "Work", href: "/work" },
+      { label: "Activity", href: "/activity" },
+      { label: "Needs you", href: "/attention" },
+    ],
+  },
+  {
+    label: "Work",
+    links: [
+      { label: "Board", href: "/work" },
       { label: "Proof", href: "/proof" },
     ],
   },
   {
-    label: "Agents",
+    label: "Memory",
     links: [
-      { label: "Agents", href: "/agents" },
-      { label: "Agent Tasks", href: "/tasks" },
-      { label: "Review Queue", href: "/review" },
-    ],
-  },
-  {
-    label: "Knowledge",
-    links: [
-      { label: "Overview", href: "/overview" },
-      { label: "System Map", href: "/system-map" },
       // ONE entry, not ten. Features/Components/Flows/Runbooks/Decisions/Contracts/
       // Data Models/Invariants/Incidents/Documents were ten sidebar peers rendering the
-      // identical page with a different filter — navigation ten items wide to express one
-      // page and one parameter. Their URLs still resolve; they preselect the kind.
+      // identical page with a different filter. Their URLs still resolve; they preselect the kind.
       { label: "Knowledge", href: "/knowledge" },
+      { label: "System map", href: "/system-map" },
+      { label: "Review", href: "/review" },
     ],
   },
 ];
@@ -126,13 +131,17 @@ function splitPath(input: string): { segments: string[]; query: URLSearchParams 
 export function parseRoute(input: string): Route {
   const { segments, query } = splitPath(input);
 
-  // Attention is the landing page by design: the app opens on what needs a decision,
-  // not on a dashboard to admire.
-  if (segments.length === 0) return { page: "attention" };
+  // Activity is the landing page: the app opens on what the agents are DOING, and carries the
+  // most urgent decision inline so the home screen can never hide the thing that is blocking you.
+  // (It replaced Attention as the landing when the agents half finally got a surface.)
+  if (segments.length === 0) return { page: "activity" };
 
   const [head, tail] = segments;
 
   switch (head) {
+    case "activity":
+      if (segments.length === 1) return { page: "activity" };
+      break;
     case "attention":
       if (segments.length === 1) return { page: "attention" };
       break;
@@ -220,6 +229,8 @@ export function parseRoute(input: string): Route {
 
 export function routeToPath(route: Route): string {
   switch (route.page) {
+    case "activity":
+      return "/activity";
     case "attention":
       return "/attention";
     case "work":

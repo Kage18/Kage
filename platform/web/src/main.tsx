@@ -2,6 +2,13 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { KageApi } from "./api/client";
+// Self-hosted, never a CDN: the portal ships a strict CSP and the desktop app loads nothing
+// remote, so a Google Fonts link would silently fall back to system-ui and quietly undo the
+// two-voices typography. Mono carries machine-observed fact, sans carries human prose.
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/500.css";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
 import "./styles/global.css";
 
 // Bootstrap. The portal is served same-origin by the Kage daemon under `/app/`, so the API base is

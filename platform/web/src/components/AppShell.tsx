@@ -4,11 +4,18 @@ import { navGroups, withBase } from "../router";
 import { RepositorySwitcher } from "./RepositorySwitcher";
 import { LiveIndicator } from "./LiveIndicator";
 
-// The accessible application shell: a skip link, a banner landmark carrying brand + repository
-// identity, the primary navigation landmark, and the main content region. Page content is passed as
-// children; `route` is the current origin-relative path string, used to mark the active nav link
-// with `aria-current="page"` (so the active state is exposed to assistive tech, not signaled by
-// color alone).
+// The application shell.
+//
+// Two things about it are deliberate and easy to undo by accident:
+//
+//   The nav groups are separated by SPACE, not by rendered captions. `NOW` / `WORK` / `MEMORY` in
+//   letterspaced caps was the noisiest thing on the sidebar and said nothing a gap does not. The
+//   group name survives as `aria-label`, so assistive tech still gets the structure a sighted
+//   reader gets from the spacing.
+//
+//   In the desktop app the traffic lights are inset over the top-left of the window, so the banner
+//   reserves space for them and becomes the drag region. Gated on `data-kage-desktop`, which the
+//   preload stamps on the root element — the web portal is untouched.
 
 interface AppShellProps {
   repository: RepositoryDto | null;
@@ -16,62 +23,71 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-// First path segment, ignoring the leading slash and any query string. Used to decide which nav
-// section owns the current route (e.g. `/features/checkout` -> "features", active for "Features").
 function firstSegment(path: string): string {
   const clean = path.split("?")[0];
   const segments = clean.split("/").filter((s) => s.length > 0);
-  // Treat the root and the empty path as the overview section.
-  return segments[0] ?? "overview";
+  return segments[0] ?? "activity";
 }
 
 function isActive(href: string, route: string): boolean {
-  const routeSeg = firstSegment(route);
-  const linkSeg = firstSegment(href);
-  if (routeSeg === "overview" && linkSeg === "overview") return true;
-  return routeSeg === linkSeg;
+  return firstSegment(route) === firstSegment(href);
 }
 
-export function AppShell({
-  repository,
-  route,
-  children,
-}: AppShellProps): React.ReactElement {
+/** The mark: the eye, flattened to one stroke and one fill. No gradient — it has to hold at 15px. */
+function Mark(): React.ReactElement {
+  return (
+    <svg className="shell-mark" viewBox="0 0 96 96" aria-hidden="true">
+      <path
+        d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="6"
+      />
+      <circle cx="48" cy="48" r="12" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function AppShell({ repository, route, children }: AppShellProps): React.ReactElement {
   return (
     <div className="kage-app">
       <a className="skip-link" href="#main-content">
         Skip to main content
       </a>
 
-      <header className="shell-banner" role="banner">
-        <RepositorySwitcher repository={repository} />
-        <span className="shell-brand">Kage</span>
-        <span className="shell-tagline">orchestrator of memory and agents</span>
-        <LiveIndicator />
-      </header>
-
       <div className="shell-body">
-        {/* Grouped rather than flat: a seventeen-item list is a wiki, and the grouping is the
-            product claim — you operate, the agents work, the knowledge accumulates. */}
-        <nav className="shell-nav" aria-label="Sections">
+        <div className="shell-rail">
+          {/* A real `banner` landmark, kept when the banner moved from a bar across the top into
+              the head of the sidebar. It sits OUTSIDE the nav — a header nested inside a nav is
+              not a banner, and quietly losing the landmark is the kind of regression that only
+              shows up for someone navigating by landmark. */}
+          <header className="shell-identity">
+            <Mark />
+            <RepositorySwitcher repository={repository} />
+          </header>
+
+          <nav className="shell-nav" aria-label="Sections">
           {navGroups.map((group) => (
-            <div key={group.label} className="nav-group">
-              <h2 className="nav-group-label">{group.label}</h2>
-              <ul>
-                {group.links.map((link) => {
-                  const active = isActive(link.href, route);
-                  return (
-                    <li key={link.href}>
-                      <a href={withBase(link.href)} aria-current={active ? "page" : undefined}>
-                        {link.label}
-                      </a>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
+            <ul key={group.label} className="nav-group" aria-label={group.label}>
+              {group.links.map((link) => {
+                const active = isActive(link.href, route);
+                return (
+                  <li key={link.href}>
+                    <a href={withBase(link.href)} aria-current={active ? "page" : undefined}>
+                      {link.label}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
           ))}
-        </nav>
+
+          </nav>
+
+          <div className="shell-nav-foot">
+            <LiveIndicator />
+          </div>
+        </div>
 
         <main className="shell-main" id="main-content" tabIndex={-1}>
           {children}
