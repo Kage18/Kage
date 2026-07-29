@@ -6,8 +6,13 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "npm run build && electron dist/main.js",
-    "dist:mac": "npm run build && electron-builder --mac --publish never"
+    "build:core": "npm --prefix ../../mcp run build",
+    "build:portal": "npm --prefix ../web run build && npm --prefix ../../mcp run bundle:portal",
+    "build:all": "npm run build:core && npm run build:portal && npm run build",
+    "start": "npm run build:all && electron dist/main.js",
+    "start:fast": "npm run build && electron dist/main.js",
+    "assets": "node scripts/make-assets.mjs",
+    "dist:mac": "npm run build:all && npm run assets && electron-builder --mac --publish never"
   },
   "devDependencies": {
     "electron": "^33.0.0",
