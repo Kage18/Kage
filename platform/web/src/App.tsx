@@ -30,10 +30,10 @@ import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
-import { AgentsPage } from "./pages/AgentsPage";
 import { ActivityPage } from "./pages/ActivityPage";
 import { StartAgentSheet } from "./components/StartAgentSheet";
-import { buildBrief, desktop, type Brief, type DesktopSession } from "./desktop";
+import { buildBrief, desktop, type Brief, type DesktopRepo, type DesktopSession } from "./desktop";
+import { FirstRunPage } from "./pages/FirstRunPage";
 import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
@@ -594,20 +594,6 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
   );
 }
 
-function AgentsContainer({ api }: { api: KageApiClient }): React.ReactElement {
-  const [state, setState] = useState<{ report: AgentsReportDto | null; error: string | null }>({ report: null, error: null });
-  useEffect(() => {
-    let live = true;
-    api.agents()
-      .then((report: AgentsReportDto) => { if (live) setState({ report, error: null }); })
-      .catch((error: unknown) => { if (live) setState({ report: null, error: error instanceof Error ? error.message : String(error) }); });
-    return () => { live = false; };
-  }, [api]);
-  if (state.error) return <p className="empty-state">Agents unavailable: {state.error}</p>;
-  if (!state.report) return <p className="empty-state">Reading sessions…</p>;
-  return <AgentsPage report={state.report} />;
-}
-
 function WorkItemContainer({ api, id }: { api: KageApiClient; id: string }): React.ReactElement {
   const [state, setState] = useState<{ detail: WorkDetailDto | null; error: string | null }>({ detail: null, error: null });
   useEffect(() => {
@@ -750,8 +736,10 @@ function RoutedPage({
       return <ProofContainer api={api} />;
     case "work-item":
       return <WorkItemContainer api={api} id={route.id} />;
+    // Agents folded into Activity — an agent reaches a repository three ways, and three
+    // separate screens for one subject is not an architecture. The route still resolves.
     case "agents":
-      return <AgentsContainer api={api} />;
+      return <ActivityContainer api={api} />;
     case "knowledge-all":
       return <KnowledgeContainer api={api} kind={route.kind} />;
     case "overview":
@@ -884,6 +872,16 @@ function RoutedPage({
 export function App({ api }: AppProps): React.ReactElement {
   const route = useRoute();
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  // undefined = not asked yet (or not the desktop app). An empty array is a FACT: no repositories.
+  const [repos, setRepos] = useState<DesktopRepo[] | undefined>(undefined);
+  const [addBusy, setAddBusy] = useState(false);
+
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    void bridge.getState().then((next) => setRepos(next.repos));
+    return bridge.onState((next) => setRepos(next.repos));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -904,6 +902,24 @@ export function App({ api }: AppProps): React.ReactElement {
       cancelled = true;
     };
   }, [api]);
+
+  const addRepository = useCallback(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    setAddBusy(true);
+    void bridge.addRepository().finally(() => setAddBusy(false));
+  }, []);
+
+  // With no repository there is no daemon, so every call 503s and the shell used to render
+  // "Repository knowledge is unavailable" — a technical error for a state that is not an error.
+  // It is simply the beginning, and it gets a screen that says so.
+  if (repos?.length === 0) {
+    return (
+      <AppShell repository={null} route={routeToPath(route)}>
+        <FirstRunPage onAddRepository={addRepository} busy={addBusy} />
+      </AppShell>
+    );
+  }
 
   const repository = state.status === "ready" ? state.overview.repository : null;
 

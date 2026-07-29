@@ -21,6 +21,8 @@ export interface DesktopSession {
   elapsed_s: number;
   step: string | null;
   ticks: Array<{ recall: boolean; weight: number }>;
+  /** Deliveries the proxy recorded for this session. Measured, not inferred. */
+  recalls: number;
 }
 
 export interface DesktopRepo {

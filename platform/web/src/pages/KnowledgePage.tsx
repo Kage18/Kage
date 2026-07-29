@@ -68,12 +68,11 @@ export function KnowledgePage({
 
   return (
     <section aria-label="Knowledge">
-      <header className="page-header">
-        <h1>Knowledge</h1>
-        <p className="page-subtitle">
-          Everything this repository knows, in one place. A kind is a filter rather than a
-          destination, so you can search across all of them at once — an answer you half-remember
-          is rarely filed where you expect it.
+      <header>
+        <h1 className="visually-hidden">Knowledge</h1>
+        <p className="board-lede">
+          A kind is a filter rather than a destination, so a search covers all of them at once — an
+          answer you half-remember is rarely filed where you expect it.
         </p>
 
         <div className="kind-chips" role="group" aria-label="Filter by kind">
@@ -143,22 +142,33 @@ export function KnowledgePage({
             : `Nothing matches that filter. ${total.toLocaleString()} entries exist here — clear the search or switch back to All.`}
         </p>
       ) : (
-        <ul className="entity-list">
+        <ul className="knowledge-list">
           {filtered.map(({ entity, kind, label }) => (
-            <li key={`${kind}:${entity.entity_id}`} className="entity-card">
-              <div className="entity-card-header">
+            <li key={`${kind}:${entity.entity_id}`} className="knowledge-row">
+              <div className="knowledge-row-head">
                 {/* In the "All" view the kind is the thing you cannot infer from the title. */}
-                <span className="pill">{label}</span>
+                <span className="fact knowledge-kind">{label}</span>
+                {/* Health carries the confidence rung: a claim nobody verified must not look like
+                    one that was, and a stale one has to be visible without opening it. */}
+                <span
+                  className="fact knowledge-health"
+                  data-confidence={
+                    entity.stale_claims > 0 || entity.disputed_claims > 0
+                      ? "attention"
+                      : entity.verified_claims > 0
+                        ? "measured"
+                        : "unknown"
+                  }
+                >
+                  {entity.verified_claims > 0 ? `${entity.verified_claims} verified` : "unverified"}
+                  {entity.stale_claims > 0 && ` · ${entity.stale_claims} stale`}
+                  {entity.disputed_claims > 0 && ` · ${entity.disputed_claims} disputed`}
+                </span>
               </div>
-              <h2>
-                <a href={withBase(`/${kind}/${entity.slug}`)}>{entity.canonical_name}</a>
-              </h2>
-              {entity.summary && <p className="muted">{entity.summary}</p>}
-              <p className="muted entity-card-health">
-                {entity.verified_claims} verified
-                {entity.stale_claims > 0 && ` · ${entity.stale_claims} stale`}
-                {entity.disputed_claims > 0 && ` · ${entity.disputed_claims} disputed`}
-              </p>
+              <a className="knowledge-title" href={withBase(`/${kind}/${entity.slug}`)}>
+                {entity.canonical_name}
+              </a>
+              {entity.summary && <p className="knowledge-summary">{entity.summary}</p>}
             </li>
           ))}
         </ul>

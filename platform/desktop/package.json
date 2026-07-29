@@ -22,14 +22,16 @@
   "build": {
     "appId": "com.kagecore.kage",
     "productName": "Kage",
-    "files": ["dist/**/*", "assets/**/*"],
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "assets/**/*", "!dist/mac*", "!release"],
     "extraResources": [
       { "from": "../../mcp/dist", "to": "kage/dist" },
       { "from": "../../mcp/viewer", "to": "kage/viewer" }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"]
+      "target": ["dmg", "zip"],
+      "icon": "assets/icon.icns"
     }
   }
 }

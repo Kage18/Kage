@@ -1049,3 +1049,41 @@ test("probeAssistStorage reports unhealthy when the reversible store cannot be w
   assert.equal(health.healthy, false);
   assert.match(health.detail, /reversible/);
 });
+
+// The desktop app starts ONE proxy per agent session, and needs its receipts attributable to that
+// session. `proxyTaskId(projectRoot, sessionId)` is the join key, so the id has to be knowable up
+// front — a per-process random id leaves only timing to correlate on, and the correlation ladder
+// refuses to act on timing everywhere else.
+test("a supervisor may name the proxy's session, so its receipts are attributable by construction", async () => {
+  const project = mkdtempSync(join(tmpdir(), "kage-proxy-session-"));
+  const chosen = "kage-session-under-test";
+  const previous = process.env.KAGE_PROXY_SESSION_ID;
+  process.env.KAGE_PROXY_SESSION_ID = chosen;
+  try {
+    const server = startProxy(project, { port: 0 });
+    try {
+      // The id reaches the observation record, which is what makes the task id computable.
+      capture({ projectDir: project, type: "code_explanation", title: "t", body: "b", paths: [] });
+      assert.equal(process.env.KAGE_PROXY_SESSION_ID, chosen, "the variable is read, never mutated");
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (previous === undefined) delete process.env.KAGE_PROXY_SESSION_ID;
+    else process.env.KAGE_PROXY_SESSION_ID = previous;
+  }
+});
+
+// Absent the variable, behaviour is unchanged — a bare `kage proxy` still gets its own id.
+test("with no supplied id the proxy still generates a stable per-process one", () => {
+  const previous = process.env.KAGE_PROXY_SESSION_ID;
+  delete process.env.KAGE_PROXY_SESSION_ID;
+  try {
+    const project = mkdtempSync(join(tmpdir(), "kage-proxy-session-none-"));
+    const server = startProxy(project, { port: 0 });
+    server.close();
+    assert.equal(process.env.KAGE_PROXY_SESSION_ID, undefined);
+  } finally {
+    if (previous !== undefined) process.env.KAGE_PROXY_SESSION_ID = previous;
+  }
+});

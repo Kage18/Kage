@@ -256,6 +256,43 @@ repo and verifies it, so it stays your team's and stays true as the code changes
 Methodology, commands, and caveats: [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Every number
 above has a reproducible harness in this repo; claims without one don't ship.
 
+## The desktop app
+
+Kage runs as a macOS app: it watches every repository you point it at, supervises a daemon for
+each one, starts agents on work items, and taps you on the shoulder from the menubar when
+something needs a human. That last part is the reason it is an app and not a page — an agent runs
+for minutes to hours while you are elsewhere, and "humans approve gates" is a promise about being
+reachable.
+
+```bash
+kage app                       # open it
+kage app --project .           # …and start watching this repository
+```
+
+From a source checkout, build and run it directly:
+
+```bash
+npm start --prefix platform/desktop
+```
+
+Quit from the menubar rather than closing the window: closing hides it, because staying resident
+is the point. Quitting stops every daemon and agent it started.
+
+**Seven screens, and a screen exists only if it reads live data.** Activity (what is running, the
+top blocker, what finished, agents seen elsewhere) · Needs you · Board · Proof · Knowledge ·
+System map · Review.
+
+**Starting an agent shows you the brief first** — which memories, marked verified or derived,
+which files it is grounded to, and the exact prompt on request. What is shown is what is sent.
+
+Two things to know:
+
+- **Stop the app before `npm test --prefix mcp`.** Its daemons answer tests that assert the
+  evidence runtime is down.
+- **A packaged build is unsigned.** Notarising needs an Apple Developer certificate, so a `.dmg`
+  from `npm run dist:mac --prefix platform/desktop` trips Gatekeeper on first open — right-click →
+  Open, or `xattr -dr com.apple.quarantine /Applications/Kage.app`.
+
 ## Daily commands
 
 ```bash
@@ -263,7 +300,8 @@ kage context "how do I run tests" --project .
 kage verify --project .        # check citations against current code
 kage pr check --project .      # stale-catch + graph freshness gate
 kage report team --project .   # the lead-facing "is this helping?" report
-kage viewer --project .        # local dashboard
+kage app                       # the desktop app
+kage viewer --project .        # the same portal in a browser, one repository
 kage okf migrate --project .   # render memory as a Google OKF bundle
 ```
 

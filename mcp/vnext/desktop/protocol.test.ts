@@ -105,3 +105,29 @@ test("forwarding always targets loopback", () => {
   assert.equal(daemonOrigin(3141), "http://127.0.0.1:3141");
   assert.match(daemonOrigin(3141), /^http:\/\/127\.0\.0\.1:/);
 });
+
+// The packaging guard, and it is not theoretical: the first packaged build died on launch with
+// "Cannot find module 'typescript'" because the desktop shell required `daemon.js`, which requires
+// `kernel.js`, which requires typescript — and the app bundles mcp/dist WITHOUT node_modules. It
+// worked perfectly from a source checkout, which is exactly why only launching the real bundle
+// caught it. Same class of fault as the 4.0.0 portal that 404'd for every npm user.
+//
+// So: everything the shell loads must resolve with node builtins alone.
+test("the modules the desktop shell loads pull no third-party dependency", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { join } = await import("node:path");
+
+  // The COMPILED output is what the app requires, so that is what is inspected.
+  const here = __dirname;
+  const compiled = readdirSync(here).filter((name) => name.endsWith(".js") && !name.endsWith(".test.js"));
+  assert.ok(compiled.length >= 5, "the desktop core should have several compiled modules");
+
+  for (const name of compiled) {
+    const source = readFileSync(join(here, name), "utf8");
+    for (const match of source.matchAll(/require\("([^"]+)"\)/g)) {
+      const specifier = match[1];
+      const bare = !specifier.startsWith(".") && !specifier.startsWith("node:");
+      assert.equal(bare, false, `${name} requires "${specifier}" — the packaged app has no node_modules`);
+    }
+  }
+});

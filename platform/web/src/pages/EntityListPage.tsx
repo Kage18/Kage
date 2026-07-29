@@ -55,8 +55,8 @@ export function EntityListPage({
 
   return (
     <section aria-label={title}>
-      <header className="page-header">
-        <h1>{title}</h1>
+      <header>
+        <h1 className="detail-title">{title}</h1>
         <div className="list-controls">
           <input
             type="search"
@@ -99,15 +99,26 @@ export function EntityListPage({
           section — clear the search or switch back to All.
         </p>
       ) : (
-        <ul className="entity-list">
+        <ul className="knowledge-list">
           {filtered.map((entity) => (
-            <li key={entity.entity_id} className="entity-card">
-              <a href={withBase(`/${section}/${entity.slug}`)}>
-                <strong>{entity.canonical_name}</strong>
+            <li key={entity.entity_id} className="knowledge-row">
+              <a className="knowledge-title" href={withBase(`/${section}/${entity.slug}`)}>
+                {entity.canonical_name}
               </a>
-              {entity.summary && <p className="muted">{entity.summary}</p>}
-              <p className="muted entity-card-health">
-                {entity.verified_claims} verified
+              {entity.summary && <p className="knowledge-summary">{entity.summary}</p>}
+              {/* Health carries the confidence rung, same as the Knowledge page: an unverified
+                  claim must not look like a verified one. */}
+              <p
+                className="fact knowledge-health"
+                data-confidence={
+                  entity.stale_claims > 0 || entity.disputed_claims > 0
+                    ? "attention"
+                    : entity.verified_claims > 0
+                      ? "measured"
+                      : "unknown"
+                }
+              >
+                {entity.verified_claims > 0 ? `${entity.verified_claims} verified` : "unverified"}
                 {entity.stale_claims > 0 && ` · ${entity.stale_claims} stale`}
                 {entity.disputed_claims > 0 && ` · ${entity.disputed_claims} disputed`}
                 {entity.status === "archived" && " · archived"}

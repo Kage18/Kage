@@ -59,4 +59,5 @@ export interface DesktopSession {
   elapsed_s: number;
   step: string | null;
   ticks: Array<{ recall: boolean; weight: number }>;
+  recalls: number;
 }

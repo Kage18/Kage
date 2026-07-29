@@ -229,6 +229,7 @@ Usage:
   kage daemon status --project <dir> [--json]
   kage daemon doctor --project <dir> [--json]
   kage viewer --project <dir> [--port 3113]
+  kage app [--project <dir>]                   open the desktop app (supervises a daemon per repo)
   kage hook install --project <dir> [--json]
   kage hook status --project <dir> [--json]
   kage hook uninstall --project <dir> [--json]
@@ -1509,6 +1510,28 @@ async function main(): Promise<void> {
       return;
     }
     usage();
+  }
+
+  if (command === "app") {
+    if (args.includes("--help")) {
+      console.log("kage app — open the Kage desktop app.");
+      console.log("");
+      console.log("Usage:  kage app [--project <dir>]");
+      console.log("");
+      console.log("The app supervises a daemon per watched repository, so there is no port to");
+      console.log("remember and no `kage viewer` to leave running. --project adds that repository");
+      console.log("to the watch list on the way in; without it, the app opens where you left it.");
+      console.log("");
+      console.log("Installed as an application (Kage.app), this opens it. From a source checkout it");
+      console.log("runs the built shell in platform/desktop, which needs `npm start --prefix");
+      console.log("platform/desktop` at least once to build.");
+      return;
+    }
+    const { openDesktopApp } = await import("./vnext/desktop/launch.js");
+    const result = openDesktopApp({ project_dir: args.includes("--project") ? projectArg(args) : null });
+    console.log(result.message);
+    if (!result.ok) process.exit(1);
+    return;
   }
 
   if (command === "viewer") {

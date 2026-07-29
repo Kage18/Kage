@@ -26,8 +26,14 @@ export interface RunningSession {
   elapsed_s: number;
   /** The latest step the agent reported, already summarised. */
   step: string | null;
-  /** Ticks: one per tool call. `recall` marks a moment Kage injected a memory mid-run. */
+  /** Ticks: one per tool call, directly observed from the agent's own stream. */
   ticks: Array<{ recall: boolean; weight: number }>;
+  /**
+   * How many times memory actually reached the agent, counted from the proxy's delivery records
+   * for this session's task. Exact — the app chose the proxy's session id, so its receipts are
+   * attributable by construction rather than by timing.
+   */
+  recalls?: number;
 }
 
 function clock(seconds: number): string {
@@ -97,7 +103,8 @@ function RunningBand({
   return (
     <ul className="running-list">
       {sessions.map((session) => {
-        const recalls = session.ticks.filter((tick) => tick.recall).length;
+        // Prefer the MEASURED count from the receipts; fall back to marked ticks.
+        const recalls = session.recalls ?? session.ticks.filter((tick) => tick.recall).length;
         return (
           <li key={session.session_id} className="running-session">
             <div className="running-head">
@@ -108,9 +115,9 @@ function RunningBand({
             <RunStrip ticks={session.ticks} />
             <div className="running-foot">
               <span className="fact running-step">{session.step ?? "starting…"}</span>
-              {/* A recall count of zero is left as a dash: no green tick has been recorded, and
-                  "0 recalls" would read as a measurement that memory did not help, when what is
-                  true is that attribution has not been wired for this run. */}
+              {/* Zero is left as a dash until a delivery is actually recorded. Early in a run
+                  nothing has been delivered yet, and "0 recalls" would read as a measurement that
+                  memory did not help rather than one that has not happened yet. */}
               <span className="fact running-recalls" data-confidence={recalls > 0 ? "measured" : "unknown"}>
                 {recalls > 0 ? `${recalls} recalls` : "—"}
               </span>

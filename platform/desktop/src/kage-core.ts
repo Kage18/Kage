@@ -139,6 +139,9 @@ export interface KageCore {
     all(): DaemonStatus[];
   };
 
+  /** The proxy's task id for a session id — the join key that makes receipts attributable. */
+  proxyTaskId(projectRoot: string, sessionId: string): string;
+
   /** The daemon's own hardened portal resolver — traversal-safe, with SPA fallback. */
   resolvePortalDir(baseDir: string): string;
   resolveAppAsset(appDir: string, pathname: string): string | null;
@@ -162,7 +165,10 @@ export function loadKageCore(resourcesPath: string): KageCore {
   const alerts = require(join(dir, "vnext", "desktop", "alerts.js"));
   const supervisor = require(join(dir, "vnext", "desktop", "supervisor.js"));
   const sessionMod = require(join(dir, "vnext", "desktop", "session.js"));
-  const daemon = require(join(dir, "daemon.js"));
+  // portal-assets, NOT daemon.js or anthropic-proxy.js. Those pull kernel.js -> `typescript`, and
+  // the packaged app ships mcp/dist WITHOUT node_modules — requiring them killed the packaged app
+  // on launch ("Cannot find module 'typescript'") while working perfectly from a source checkout.
+  const portalAssets = require(join(dir, "vnext", "desktop", "portal-assets.js"));
   /* eslint-enable @typescript-eslint/no-var-requires */
 
   return {
@@ -177,8 +183,9 @@ export function loadKageCore(resourcesPath: string): KageCore {
     daemonOrigin: protocolMod.daemonOrigin,
     decideAlerts: alerts.decideAlerts,
     DaemonSupervisor: supervisor.DaemonSupervisor,
-    resolvePortalDir: daemon.resolvePortalDir,
-    resolveAppAsset: daemon.resolveAppAsset,
+    proxyTaskId: portalAssets.proxyTaskId,
+    resolvePortalDir: portalAssets.resolvePortalDir,
+    resolveAppAsset: portalAssets.resolveAppAsset,
     newSession: sessionMod.newSession,
     agentCommand: sessionMod.agentCommand,
     agentEnv: sessionMod.agentEnv,

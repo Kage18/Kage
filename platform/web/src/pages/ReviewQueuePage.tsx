@@ -289,9 +289,9 @@ export function ReviewQueuePage({
       {/* The identity control belongs INSIDE the header, under the title. Hoisted above the
           h1 by its container, it read as a stray widget floating above the page, and the
           identity was then stated twice — once as a control and once as prose. */}
-      <header className="page-header">
+      <header>
         <h1>Review queue</h1>
-        <div className="entity-card-header">
+        <div className="board-head">
           <label className="muted" htmlFor="review-acting-as">
             Acting as
           </label>

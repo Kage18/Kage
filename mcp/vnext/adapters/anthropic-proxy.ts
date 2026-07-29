@@ -230,12 +230,10 @@ export function parseResponseText(raw: string): string {
   return blocks.join("\n");
 }
 
-// Stable per-(repo, session) task id, in the same shape the Claude adapter uses, so proxy receipts
-// and hook events can be attributed to the same task later.
-export function proxyTaskId(projectRoot: string, sessionId: string): string {
-  const digest = createHash("sha256").update(`${projectRoot}|${sessionId}`).digest("hex").slice(0, 32);
-  return `task_${digest}`;
-}
+// Moved to ../desktop/portal-assets.ts so the desktop shell can compute it without loading this
+// module's receipt/pricing chain. Re-exported: one implementation, every importer unaffected.
+export { proxyTaskId } from "../desktop/portal-assets.js";
+
 
 export interface ProxyReceiptInput {
   task_id: string;

@@ -2538,3 +2538,188 @@ code {
 }
 
 .decision-outcome { margin-top: var(--space-2); color: var(--color-text-muted); }
+
+/* ── First run ─────────────────────────────────────────────────────────────────────────────── */
+
+.firstrun {
+  max-width: 30rem;
+  padding-top: var(--space-8);
+}
+
+.firstrun-mark {
+  width: 26px;
+  height: 26px;
+  color: var(--color-accent);
+  margin-bottom: var(--space-5);
+}
+
+.firstrun-title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-normal);
+  letter-spacing: -0.01em;
+}
+
+.firstrun-lede {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+  letter-spacing: var(--tracking-sans);
+}
+
+.firstrun-note { margin: 0 0 var(--space-5); color: var(--lum-quiet); }
+.firstrun-error { margin-bottom: var(--space-3); }
+
+.firstrun-action {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-accent);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent-contrast);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-sans);
+}
+
+.firstrun-action:disabled { opacity: 0.5; }
+
+/* ── Detail pages ────────────────────────────────────────────────────────────────────────────
+   One subject read top to bottom, so bands separated by space — not a stack of bordered cards,
+   which would say these are peers. */
+
+.detail-back {
+  margin: 0 0 var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.detail-back a { color: var(--color-text-muted); text-decoration: none; }
+.detail-back a:hover { color: var(--color-text); }
+
+.detail-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-normal);
+  letter-spacing: -0.01em;
+}
+
+.detail-identity { margin: 0 0 var(--space-5); color: var(--lum-quiet); }
+
+.detail-prose,
+.detail-body {
+  margin: 0 0 var(--space-6);
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+  letter-spacing: var(--tracking-sans);
+}
+
+.detail-prose { margin-bottom: var(--space-6); }
+
+.detail-paths,
+.detail-dependents,
+.detail-weak,
+.detail-errors {
+  margin: 0 0 var(--space-6);
+  color: var(--lum-quiet);
+  word-break: break-word;
+}
+
+.detail-knowledge { margin-bottom: var(--space-6); }
+
+/* The derivation trail: stage, why, when. The middle column is the answer the page exists for, so
+   it gets the readable face while the other two stay machine-voiced. */
+.derivation {
+  list-style: none;
+  margin: 0 0 var(--space-6);
+  padding: 0;
+}
+
+.derivation li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+}
+
+.derivation-stage { width: 5.5rem; flex-shrink: 0; color: var(--color-text); }
+
+.derivation-why {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+.derivation-when { color: var(--lum-quiet); flex-shrink: 0; }
+
+.commit-list {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+}
+
+.commit-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+}
+
+.commit-hash { width: 5rem; flex-shrink: 0; color: var(--color-text); }
+.commit-branch { flex: 1; min-width: 0; color: var(--color-text-muted); }
+.commit-confidence[data-confidence="measured"] { color: var(--color-accent); }
+.commit-confidence[data-confidence="derived"] { color: var(--lum-quiet); }
+
+/* ── Knowledge rows ──────────────────────────────────────────────────────────────────────────
+   Shared by Knowledge and the per-kind lists, so an entry looks the same wherever it is read. */
+
+.knowledge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.knowledge-row {
+  padding-bottom: var(--space-4);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.knowledge-row:last-child { border-bottom: 0; }
+
+.knowledge-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-1);
+}
+
+.knowledge-kind { color: var(--lum-quiet); }
+
+/* The health rung, and the reason it is not just a count: a claim nobody verified must not read
+   like one that was. Unverified recedes; anything stale or disputed comes forward. */
+.knowledge-health { margin-left: auto; }
+.knowledge-health[data-confidence="measured"] { color: var(--color-accent); }
+.knowledge-health[data-confidence="attention"] { color: var(--color-warning); }
+.knowledge-health[data-confidence="unknown"] { color: var(--lum-quiet); }
+
+.knowledge-title {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text);
+  text-decoration: none;
+  letter-spacing: var(--tracking-sans);
+}
+
+.knowledge-title:hover { color: var(--color-accent); }
+
+.knowledge-summary {
+  margin: 0;
+  max-width: 72ch;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+  letter-spacing: var(--tracking-sans);
+}

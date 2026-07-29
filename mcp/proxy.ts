@@ -281,7 +281,13 @@ export function startProxy(projectDir: string, options: ProxyOptions = {}): Serv
   // that hook/proxy overlap risk (the proxy has no visibility into Claude Code's own session
   // id), but it does make repeat requests within one run correctly dedupe, and makes
   // proxy-captured observations clearly attributable in `.agent_memory/observations`.
-  const sessionId = `proxy-${randomUUID()}`;
+  //
+  // A caller that SUPERVISES this proxy may set the id, and the desktop app does: it starts one
+  // proxy per agent session, so a caller-supplied id makes `proxyTaskId(projectRoot, sessionId)`
+  // computable up front and every receipt attributable to that session BY CONSTRUCTION. The
+  // alternative is matching receipts to a session on timing, which the correlation ladder refuses
+  // everywhere else and would be no more honest here. Absent the variable, behaviour is unchanged.
+  const sessionId = process.env.KAGE_PROXY_SESSION_ID?.trim() || `proxy-${randomUUID()}`;
 
   const server = createServer((clientReq, clientRes) => {
     void handle(clientReq, clientRes);

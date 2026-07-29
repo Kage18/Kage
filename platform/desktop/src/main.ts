@@ -296,6 +296,10 @@ async function addRepositoryByDialog(): Promise<void> {
 interface LiveSession {
   session: AgentSession;
   repo: string;
+  /** The proxy's session id, which WE chose — see startSession. */
+  proxySessionId: string;
+  /** Deliveries the proxy recorded for this session: memory that actually reached the agent. */
+  recalls: number;
   /** Echoed back from the start request: main has no way to resolve a work id to a title. */
   workTitle: string | null;
   proxyPort: number;
@@ -324,9 +328,13 @@ function publicSessions() {
     state: live.session.state,
     elapsed_s: Math.round((Date.now() - live.startedAt) / 1000),
     step: [...live.session.events].reverse().find((e) => e.kind === "tool")?.summary ?? null,
-    // No recall data is supplied yet, so the strip shows tool ticks and NO recall marks rather
-    // than inventing them. Wiring the proxy's per-turn injection record is the next step.
+    // Tool ticks come from the agent's own stream, so every one is directly observed.
+    //
+    // Recall POSITIONS are deliberately absent: `context_deliveries` records a delivery but not
+    // which request it rode on, so placing a green tick on a specific turn would be a guess.
+    // The COUNT is exact — see `recalls`, read from the receipt for this session's task.
     ticks: core.stripTicks(live.session.events),
+    recalls: live.recalls,
   }));
 }
 
@@ -364,13 +372,16 @@ async function startSession(input: {
 
   const proxyPort = freeSessionPort();
   const sessionId = `kage-${Date.now()}-${proxyPort}`;
+  // WE choose the proxy's session id, so its receipts are attributable to this session by
+  // construction rather than by timing. `proxy.ts` honours KAGE_PROXY_SESSION_ID.
+  const proxySessionId = `kage-session-${sessionId}`;
 
   // The proxy first, in assist mode — assist is what injects memory, which is the entire point of
   // running the agent through Kage rather than directly.
   const proxyProcess = spawn(
     resolveNodeBinary(),
     [cliPathFor(coreDir), "proxy", "--project", input.repo, "--port", String(proxyPort), "--mode", "assist"],
-    { cwd: input.repo, stdio: "ignore" },
+    { cwd: input.repo, stdio: "ignore", env: { ...process.env, KAGE_PROXY_SESSION_ID: proxySessionId } },
   );
 
   // Spawning is not listening. Wait, or the agent's first request hits a closed port.
@@ -394,6 +405,8 @@ async function startSession(input: {
     session: core.newSession({ session_id: sessionId, work_id: input.work_id, agent: input.agent }),
     repo: input.repo,
     workTitle: input.work_title,
+    proxySessionId,
+    recalls: 0,
     proxyPort,
     agentProcess,
     proxyProcess,
@@ -416,6 +429,7 @@ async function startSession(input: {
       }
     }
     pushSessions();
+    void refreshRecalls(sessionId);
   });
 
   agentProcess.on("error", (error) => {
@@ -425,6 +439,35 @@ async function startSession(input: {
   agentProcess.on("exit", (code) => endSession(sessionId, code));
 
   return { ok: true };
+}
+
+/**
+ * How much memory actually reached this session's agent.
+ *
+ * Exact, not inferred: the proxy's session id is the one WE set, so `proxyTaskId` names its task
+ * and every delivery on that task belongs to this session. A `delivered` record IS a moment memory
+ * was injected. Positions on the strip stay unmarked because `context_deliveries` does not record
+ * which request a delivery rode on — the count is measured, the placement would be a guess.
+ */
+async function refreshRecalls(id: string): Promise<void> {
+  const live = sessions.get(id);
+  const repo = live && state.repos.find((entry) => entry.path === live.repo);
+  if (!live || !repo) return;
+  try {
+    const taskId = core.proxyTaskId(live.repo, live.proxySessionId);
+    const response = await net.fetch(
+      `${core.daemonOrigin(repo.port)}/v2/tasks/${encodeURIComponent(taskId)}`,
+    );
+    if (!response.ok) return;
+    const body = (await response.json()) as { deliveries?: Array<{ status: string }> };
+    const delivered = (body.deliveries ?? []).filter((d) => d.status === "delivered").length;
+    if (delivered !== live.recalls) {
+      live.recalls = delivered;
+      pushSessions();
+    }
+  } catch {
+    // The receipt lands after the request completes; a miss here is normal, never an error.
+  }
 }
 
 function stopSession(id: string): void {

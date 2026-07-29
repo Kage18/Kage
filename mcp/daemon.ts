@@ -194,39 +194,13 @@ export function appRedirectLocation(pathname: string): string | null {
   return pathname === "/app" ? "/app/" : null;
 }
 
-// Where the built knowledge portal lives, resolved from the daemon's own directory (`__dirname`,
-// i.e. mcp/dist at runtime). It ships INSIDE the npm package at `dist/app` (bundled from
-// platform/web/dist at publish time); a source checkout has no such bundle and serves straight from
-// the monorepo build two levels up. Prefer whichever actually has an index.html; when neither does
-// (portal never built), return the bundled path so `/app/` yields a coherent portal_not_built 404
-// rather than pointing at a stray directory.
-//
-// This exists because 4.0.0 shipped only the monorepo path — which does not exist in an installed
-// package — so `/app/` 404'd for every npm user while working from source. Bundled-first fixes that.
-export function resolvePortalDir(baseDir: string): string {
-  const bundled = resolve(baseDir, "app");
-  const monorepo = resolve(baseDir, "..", "..", "platform", "web", "dist");
-  for (const candidate of [bundled, monorepo]) {
-    if (existsSync(join(candidate, "index.html"))) return candidate;
-  }
-  return bundled;
-}
+// The portal resolvers moved to vnext/desktop/portal-assets.ts, which imports node builtins only.
+// The desktop shell needs them, and requiring them from here dragged in kernel.js -> typescript,
+// which the packaged app does not ship. Re-exported so every existing importer is unaffected and
+// there is still exactly one implementation.
+import { resolvePortalDir, resolveAppAsset } from "./vnext/desktop/portal-assets.js";
+export { resolvePortalDir, resolveAppAsset };
 
-// Resolve an `/app/...` request to a file inside the built knowledge portal (`platform/web/dist`).
-// Returns null for non-`/app` paths (the caller handles those). Real built assets resolve to
-// themselves; the entry and any client-side deep link (a path with no matching file) fall back to
-// `index.html` so History-API routing works; path traversal outside the build dir is refused by
-// falling back to the entry rather than escaping. The daemon serves the result under the SAME strict
-// `viewerStaticHeaders` CSP as the legacy viewer — self-hosted assets only.
-export function resolveAppAsset(appDir: string, pathname: string): string | null {
-  if (pathname !== "/app" && pathname !== "/app/" && !pathname.startsWith("/app/")) return null;
-  const index = join(appDir, "index.html");
-  if (pathname === "/app" || pathname === "/app/") return index;
-  const candidate = join(appDir, normalize(pathname.replace(/^\/app\//, "")));
-  if (!isInside(appDir, candidate)) return index; // never escape the build dir
-  if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
-  return index; // SPA fallback for client-side routes
-}
 
 // Fill an overview response's repository branch/commit from the working tree's live git position when
 // the model left them null. Best-effort and silent: not a git repo, or git unavailable, leaves them
