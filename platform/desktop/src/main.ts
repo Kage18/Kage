@@ -22,6 +22,8 @@ import {
   protocol,
   shell,
   Tray,
+  utilityProcess,
+  type UtilityProcess,
 } from "electron";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -139,22 +141,14 @@ async function handleProtocol(request: Request): Promise<Response> {
   }
 
   if (decision.kind === "forward") {
-    const target = `${core.daemonOrigin(active!.port)}${decision.pathname}${decision.search}`;
-    try {
-      const init: RequestInit = { method: request.method, headers: request.headers };
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        init.body = await request.arrayBuffer();
-      }
-      const response = await net.fetch(target, init);
-      if (DEBUG) console.log(`[kage://]   forwarded to ${target} -> ${response.status}`);
-      return response;
-    } catch (error) {
-      if (DEBUG) console.error(`[kage://]   forward FAILED ${target}:`, error);
-      return new Response(
-        JSON.stringify({ ok: false, error: `the repository daemon is not answering: ${String(error)}` }),
-        { status: 502, headers: { "content-type": "application/json" } },
-      );
-    }
+    // In-process, through the worker. No socket, so there is nothing to time out, exhaust or
+    // leak — and a slow derivation cannot starve the requests behind it.
+    const reply = await callApi(active!.path, decision.pathname, decision.search);
+    if (DEBUG) console.log(`[kage://]   worker ${decision.pathname} -> ${reply.status}`);
+    return new Response(JSON.stringify(reply.body), {
+      status: reply.status,
+      headers: { "content-type": "application/json" },
+    });
   }
 
   // The daemon's own resolver: refuses traversal by falling back to the entry, and serves
@@ -284,6 +278,75 @@ async function addRepositoryByDialog(): Promise<void> {
   state = result.state;
   persist();
   await startRepo(result.repo!.path);
+}
+
+// ── The API worker ───────────────────────────────────────────────────────────────────────────
+//
+// Reads no longer travel over HTTP to a separate daemon. They go to an Electron utility process
+// that calls the same dispatcher the daemon uses. Deleted with the daemon: ports, supervision,
+// health probes, cold-start races, and a forwarder that leaked a socket per SSE reconnect.
+//
+// The worker is a real process, so a synchronous derivation blocks neither the window nor the next
+// request — which the daemon could not manage, being single-threaded. Measured: /v2/overview alone
+// 0.059s, the same call while a board derived 12.65s.
+
+// A POOL, not one worker, and the difference is the whole point: a utility process is still a
+// single event loop, and the heavy work here is synchronous. One worker would serialise reads and
+// reproduce exactly the head-of-line blocking this refactor exists to remove — measured on the
+// daemon as /v2/overview taking 12.65s when issued while a board derived, against 0.059s alone.
+//
+// Three is chosen against the shape of the work rather than the machine: at most one genuinely
+// expensive read (a cold board) is ever in flight, and everything else is fast, so two free lanes
+// is enough for the slow one never to be in anybody's way.
+const WORKER_COUNT = 3;
+
+interface Worker {
+  process: UtilityProcess;
+  /** Requests currently assigned to it — the pool sends the next read to the quietest lane. */
+  inFlight: number;
+}
+
+let workers: Worker[] = [];
+let nextRequestId = 1;
+const pending = new Map<number, { resolve: (reply: { status: number; body: unknown }) => void; worker: Worker }>();
+
+function spawnWorker(): Worker {
+  const worker: Worker = { process: utilityProcess.fork(join(__dirname, "api-host.js")), inFlight: 0 };
+  worker.process.on("message", (reply: { id: number; status: number; body: unknown }) => {
+    const waiting = pending.get(reply.id);
+    if (!waiting) return;
+    pending.delete(reply.id);
+    waiting.worker.inFlight -= 1;
+    waiting.resolve({ status: reply.status, body: reply.body });
+  });
+  // A worker that dies takes its in-flight reads with it. Fail them explicitly rather than leaving
+  // promises that never settle — an unsettled promise is what left the window on "Loading
+  // repository knowledge…" forever under the daemon, and it is the worst possible failure mode.
+  worker.process.on("exit", () => {
+    for (const [id, waiting] of pending) {
+      if (waiting.worker !== worker) continue;
+      waiting.resolve({ status: 503, body: { ok: false, error: "the Kage worker stopped" } });
+      pending.delete(id);
+    }
+    workers = workers.filter((entry) => entry !== worker);
+  });
+  return worker;
+}
+
+function startApiWorker(): void {
+  while (workers.length < WORKER_COUNT) workers.push(spawnWorker());
+}
+
+function callApi(projectDir: string, pathname: string, search: string): Promise<{ status: number; body: unknown }> {
+  startApiWorker();
+  // Least-busy, so a lane stuck on a cold board is simply not chosen.
+  const worker = workers.reduce((best, entry) => (entry.inFlight < best.inFlight ? entry : best), workers[0]);
+  const id = nextRequestId++;
+  worker.inFlight += 1;
+  return new Promise((resolve) => {
+    pending.set(id, { resolve, worker });
+    worker.process.postMessage({ id, coreDir, projectDir, pathname, search });
+  });
 }
 
 // ── The live feed ────────────────────────────────────────────────────────────────────────────
@@ -698,17 +761,20 @@ app.whenReady().then(async () => {
   // closed port, and the SPA has no retry — it sits on "Loading repository knowledge…" forever
   // even though the daemon comes up a second later. So the active repository's daemon is awaited
   // BEFORE the window exists.
-  const active = core.activeRepo(state);
-  if (active) {
-    await startRepo(active.path);
-    startLiveFeed(active.path, active.port);
-  }
-
+  // The window no longer waits for anything: reads go to the worker, which starts on first use
+  // and needs no port. The daemon start that used to gate this is gone, and with it the cold-start
+  // race that left the window on "Loading repository knowledge…" forever.
+  startApiWorker();
   window = createWindow();
 
-  // The rest can come up behind the window — nothing is fetching them yet.
+  // Daemons still run, but ONLY for the live feed — watching the filesystem is genuinely a
+  // server's job. Nothing reads through them, so they start behind the window and a slow one
+  // costs nothing but a late "Live" indicator.
+  const active = core.activeRepo(state);
   for (const repo of state.repos) {
-    if (repo.path !== active?.path) await startRepo(repo.path);
+    void startRepo(repo.path).then(() => {
+      if (repo.path === active?.path) startLiveFeed(repo.path, repo.port);
+    });
   }
   void pollAll();
   setInterval(() => void pollAll(), POLL_MS);
@@ -724,6 +790,7 @@ app.on("window-all-closed", () => { /* stay resident */ });
 // kill. Agents first: they are the ones that cost money while nobody is watching.
 app.on("before-quit", () => {
   stopLiveFeed();
+  for (const worker of workers) worker.process.kill();
   for (const id of [...sessions.keys()]) stopSession(id);
   supervisor?.stopAll();
 });
