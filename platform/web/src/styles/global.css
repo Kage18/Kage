@@ -114,6 +114,26 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* The one primary action per view (start an agent, confirm in a sheet). Everything else on the
+   page stays the bare/outlined default above — without this, every button looked equally
+   important, which is the same "no hierarchy" problem the type scale had. */
+.button-primary {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-semibold);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.button-primary:active:not(:disabled) {
+  background: var(--color-accent-active);
+  border-color: var(--color-accent-active);
+}
+
 /* ---- App shell layout ---- */
 
 .kage-app {
@@ -189,17 +209,34 @@ button:disabled {
   color: var(--color-accent);
 }
 
-/* Groups are separated by SPACE, not by a rendered caption. */
+/* Groups now carry a real, if quiet, caption — a small-caps label a few shades above the
+   ground, well below the weight of a link. Zero visible grouping cues (the previous
+   space-only treatment) relied entirely on spatial memory; this restores structure without
+   bringing back the loud enterprise-dashboard caption the original pass reacted against. */
+.nav-group-block {
+  margin: 0 0 var(--space-4);
+}
+
+.nav-group-block:last-of-type {
+  margin-bottom: 0;
+}
+
+.nav-group-label {
+  display: block;
+  padding: 0 var(--space-4) var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+}
+
 .nav-group {
   list-style: none;
-  margin: 0 0 var(--space-4);
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-}
-
-.nav-group:last-of-type {
-  margin-bottom: 0;
 }
 
 .shell-nav a {
@@ -214,6 +251,16 @@ button:disabled {
   color: var(--color-text-muted);
   text-decoration: none;
   line-height: 1.9;
+}
+
+.shell-nav a svg {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.shell-nav a[aria-current="page"] svg {
+  opacity: 1;
+  color: var(--color-accent);
 }
 
 /* Deliberately NO web-style hover highlight on rows: macOS list items do not light up under the
@@ -234,6 +281,23 @@ button:disabled {
 .shell-nav-foot {
   margin-top: auto;
   padding: var(--space-4) var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.shell-preferences-link {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.shell-preferences-link:hover,
+.shell-preferences-link:focus-visible {
+  color: var(--color-text);
+}
+
+.shell-preferences-link[aria-current="page"] {
+  color: var(--color-accent);
 }
 
 /* ── Desktop window chrome ───────────────────────────────────────────────────────────────────
@@ -302,9 +366,123 @@ button:disabled {
 }
 
 .repo-switcher .repo-branch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
   color: var(--lum-quiet);
   font-size: var(--font-size-xs);
   font-family: var(--font-mono);
+}
+
+.repo-branch svg {
+  flex-shrink: 0;
+}
+
+/* The switcher trigger sits inside a positioning root so the menu can float over the sidebar
+   without pushing content, and the root is what the outside-click/Escape handling measures
+   against. */
+.repo-switcher-root {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.repo-menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 20;
+  width: max(100%, 15rem);
+  max-width: 20rem;
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  background: var(--color-surface-overlay);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+.repo-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.repo-menu-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.repo-menu-switch:hover,
+.repo-menu-switch:focus-visible {
+  background: var(--color-surface);
+}
+
+.repo-menu-switch[aria-current="true"] {
+  color: var(--color-accent);
+}
+
+.repo-menu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+}
+
+.repo-menu-state {
+  font-size: var(--font-size-xs);
+  color: var(--lum-quiet);
+}
+
+.repo-menu-remove {
+  padding: var(--space-1) var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--lum-quiet);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.repo-menu-remove:hover,
+.repo-menu-remove:focus-visible {
+  color: var(--color-warning);
+  background: var(--color-surface);
+}
+
+.repo-menu-add {
+  width: 100%;
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  color: var(--color-accent);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.repo-menu-add:hover,
+.repo-menu-add:focus-visible {
+  background: var(--color-surface);
 }
 
 /* ---- Status badge ---- */
@@ -349,11 +527,11 @@ button:disabled {
 /* ---- Generic content helpers ---- */
 
 .card {
-  background: var(--color-surface);
+  background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: var(--space-5);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 
 .muted {
@@ -425,11 +603,11 @@ button:disabled {
 /* ---- Metric card ---- */
 
 .metric-card {
-  background: var(--color-surface);
+  background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -443,10 +621,11 @@ button:disabled {
 }
 
 .metric-value {
-  font-size: var(--font-size-2xl);
+  font-size: var(--font-size-3xl);
   font-weight: var(--font-weight-bold);
   margin: 0;
-  line-height: 1.1;
+  line-height: var(--line-height-tight);
+  font-variant-numeric: tabular-nums;
 }
 
 /* An unmeasured value is muted and normal-weight so it never reads as a real, emphasized number. */
@@ -1266,7 +1445,7 @@ button:disabled {
   border-left: 3px solid var(--color-accent);
   border-radius: var(--radius-lg);
   padding: var(--space-5);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 .value-hero-lede {
   margin: 0 0 var(--space-4);
@@ -1328,15 +1507,6 @@ button:disabled {
 /* Shared chrome for the orchestrator pages (Attention, Work, Proof). These classes were used
    by every one of those pages and styled by none of them, so cards had no borders and inline
    spans ran together — "verifying" collided with "claimed by kushal" with no space at all. */
-.page-header {
-  margin-bottom: var(--space-5);
-}
-.page-subtitle {
-  margin: var(--space-2) 0 0;
-  max-width: 70ch;
-  color: var(--color-text-muted);
-  line-height: 1.5;
-}
 .entity-list {
   list-style: none;
   padding: 0;
@@ -1376,6 +1546,12 @@ button:disabled {
   color: var(--color-text-muted);
   line-height: 1.5;
   max-width: 70ch;
+}
+
+.empty-state-icon {
+  display: inline-flex;
+  margin-bottom: var(--space-3);
+  color: var(--lum-quiet);
 }
 
 /* Ledger detail cards. */
@@ -1654,9 +1830,27 @@ button:disabled {
   border-bottom: 1px solid var(--color-border);
 }
 
+/* Title and an optional action (a button, an actor input) on one line — the same
+   title-plus-control pattern `.board-head` used to implement on its own, before WorkPage
+   adopted PageHeader. */
+.page-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
 .page-header h1 {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   letter-spacing: -0.02em;
+}
+
+.page-header h1 svg {
+  color: var(--color-text-muted);
 }
 
 .page-subtitle {
@@ -1917,12 +2111,94 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Shared list row ─────────────────────────────────────────────────────────────────────────
+   One recipe for every "row of things" in the app — running agents, commits, decisions,
+   knowledge entries — instead of each list inventing its own column widths. An icon slot gives
+   a reader something other than color+text to scan by; the primary identifier is promoted to
+   medium weight and full-contrast text so it visually outranks its own metadata; a hover
+   background is the one cue (besides an underline on hover) that a row is actually a target,
+   not a printed table cell. */
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--space-7);
+  padding: var(--space-2) var(--space-3);
+  margin: 0 calc(var(--space-3) * -1) var(--space-2);
+  border-radius: var(--radius-md);
+  /* Visible at rest, not just on hover — a row that only reveals its surface when the mouse
+     happens to be over it is indistinguishable from plain text in a screenshot or a glance. */
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+a.list-row,
+button.list-row {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  font: inherit;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.list-row:hover {
+  background: var(--color-surface-raised);
+  border-color: color-mix(in srgb, var(--color-accent) 25%, var(--color-border));
+  box-shadow: var(--shadow-1);
+}
+
+.list-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-overlay);
+  color: var(--color-text-muted);
+}
+
+.list-row[data-confidence="measured"] .list-row-icon { background: var(--color-success-tint); color: var(--color-success); }
+.list-row[data-confidence="critical"] .list-row-icon { background: var(--color-critical-tint); color: var(--color-critical); }
+.list-row[data-confidence="attention"] .list-row-icon { background: var(--color-warning-tint); color: var(--color-warning); }
+
+.list-row-primary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+  letter-spacing: var(--tracking-sans);
+}
+
+.list-row-meta {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .activity-band {
   margin: 0 0 var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   letter-spacing: 0.04em;
   color: var(--lum-quiet);
+}
+
+.activity-band-sub {
+  color: var(--lum-quiet);
+  font-weight: var(--font-weight-normal);
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: var(--space-2);
 }
 
 .activity-empty {
@@ -1940,7 +2216,40 @@ code {
   padding: 0;
 }
 
-.running-session + .running-session { margin-top: var(--space-6); }
+/* Sessions read as instruments being watched, not rows in a table — a grid of cards, each with
+   its own frame, rather than a stacked list. */
+.sessions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--space-4);
+}
+
+.running-session {
+  position: relative;
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+/* Corner brackets: quiet by default, lit to the accent only when this session has a real,
+   measured recall delivery — never a fabricated "catch" state. */
+.running-session::before,
+.running-session::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-color: var(--lum-quiet);
+}
+.running-session::before { top: 0; left: 0; border-top: 1px solid; border-left: 1px solid; }
+.running-session::after { bottom: 0; right: 0; border-bottom: 1px solid; border-right: 1px solid; }
+.running-session[data-confidence="measured"]::before,
+.running-session[data-confidence="measured"]::after {
+  border-color: var(--color-accent);
+}
+.running-session[data-confidence="measured"] {
+  box-shadow: var(--glow-measured);
+}
 
 .running-head,
 .running-foot {
@@ -1967,16 +2276,41 @@ code {
   color: var(--lum-quiet);
 }
 
-/* The run strip. A tick is a tool call; a full-height accent tick is a moment memory reached the
-   agent. Nothing here is smoothed or interpolated — one rect per recorded event. */
+/* The run strip: a run plotted on TIME, not on list order.
+   A short dim tick is a tool call at the moment the app observed it. A full-height lit mark with a
+   cap is a moment the proxy recorded that memory reached the agent. Spacing is real elapsed time, so
+   a run that stalled looks stalled — and nothing is smoothed, interpolated, or inferred.
+   Every stroke opts out of the viewBox stretch, so a tick stays crisp at any card width. */
 .run-strip {
   display: block;
+  width: 100%;
   margin: var(--space-3) 0;
   overflow: visible;
 }
 
-.run-tick { fill: var(--lum-unknown); }
-.run-tick-recall { fill: var(--color-accent); }
+.run-axis {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.run-tick {
+  stroke: var(--lum-quiet);
+  stroke-width: 2;
+  stroke-linecap: butt;
+}
+
+/* Shape carries the state before colour does: a recall is TALLER and CAPPED, so it survives with
+   colour switched off — the palette's success green and critical red sit at ΔE 2.1 under
+   deuteranopia, which is why nothing here may rest on hue alone. */
+.run-recall > line {
+  stroke: var(--color-accent);
+  stroke-width: 2;
+}
+
+.run-recall-cap {
+  stroke-width: 6;
+  stroke-linecap: butt;
+}
 
 .activity-blocking {
   display: flex;
@@ -2009,7 +2343,17 @@ code {
   display: flex;
   align-items: baseline;
   gap: var(--space-4);
-  padding: var(--space-1) 0;
+  padding: var(--space-2) var(--space-3);
+  margin: 0 calc(var(--space-3) * -1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+.finished-list li:hover,
+.observed-list li:hover {
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-1);
 }
 
 .finished-title {
@@ -2018,6 +2362,7 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: var(--font-weight-medium);
   color: var(--color-text-muted);
   text-decoration: none;
   letter-spacing: var(--tracking-sans);
@@ -2048,12 +2393,6 @@ code {
 
 .observed-count[data-confidence="measured"] { color: var(--color-accent); }
 .observed-count[data-confidence="unknown"] { color: var(--lum-quiet); }
-
-.activity-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: var(--space-5);
-}
 
 .activity-start,
 .running-stop {
@@ -2100,9 +2439,10 @@ code {
   max-width: 34rem;
   max-height: 88vh;
   padding: var(--space-5);
-  background: var(--color-surface-raised);
+  background: var(--color-surface-overlay);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
 }
 
 .sheet-title {
@@ -2129,6 +2469,34 @@ code {
   font: inherit;
   font-size: var(--font-size-sm);
 }
+
+/* Why the list is empty, said where the empty list is — a repository with nothing derived yet must
+   explain itself rather than leave the reader to guess the app is broken. */
+.sheet-note {
+  margin: calc(var(--space-4) * -1 + var(--space-1)) 0 var(--space-4);
+  max-width: 52ch;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+/* The typed task. Mono, because what goes in this box is sent verbatim to a machine — the same
+   reason the exact prompt below it is mono. */
+.sheet-task {
+  width: 100%;
+  margin-bottom: var(--space-4);
+  padding: var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+  resize: vertical;
+}
+
+.sheet-task::placeholder { color: var(--lum-quiet); }
 
 .sheet-agents {
   display: flex;
@@ -2385,7 +2753,14 @@ code {
   font-size: var(--font-size-sm);
 }
 
-.board-group { margin-bottom: var(--space-6); }
+/* Stages sit side-by-side as columns — what is being built and what nobody has picked up are
+   different questions, and a flat stacked list answers neither at a glance. */
+.board-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  gap: var(--space-5);
+  align-items: start;
+}
 
 .board-group-head {
   display: flex;
@@ -2406,9 +2781,16 @@ code {
 /* A rail, not a card: the Board is the one dense list view where whitespace alone cannot scale,
    which is exactly the case the rail vocabulary was kept for. */
 .board-card {
+  background: var(--color-surface);
   border-left: var(--rail-width) solid var(--lum-unknown);
-  padding: 2px 0 2px var(--space-3);
-  margin-bottom: var(--space-4);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  transition: box-shadow 0.12s ease;
+}
+
+.board-card:hover {
+  box-shadow: var(--shadow-1);
 }
 
 .board-card[data-confidence="measured"] { border-left-color: var(--color-accent); }
@@ -2436,10 +2818,15 @@ code {
   color: var(--lum-quiet);
 }
 
+/* The one thing on this card that is the product's actual value prop — memory reused on this
+   exact change — boxed so it stands out from the rest of the card's quiet metadata. */
 .board-card-knowledge {
   list-style: none;
   margin: var(--space-2) 0;
-  padding: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--evidence-bg);
+  border-left: 2px solid var(--lum-derived);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 .board-card-knowledge li {
@@ -2450,7 +2837,7 @@ code {
 }
 
 .board-card-knowledge li::before {
-  content: "●";
+  content: "◆";
   margin-right: var(--space-2);
   font-size: 0.6em;
   vertical-align: middle;
@@ -2664,10 +3051,16 @@ code {
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
-  padding: var(--space-1) 0;
+  padding: var(--space-2) var(--space-3);
+  margin: 0 calc(var(--space-3) * -1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
 }
 
-.commit-hash { width: 5rem; flex-shrink: 0; color: var(--color-text); }
+.commit-list li:hover { background: var(--color-surface-raised); box-shadow: var(--shadow-1); }
+
+.commit-hash { width: 5rem; flex-shrink: 0; font-weight: var(--font-weight-medium); color: var(--color-text); }
 .commit-branch { flex: 1; min-width: 0; color: var(--color-text-muted); }
 .commit-confidence[data-confidence="measured"] { color: var(--color-accent); }
 .commit-confidence[data-confidence="derived"] { color: var(--lum-quiet); }
@@ -2682,10 +3075,14 @@ code {
 }
 
 .knowledge-row {
-  padding-bottom: var(--space-4);
-  margin-bottom: var(--space-4);
-  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3);
+  margin: 0 calc(var(--space-3) * -1) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
 }
+
+.knowledge-row:hover { background: var(--color-surface-raised); box-shadow: var(--shadow-1); }
 
 .knowledge-row:last-child { border-bottom: 0; }
 

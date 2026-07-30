@@ -424,6 +424,8 @@ interface LiveSession {
   proxySessionId: string;
   /** Deliveries the proxy recorded for this session: memory that actually reached the agent. */
   recalls: number;
+  /** When each of those deliveries happened, so the strip can place them. Same clock as the ticks. */
+  recallAt: string[];
   /** Echoed back from the start request: main has no way to resolve a work id to a title. */
   workTitle: string | null;
   proxyPort: number;
@@ -450,15 +452,18 @@ function publicSessions() {
     work_title: live.workTitle,
     agent: live.session.agent,
     state: live.session.state,
+    started_at: new Date(live.startedAt).toISOString(),
     elapsed_s: Math.round((Date.now() - live.startedAt) / 1000),
     step: [...live.session.events].reverse().find((e) => e.kind === "tool")?.summary ?? null,
-    // Tool ticks come from the agent's own stream, so every one is directly observed.
+    // Two measured series, both on this machine's clock, sent to the renderer to plot on one axis.
     //
-    // Recall POSITIONS are deliberately absent: `context_deliveries` records a delivery but not
-    // which request it rode on, so placing a green tick on a specific turn would be a guess.
-    // The COUNT is exact — see `recalls`, read from the receipt for this session's task.
+    // Tool ticks carry the time the app OBSERVED them in the agent's stream. Recall marks carry the
+    // `delivered_at` the proxy itself recorded. Neither is placed relative to the other, because
+    // nothing measured says which tool call a given delivery informed — the strip shows only that
+    // both happened, and when.
     ticks: core.stripTicks(live.session.events),
     recalls: live.recalls,
+    recall_at: live.recallAt,
   }));
 }
 
@@ -531,6 +536,7 @@ async function startSession(input: {
     workTitle: input.work_title,
     proxySessionId,
     recalls: 0,
+    recallAt: [],
     proxyPort,
     agentProcess,
     proxyProcess,
@@ -547,9 +553,14 @@ async function startSession(input: {
     buffer += chunk.toString("utf8");
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
+    // The clock is read HERE, at the process edge, because this is the only moment anything real is
+    // known about when the event happened: the agent's stream carries no timestamps of its own.
+    // Stamping here keeps `parseStreamLine` pure and makes the tick's time an observation rather
+    // than a reconstruction.
+    const at = new Date().toISOString();
     for (const line of lines) {
       for (const event of core.parseStreamLine(line)) {
-        live.session = core.applyEvent(live.session, event);
+        live.session = core.applyEvent(live.session, { ...event, at });
       }
     }
     pushSessions();
@@ -557,7 +568,11 @@ async function startSession(input: {
   });
 
   agentProcess.on("error", (error) => {
-    live.session = core.applyEvent(live.session, { kind: "error", summary: error.message });
+    live.session = core.applyEvent(live.session, {
+      kind: "error",
+      summary: error.message,
+      at: new Date().toISOString(),
+    });
     endSession(sessionId, null);
   });
   agentProcess.on("exit", (code) => endSession(sessionId, code));
@@ -570,27 +585,36 @@ async function startSession(input: {
  *
  * Exact, not inferred: the proxy's session id is the one WE set, so `proxyTaskId` names its task
  * and every delivery on that task belongs to this session. A `delivered` record IS a moment memory
- * was injected. Positions on the strip stay unmarked because `context_deliveries` does not record
- * which request a delivery rode on — the count is measured, the placement would be a guess.
+ * was injected.
+ *
+ * Each record's own `delivered_at` comes back with it, which is what lets the strip place these
+ * moments in time. The app spawned the proxy, so that timestamp and the app's own observations of the
+ * agent's stream are readings from one clock. What is still NOT claimed is which tool call a given
+ * delivery informed — nothing recorded says that, so the strip never draws it.
  */
 async function refreshRecalls(id: string): Promise<void> {
   const live = sessions.get(id);
-  const repo = live && state.repos.find((entry) => entry.path === live.repo);
-  if (!live || !repo) return;
+  if (!live) return;
   try {
     const taskId = core.proxyTaskId(live.repo, live.proxySessionId);
-    const response = await net.fetch(
-      `${core.daemonOrigin(repo.port)}/v2/tasks/${encodeURIComponent(taskId)}`,
-    );
-    if (!response.ok) return;
-    const body = (await response.json()) as { deliveries?: Array<{ status: string }> };
-    const delivered = (body.deliveries ?? []).filter((d) => d.status === "delivered").length;
-    if (delivered !== live.recalls) {
-      live.recalls = delivered;
+    // Through the worker, not over HTTP. The old version fetched `/v2/tasks/:id` from the daemon and
+    // read `body.deliveries` — a key that route has never had (its body is `{task, receipt_count}`),
+    // so the count resolved to `undefined` and fell to zero on every poll. `/v2/recalls` is the route
+    // that actually reads the delivery records, and it drains the proxy's spool on the way.
+    const reply = await callApi(live.repo, "/v2/recalls", `?task=${encodeURIComponent(taskId)}`);
+    if (reply.status !== 200) return;
+    const body = reply.body as { count?: number | null; delivered_at?: string[] };
+    // Null means the store could not be read. Leave the previous reading alone rather than replace a
+    // measurement with a zero nobody took.
+    if (typeof body.count !== "number") return;
+    const at = (body.delivered_at ?? []).filter((stamp) => typeof stamp === "string" && stamp.length > 0);
+    if (body.count !== live.recalls || at.length !== live.recallAt.length) {
+      live.recalls = body.count;
+      live.recallAt = at;
       pushSessions();
     }
   } catch {
-    // The receipt lands after the request completes; a miss here is normal, never an error.
+    // The delivery lands after the request completes; a miss here is normal, never an error.
   }
 }
 

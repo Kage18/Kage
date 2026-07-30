@@ -63,8 +63,10 @@ export interface DesktopSession {
   work_title: string | null;
   agent: string;
   state: "starting" | "running" | "exited" | "failed";
+  started_at: string;
   elapsed_s: number;
   step: string | null;
-  ticks: Array<{ recall: boolean; weight: number }>;
+  ticks: Array<{ at: string; weight: number }>;
   recalls: number;
+  recall_at: string[];
 }

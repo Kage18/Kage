@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildBrief, desktop } from "./desktop";
+import { buildBrief, buildFreeFormBrief, desktop } from "./desktop";
 import type { WorkDetailDto } from "./api/types";
 
 function detail(overrides: Partial<WorkDetailDto> = {}): WorkDetailDto {
@@ -77,6 +77,33 @@ describe("buildBrief", () => {
       detail({ knowledge: Array.from({ length: 20 }, (_, i) => ({ title: `fact ${i}`, summary: "x".repeat(80) })) }),
     );
     expect(large.tokens_est).toBeGreaterThan(small.tokens_est);
+  });
+});
+
+// A repository with no derived work items had NO path to start an agent at all: the sheet's Start
+// button required a selected work item, and the brief pane sat on "Assembling the brief…" forever —
+// a spinner for something that was never going to arrive. That is the first thing a new user meets
+// after adding their first repository, and it was a dead end.
+describe("buildFreeFormBrief", () => {
+  test("what you typed is exactly what is sent — the preview is a promise, not a summary", () => {
+    const task = "Read src/limits.ts and say whether tenantLimit should become configurable.";
+    expect(buildFreeFormBrief(task).prompt).toBe(task);
+  });
+
+  test("surrounding whitespace is trimmed, so a stray newline is not sent as the task", () => {
+    expect(buildFreeFormBrief("  do the thing\n").prompt).toBe("do the thing");
+  });
+
+  // No work item means no blast paths, so there is no grounding to claim. Inventing a file list here
+  // would tell the agent that somebody chose those files when nobody did.
+  test("a free-form task claims no grounding and no pre-attached memory", () => {
+    const brief = buildFreeFormBrief("anything");
+    expect(brief.paths).toEqual([]);
+    expect(brief.memories).toEqual([]);
+  });
+
+  test("the estimate still scales with what was typed", () => {
+    expect(buildFreeFormBrief("x".repeat(400)).tokens_est).toBeGreaterThan(buildFreeFormBrief("x").tokens_est);
   });
 });
 

@@ -56,6 +56,42 @@ test("an unknown work item is a 404, not an empty shell", async () => {
   assert.match(JSON.stringify(reply.body), /no work item/);
 });
 
+// ── /v2/recalls ────────────────────────────────────────────────────────────────────────────────
+//
+// This route exists because the desktop app could not read its own measurement. Three gaps stacked:
+//   1. the proxy SPOOLS each delivery to a file, and only the vNext runtime daemon drains it — a
+//      daemon the app never starts, so `context_deliveries` stayed empty forever;
+//   2. `buildTaskReceiptAggregate`, the only assembler that carries `deliveries`, likewise runs only
+//      in that daemon, so no route the app can reach ever returned them;
+//   3. main fetched `/v2/tasks/:id`, whose body is `{task, receipt_count}` and has no `deliveries`
+//      key at all — so the count read `undefined` and fell to zero on every poll.
+// The result was a run strip that could never show a recall, and a count permanently showing a dash,
+// while the measurements sat on disk the whole time.
+
+test("recalls are read for a task, draining the spool the proxy writes to", async () => {
+  const dir = repo();
+  const reply = await dispatchApi(dir, "/v2/recalls", "?task=task_abc");
+  assert.equal(reply.status, 200);
+  const body = reply.body as { count: number | null; delivered_at: string[] };
+  assert.ok("count" in body && "delivered_at" in body);
+});
+
+// The count is a MEASUREMENT. With no store to read, it is unknown — and unknown is null, never 0,
+// because a zero here reads as "memory did not help" rather than "nobody has looked yet".
+test("with no delivery store the count is null, not a zero", async () => {
+  const reply = await dispatchApi(repo(), "/v2/recalls", "?task=task_abc");
+  const body = reply.body as { count: number | null; available: boolean; reason: string | null };
+  assert.equal(body.available, false);
+  assert.equal(body.count, null, "an unread store is unknown, not zero");
+  assert.ok(body.reason, "and it says which way it failed");
+});
+
+test("a recalls request with no task names the missing parameter rather than guessing one", async () => {
+  const reply = await dispatchApi(repo(), "/v2/recalls");
+  assert.equal(reply.status, 400);
+  assert.match(JSON.stringify(reply.body), /task/);
+});
+
 test("a path the API does not define is a 404 rather than a stray answer", async () => {
   const reply = await dispatchApi(repo(), "/v2/not-a-real-route");
   assert.equal(reply.status, 404);

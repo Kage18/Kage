@@ -56,6 +56,46 @@ export async function dispatchApi(projectDir: string, pathname: string, search =
     }
   }
 
+  // How much memory actually reached one agent, and when.
+  //
+  // The proxy cannot write SQLite from inside a session, so it SPOOLS each delivery to a file; the
+  // spool is drained on read by `readLocalDeliveries`. Nothing else in the app drained it, and the
+  // only assembler that carried deliveries (`buildTaskReceiptAggregate`) runs in the vNext runtime
+  // daemon, which the app does not start — so this measurement existed on disk and was unreadable.
+  //
+  // `count` is `null` when the store could not be read. Not zero: nobody looked is not the same fact
+  // as memory did not help, and the run strip renders those two very differently.
+  if (pathname === "/v2/recalls") {
+    const taskId = params.get("task");
+    if (!taskId) return { status: 400, body: { ok: false, error: "a `task` query parameter is required" } };
+    try {
+      const { readLocalDeliveries } = await import("../runtime/client.js");
+      const result = readLocalDeliveries(projectDir);
+      if (!result.available) {
+        return {
+          status: 200,
+          body: { available: false, reason: result.reason, count: null, delivered_at: [] },
+        };
+      }
+      const delivered = result.deliveries.filter(
+        (record) => record.task_id === taskId && record.status === "delivered",
+      );
+      return {
+        status: 200,
+        body: {
+          available: true,
+          reason: null,
+          count: delivered.length,
+          // Only the timestamps that exist. A delivery with none still counts — it simply cannot be
+          // placed on the strip's axis, and the caller reports that rather than inventing a moment.
+          delivered_at: delivered.map((record) => record.delivered_at).filter((at) => typeof at === "string" && at),
+        },
+      };
+    } catch (error) {
+      return unavailable("recall records", error);
+    }
+  }
+
   if (pathname === "/v2/work") {
     try {
       const { buildWorkBoard } = await import("../orchestrator/board.js");

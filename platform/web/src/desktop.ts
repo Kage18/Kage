@@ -18,11 +18,16 @@ export interface DesktopSession {
   work_title: string | null;
   agent: string;
   state: "starting" | "running" | "exited" | "failed";
+  /** When the session started, ISO-8601 — the origin of the run strip's time axis. */
+  started_at: string;
   elapsed_s: number;
   step: string | null;
-  ticks: Array<{ recall: boolean; weight: number }>;
+  /** One per tool call, at the time the app observed it. */
+  ticks: Array<{ at: string; weight: number }>;
   /** Deliveries the proxy recorded for this session. Measured, not inferred. */
   recalls: number;
+  /** When each of those deliveries happened — the strip's second series, on the same clock. */
+  recall_at: string[];
 }
 
 export interface DesktopRepo {
@@ -110,4 +115,24 @@ export function buildBrief(detail: WorkDetailDto): Brief {
 
   const prompt = lines.join("\n");
   return { prompt, memories, paths, tokens_est: Math.ceil(prompt.length / 4) };
+}
+
+/**
+ * The brief for a task the user typed, rather than a derived work item.
+ *
+ * This exists because a repository with no derived work items had no way to start an agent at all —
+ * the Start button required a selection, and the brief pane sat on "Assembling the brief…" for
+ * something that was never coming. That is the first screen after adding a first repository.
+ *
+ * The prompt is the task VERBATIM. No grounding block, because no work item means nobody chose a set
+ * of files, and naming some would tell the agent a decision had been made that had not. No memory
+ * section either: there is no free-text recall route in the read API, and a heading with nothing
+ * under it reads as "the team knows nothing about this" — a claim nobody checked.
+ *
+ * A run started this way is still a full Kage run. The proxy injects memory per request in assist
+ * mode, so recalls land while the agent works — which is exactly what the run strip records.
+ */
+export function buildFreeFormBrief(task: string): Brief {
+  const prompt = task.trim();
+  return { prompt, memories: [], paths: [], tokens_est: Math.ceil(prompt.length / 4) };
 }

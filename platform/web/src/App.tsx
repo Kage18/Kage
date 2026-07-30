@@ -11,7 +11,6 @@ import type { TeamReportDto,
   DecisionDetailDto,
   EntityDetailDto,
   EntityListDto,
-  IntegrationDto,
   OverviewDto,
   ReviewItemDto,
   RunbookDetailDto,
@@ -24,21 +23,19 @@ import type { TeamReportDto,
 import { AppShell } from "./components/AppShell";
 import { AdminDiagnosticsPage } from "./pages/AdminDiagnosticsPage";
 import { AgentTasksPage } from "./pages/AgentTasksPage";
-import { BillingPage } from "./pages/BillingPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { ActivityPage } from "./pages/ActivityPage";
-import { StartAgentSheet } from "./components/StartAgentSheet";
-import { buildBrief, desktop, type Brief, type DesktopRepo, type DesktopSession } from "./desktop";
+import { FREE_FORM, StartAgentSheet } from "./components/StartAgentSheet";
+import { buildBrief, buildFreeFormBrief, desktop, type Brief, type DesktopRepo, type DesktopSession } from "./desktop";
 import { FirstRunPage } from "./pages/FirstRunPage";
 import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
 import { WorkPage } from "./pages/WorkPage";
 import { FeaturePage } from "./pages/FeaturePage";
-import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ReviewQueuePage, type ReviewDecisionInput, type ReviewMutationFeedback } from "./pages/ReviewQueuePage";
@@ -488,6 +485,8 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
   const [items, setItems] = useState<WorkCardDto[] | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [brief, setBrief] = useState<Brief | null>(null);
+  /** What the user typed, when they chose to describe a task instead of picking a work item. */
+  const [task, setTask] = useState("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -526,31 +525,44 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
       .catch(() => setItems([]));
   }, [api]);
 
-  // The brief is re-composed whenever the selection changes, so the preview can never describe a
-  // different item than the one that will run.
+  // The brief is re-composed whenever the selection or the typed task changes, so the preview can
+  // never describe something other than what will run.
   useEffect(() => {
-    if (!sheetOpen || !selectedWorkId) return;
+    if (!sheetOpen) return;
+    // Nothing selected IS the free-form case, matching the sheet — see its `mode` note.
+    const workId = selectedWorkId ?? FREE_FORM;
+    if (workId === FREE_FORM) {
+      // Composed locally and synchronously: the task IS the brief, so there is nothing to fetch and
+      // no in-flight state to show.
+      setBrief(task.trim() ? buildFreeFormBrief(task) : null);
+      return;
+    }
     setBrief(null);
     let live = true;
     api
-      .workItem(selectedWorkId)
+      .workItem(workId)
       .then((detail) => { if (live) setBrief(buildBrief(detail)); })
       .catch(() => { if (live) setStartError("Could not assemble a brief for that item."); });
     return () => { live = false; };
-  }, [api, sheetOpen, selectedWorkId]);
+  }, [api, sheetOpen, selectedWorkId, task]);
 
   const start = useCallback(
     (agent: string) => {
       const bridge = desktop();
       if (!bridge || !brief) return;
+      const freeForm = (selectedWorkId ?? FREE_FORM) === FREE_FORM;
       setStarting(true);
       setStartError(null);
       void bridge
         .startSession({
-          work_id: selectedWorkId,
+          // A typed task belongs to no work item, and saying otherwise would attach its receipts to
+          // work nobody claimed.
+          work_id: freeForm ? null : selectedWorkId,
           // Main cannot resolve a work id to a title, so the title travels with the request and
           // comes back on the session — the running card names the work, not an opaque id.
-          work_title: (items ?? []).find((item) => item.work_id === selectedWorkId)?.title ?? null,
+          work_title: freeForm
+            ? null
+            : (items ?? []).find((item) => item.work_id === selectedWorkId)?.title ?? null,
           agent,
           prompt: brief.prompt,
         })
@@ -583,7 +595,9 @@ function ActivityContainer({ api }: { api: KageApiClient }): React.ReactElement 
           items={items}
           brief={brief}
           selectedWorkId={selectedWorkId}
+          task={task}
           onSelectWork={setSelectedWorkId}
+          onTaskChange={setTask}
           onStart={start}
           onCancel={() => setSheetOpen(false)}
           busy={starting}
@@ -678,52 +692,24 @@ function EntityListContainer({
   return <EntityListPage title={title} section={section} list={state.list} />;
 }
 
-// Loads live integration health. Fetched lazily (only when the Integrations section is open) so it
-// never sits on the context-delivery critical path.
-function IntegrationsContainer({ api }: { api: KageApiClient }): React.ReactElement {
-  const [state, setState] = useState<
-    { status: "loading" } | { status: "ready"; integrations: IntegrationDto[] } | { status: "error"; message: string }
-  >({ status: "loading" });
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({ status: "loading" });
-    api
-      .integrations()
-      .then((response) => {
-        if (!cancelled) setState({ status: "ready", integrations: response.integrations });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setState({ status: "error", message: error instanceof Error ? error.message : "Unknown error" });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
-
-  if (state.status === "loading") {
-    return (
-      <p role="status" aria-live="polite">
-        Loading integrations…
-      </p>
-    );
-  }
-  if (state.status === "error") {
-    return <p role="alert">Integrations are unavailable: {state.message}</p>;
-  }
-  return <IntegrationsPage integrations={state.integrations} />;
-}
-
 function RoutedPage({
   route,
   overview,
   api,
+  desktopRepos,
+  activeRepoPath,
+  onSwitchRepo,
+  onAddRepo,
+  onRemoveRepo,
 }: {
   route: Route;
   overview: OverviewDto;
   api: KageApiClient;
+  desktopRepos?: DesktopRepo[];
+  activeRepoPath?: string | null;
+  onSwitchRepo?: (path: string) => void;
+  onAddRepo?: () => void;
+  onRemoveRepo?: (path: string) => void;
 }): React.ReactElement {
   switch (route.page) {
     case "activity":
@@ -850,18 +836,16 @@ function RoutedPage({
           render={(receipt) => <TaskReceiptPage receipt={receipt} />}
         />
       );
-    case "integrations":
-      return <IntegrationsContainer api={api} />;
     case "settings":
-      return <SettingsPage />;
-    case "billing":
-      // The portal is served by the LOCAL daemon, which deliberately has no workspace-billing feed:
-      // putting one on this page would place the (remote) workspace on a path the local portal needs
-      // to render, and a workspace outage must never degrade local operation. The workspace serves
-      // this DTO itself at GET /v1/workspaces/:id/billing; until an install is linked to one, the
-      // honest answer for a local install is "no workspace connected", which is exactly what a null
-      // panel renders — never a fabricated plan or an empty-looking subscription.
-      return <BillingPage billing={null} />;
+      return (
+        <SettingsPage
+          desktopRepos={desktopRepos}
+          activeRepoPath={activeRepoPath}
+          onSwitchRepo={onSwitchRepo}
+          onAddRepo={onAddRepo}
+          onRemoveRepo={onRemoveRepo}
+        />
+      );
     case "admin-diagnostics":
       return <AdminDiagnosticsPage />;
     case "not-found":
@@ -874,13 +858,20 @@ export function App({ api }: AppProps): React.ReactElement {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   // undefined = not asked yet (or not the desktop app). An empty array is a FACT: no repositories.
   const [repos, setRepos] = useState<DesktopRepo[] | undefined>(undefined);
+  const [active, setActive] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
 
   useEffect(() => {
     const bridge = desktop();
     if (!bridge) return;
-    void bridge.getState().then((next) => setRepos(next.repos));
-    return bridge.onState((next) => setRepos(next.repos));
+    void bridge.getState().then((next) => {
+      setRepos(next.repos);
+      setActive(next.active);
+    });
+    return bridge.onState((next) => {
+      setRepos(next.repos);
+      setActive(next.active);
+    });
   }, []);
 
   useEffect(() => {
@@ -910,6 +901,14 @@ export function App({ api }: AppProps): React.ReactElement {
     void bridge.addRepository().finally(() => setAddBusy(false));
   }, []);
 
+  const switchRepository = useCallback((path: string) => {
+    void desktop()?.switchRepository(path);
+  }, []);
+
+  const removeRepository = useCallback((path: string) => {
+    void desktop()?.removeRepository(path);
+  }, []);
+
   // With no repository there is no daemon, so every call 503s and the shell used to render
   // "Repository knowledge is unavailable" — a technical error for a state that is not an error.
   // It is simply the beginning, and it gets a screen that says so.
@@ -924,7 +923,15 @@ export function App({ api }: AppProps): React.ReactElement {
   const repository = state.status === "ready" ? state.overview.repository : null;
 
   return (
-    <AppShell repository={repository} route={routeToPath(route)}>
+    <AppShell
+      repository={repository}
+      route={routeToPath(route)}
+      desktopRepos={repos}
+      activeRepoPath={active}
+      onSwitchRepo={repos ? switchRepository : undefined}
+      onAddRepo={repos ? addRepository : undefined}
+      onRemoveRepo={repos ? removeRepository : undefined}
+    >
       {state.status === "loading" && (
         <p role="status" aria-live="polite">
           Loading repository knowledge…
@@ -934,7 +941,16 @@ export function App({ api }: AppProps): React.ReactElement {
         <p role="alert">Repository knowledge is unavailable: {state.message}</p>
       )}
       {state.status === "ready" && (
-        <RoutedPage route={route} overview={state.overview} api={api} />
+        <RoutedPage
+          route={route}
+          overview={state.overview}
+          api={api}
+          desktopRepos={repos}
+          activeRepoPath={active}
+          onSwitchRepo={repos ? switchRepository : undefined}
+          onAddRepo={repos ? addRepository : undefined}
+          onRemoveRepo={repos ? removeRepository : undefined}
+        />
       )}
     </AppShell>
   );

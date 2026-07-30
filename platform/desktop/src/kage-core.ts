@@ -92,6 +92,8 @@ export interface SessionEvent {
   seq: number;
   kind: "started" | "tool" | "text" | "result" | "error";
   summary: string;
+  /** When the app observed this event. Stamped here, at the edge — the stream carries no times. */
+  at: string;
 }
 
 export interface AgentSession {
@@ -151,10 +153,11 @@ export interface KageCore {
   newSession(spec: { session_id: string; work_id: string | null; agent: string }): AgentSession;
   agentCommand(agent: string, prompt: string): { command: string; args: string[] } | null;
   agentEnv(proxyPort: number): Record<string, string>;
-  parseStreamLine(line: string): Array<Omit<SessionEvent, "seq">>;
+  /** Pure: reads no clock. The caller stamps `at` when it observes the line. */
+  parseStreamLine(line: string): Array<Omit<SessionEvent, "seq" | "at">>;
   applyEvent(session: AgentSession, event: Omit<SessionEvent, "seq">): AgentSession;
   closeSession(session: AgentSession, exitCode: number | null): AgentSession;
-  stripTicks(events: readonly SessionEvent[], recallTurns?: ReadonlySet<number>): Array<{ recall: boolean; weight: number }>;
+  stripTicks(events: readonly SessionEvent[]): Array<{ at: string; weight: number }>;
 }
 
 export function loadKageCore(resourcesPath: string): KageCore {

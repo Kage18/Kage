@@ -27,11 +27,16 @@ function agents(list: AgentDto[]): AgentsReportDto {
   };
 }
 
+const RUN_START = "2026-07-30T12:00:00.000Z";
+/** A time this many seconds into the fixture run — the strip's axis is real elapsed time. */
+const into = (seconds: number) => new Date(Date.parse(RUN_START) + seconds * 1000).toISOString();
+
 function session(overrides: Partial<RunningSession> = {}): RunningSession {
   return {
     session_id: "s-1",
     agent: "claude",
     work_title: "Make tenantLimit configurable",
+    started_at: RUN_START,
     elapsed_s: 252,
     step: "Edit src/settings.tsx",
     ticks: [],
@@ -136,12 +141,12 @@ describe("Activity", () => {
     expect(screen.getByText("4:12")).toBeTruthy();
   });
 
-  // THE run-strip rule. A green tick asserts memory reached the agent, and that fact lives in the
+  // THE run-strip rule. A lit mark asserts memory reached the agent, and that fact lives in the
   // proxy — so with no recall data the count is a dash. "0 recalls" would read as a measurement
   // that memory did not help, when the truth is that nothing was attributed.
   test("a run with no attributed recalls shows a dash, never a zero", () => {
     const { container } = render(
-      page({ sessions: [session({ ticks: [{ recall: false, weight: 0.5 }, { recall: false, weight: 0.5 }] })] }),
+      page({ sessions: [session({ ticks: [{ at: into(4), weight: 0.5 }, { at: into(9), weight: 0.5 }] })] }),
     );
     const recalls = container.querySelector(".running-recalls");
     expect(recalls?.textContent).toBe("—");
@@ -150,25 +155,102 @@ describe("Activity", () => {
 
   test("a run with attributed recalls counts them and wears the measured colour", () => {
     const { container } = render(
-      page({ sessions: [session({ ticks: [{ recall: true, weight: 1 }, { recall: false, weight: 0.5 }] })] }),
+      page({
+        sessions: [
+          session({
+            ticks: [{ at: into(4), weight: 0.5 }],
+            recalls: 3,
+            recall_at: [into(2), into(30), into(90)],
+          }),
+        ],
+      }),
     );
     const recalls = container.querySelector(".running-recalls");
-    expect(recalls?.textContent).toBe("1 recalls");
+    expect(recalls?.textContent).toBe("3 recalls");
     expect(recalls?.getAttribute("data-confidence")).toBe("measured");
+  });
+
+  // The count is measured from the delivery rows. A tick is a TOOL CALL, so inferring the count from
+  // the strip would be counting the wrong events — the old code fell back to exactly that.
+  test("the recall count never falls back to counting tool calls", () => {
+    const { container } = render(
+      page({ sessions: [session({ ticks: Array.from({ length: 7 }, (_, i) => ({ at: into(i), weight: 0.5 })) })] }),
+    );
+    expect(container.querySelector(".running-recalls")?.textContent).toBe("—");
+  });
+
+  test("one recall reads as one, not as a plural", () => {
+    const { container } = render(page({ sessions: [session({ recalls: 1, recall_at: [into(5)] })] }));
+    expect(container.querySelector(".running-recalls")?.textContent).toBe("1 recall");
+  });
+});
+
+describe("The lede states whether the loop is working, not how busy it is", () => {
+  // It used to read "0 agents running · 0 recalls delivered · …" — a zero standing in for "nothing
+  // is happening yet", which is the one thing this product's confidence ladder forbids.
+  test("with nothing running it says so, and never claims zero recalls", () => {
+    render(page({ sessions: [] }));
+    expect(screen.getByText(/no agent running/)).toBeTruthy();
+    expect(screen.queryByText(/0 recalls/)).toBeNull();
+  });
+
+  test("a run before memory has landed says so, rather than reporting a zero", () => {
+    render(page({ sessions: [session()] }));
+    expect(screen.getByText(/no memory delivered yet/)).toBeTruthy();
+  });
+
+  test("once memory lands, the lede states the outcome and agrees with the count", () => {
+    render(page({ sessions: [session({ recalls: 4, recall_at: [into(1)] })] }));
+    expect(screen.getByText(/memory reached it 4 times/)).toBeTruthy();
   });
 });
 
 describe("RunStrip", () => {
-  test("draws one tick per recorded event and nothing more", () => {
+  const strip = (props: Partial<Parameters<typeof RunStrip>[0]> = {}) => (
+    <RunStrip ticks={[]} startedAt={RUN_START} elapsedS={100} {...props} />
+  );
+
+  test("draws one tick per recorded tool call and nothing more", () => {
     const { container } = render(
-      <RunStrip ticks={[{ recall: false, weight: 0.5 }, { recall: true, weight: 1 }, { recall: false, weight: 0.3 }]} />,
+      strip({ ticks: [{ at: into(10), weight: 0.5 }, { at: into(50), weight: 0.3 }] }),
     );
-    expect(container.querySelectorAll("rect")).toHaveLength(3);
-    expect(container.querySelectorAll(".run-tick-recall")).toHaveLength(1);
+    expect(container.querySelectorAll(".run-tick")).toHaveLength(2);
+    expect(container.querySelectorAll(".run-recall")).toHaveLength(0);
   });
 
-  test("an empty strip is empty, not a placeholder", () => {
-    const { container } = render(<RunStrip ticks={[]} />);
-    expect(container.querySelectorAll("rect")).toHaveLength(0);
+  // The claim the strip exists to make, and the one that never rendered before: memory reaching an
+  // agent mid-run, at the moment the proxy recorded it.
+  test("a delivered recall draws a mark at its own place in the run", () => {
+    const { container } = render(strip({ ticks: [{ at: into(10), weight: 0.5 }], recallAt: [into(50)] }));
+    const mark = container.querySelector(".run-recall line");
+    expect(mark).toBeTruthy();
+    // Halfway through a 100s run, on a 1000-unit axis.
+    expect(mark?.getAttribute("x1")).toBe("500");
+  });
+
+  // Shape before colour: green and red collide under deuteranopia, so a recall must be legible with
+  // hue removed. It is full height and capped; a tool tick is short and has no cap.
+  test("a recall differs from a tick in shape, not only in colour", () => {
+    const { container } = render(strip({ ticks: [{ at: into(10), weight: 0.5 }], recallAt: [into(50)] }));
+    const tick = container.querySelector(".run-tick") as SVGLineElement;
+    const recall = container.querySelector(".run-recall line") as SVGLineElement;
+    const height = (line: SVGLineElement) =>
+      Math.abs(Number(line.getAttribute("y1")) - Number(line.getAttribute("y2")));
+    expect(height(recall)).toBeGreaterThan(height(tick));
+    expect(container.querySelector(".run-recall-cap")).toBeTruthy();
+  });
+
+  test("the label states both series in words, for anyone not looking at the picture", () => {
+    const { container } = render(strip({ ticks: [{ at: into(10), weight: 0.5 }], recallAt: [into(50)] }));
+    const label = container.querySelector(".run-strip")?.getAttribute("aria-label") ?? "";
+    expect(label).toMatch(/1 tool call/);
+    expect(label).toMatch(/1 moment memory reached the agent/);
+  });
+
+  test("an empty strip draws its axis and nothing else", () => {
+    const { container } = render(strip());
+    expect(container.querySelectorAll(".run-tick")).toHaveLength(0);
+    expect(container.querySelectorAll(".run-recall")).toHaveLength(0);
+    expect(container.querySelectorAll(".run-axis")).toHaveLength(1);
   });
 });

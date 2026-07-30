@@ -14,26 +14,36 @@
 // something there. It never renders a zero dressed up as a measurement.
 
 import type { ReactElement } from "react";
+import { Activity as ActivityIcon, AlertTriangle, CheckCircle2, CircleDot, CircleSlash, StopCircle } from "lucide-react";
 import type { AgentDto, AgentsReportDto, AttentionItemDto, TaskSummaryDto } from "../api/types";
 import { withBase } from "../router";
+import { PageHeader } from "../components/PageHeader";
+import { runTimeline } from "../run-timeline";
 
 /** A session this app started. Streaming state arrives over IPC; see the desktop SessionManager. */
 export interface RunningSession {
   session_id: string;
   agent: string;
   work_title: string | null;
+  /** When the session started, ISO-8601 — the origin of the run strip's time axis. */
+  started_at: string;
   /** Seconds since the session started. */
   elapsed_s: number;
   /** The latest step the agent reported, already summarised. */
   step: string | null;
-  /** Ticks: one per tool call, directly observed from the agent's own stream. */
-  ticks: Array<{ recall: boolean; weight: number }>;
+  /** Ticks: one per tool call, at the time the app observed it in the agent's own stream. */
+  ticks: Array<{ at: string; weight: number }>;
   /**
    * How many times memory actually reached the agent, counted from the proxy's delivery records
    * for this session's task. Exact — the app chose the proxy's session id, so its receipts are
    * attributable by construction rather than by timing.
    */
   recalls?: number;
+  /**
+   * The `delivered_at` of each of those deliveries, so the strip can place them on its axis. The
+   * count above stays authoritative: a mark that cannot be placed does not reduce it.
+   */
+  recall_at?: string[];
 }
 
 function clock(seconds: number): string {
@@ -49,38 +59,83 @@ function duration(startedAt: string, endedAt: string | null): string | null {
 }
 
 /**
- * The run strip: one tick per tool call, height by duration, and a full-height accent tick at
- * every moment memory reached the agent.
+ * The run strip: a run plotted on TIME.
  *
- * This is the product's thesis made watchable — and it is drawn only from recorded events, so it
- * can never show a tick that did not happen.
+ * Two measured series on one axis — the tool calls the app observed as the agent's stream arrived,
+ * and the moments the proxy recorded that it attached memory to a request. Both are readings from the
+ * same system clock, because the app spawns the proxy itself.
+ *
+ * A recall mark is full height with a cap; a tool tick is short and dim. State never rides on colour
+ * alone, so the two are different SHAPES before they are different colours.
+ *
+ * Nothing here is smoothed, interpolated, or inferred. Spacing is real elapsed time, which is why a
+ * run that stalled looks stalled — and why no correspondence is drawn between a mark and a tick.
  */
-export function RunStrip({ ticks, compact = false }: { ticks: RunningSession["ticks"]; compact?: boolean }): ReactElement {
-  const height = compact ? 12 : 28;
-  const step = compact ? 6 : 11;
-  const width = Math.max(ticks.length * step, step);
+export function RunStrip({
+  ticks,
+  recallAt = [],
+  startedAt,
+  elapsedS,
+  compact = false,
+}: {
+  ticks: RunningSession["ticks"];
+  recallAt?: readonly string[];
+  startedAt: string;
+  /** Elapsed as main last reported it — the same reading the clock beside the strip shows. */
+  elapsedS: number;
+  compact?: boolean;
+}): ReactElement {
+  const height = compact ? 14 : 30;
+  // The x axis is a fixed user-space width stretched to the container; strokes opt out of that
+  // scaling so a tick stays crisp at any width.
+  const AXIS = 1000;
+  const line = runTimeline({
+    startedAt,
+    now: Date.parse(startedAt) + elapsedS * 1000,
+    ticks,
+    recallAt,
+  });
+
+  const label = [
+    `${ticks.length} tool ${ticks.length === 1 ? "call" : "calls"}`,
+    line.recalls.length > 0
+      ? `${line.recalls.length} ${line.recalls.length === 1 ? "moment" : "moments"} memory reached the agent`
+      : "no memory delivered yet",
+    line.unplacedRecalls > 0 ? `${line.unplacedRecalls} could not be placed in time` : null,
+    `over ${Math.round(line.spanS)}s`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return (
     <svg
       className="run-strip"
-      viewBox={`0 0 ${width} ${height}`}
-      style={{ height, width: compact ? width : "100%" }}
+      viewBox={`0 0 ${AXIS} ${height}`}
+      style={{ height }}
       preserveAspectRatio="none"
       role="img"
-      aria-label={`${ticks.length} steps, ${ticks.filter((t) => t.recall).length} of them using memory`}
+      aria-label={label}
     >
-      {ticks.map((tick, index) => {
-        const h = tick.recall ? height : Math.max(3, Math.round(tick.weight * height * 0.7));
-        return (
-          <rect
-            key={index}
-            x={index * step}
-            y={height - h}
-            width="2"
-            height={h}
-            className={tick.recall ? "run-tick run-tick-recall" : "run-tick"}
-          />
-        );
-      })}
+      {/* The axis itself, so a strip with one event still reads as a span of time. */}
+      <line className="run-axis" x1="0" y1={height - 0.5} x2={AXIS} y2={height - 0.5} vectorEffect="non-scaling-stroke" />
+      {line.ticks.map((tick, index) => (
+        <line
+          key={`tick-${index}`}
+          className="run-tick"
+          x1={tick.x * AXIS}
+          x2={tick.x * AXIS}
+          y1={height}
+          y2={height - Math.max(3, tick.weight * height * 0.55)}
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
+      {line.recalls.map((x, index) => (
+        <g key={`recall-${index}`} className="run-recall">
+          <line x1={x * AXIS} x2={x * AXIS} y1={height} y2="0" vectorEffect="non-scaling-stroke" />
+          {/* The cap is what makes a recall legible with colour switched off. */}
+          <line className="run-recall-cap" x1={x * AXIS} x2={x * AXIS} y1="0" y2="3" vectorEffect="non-scaling-stroke" />
+        </g>
+      ))}
     </svg>
   );
 }
@@ -101,28 +156,39 @@ function RunningBand({
     );
   }
   return (
-    <ul className="running-list">
+    <ul className="running-list sessions-grid">
       {sessions.map((session) => {
-        // Prefer the MEASURED count from the receipts; fall back to marked ticks.
-        const recalls = session.recalls ?? session.ticks.filter((tick) => tick.recall).length;
+        // The count comes from the delivery rows and nowhere else. There is no fallback to infer one
+        // from the strip: a tick is a tool call, and counting those would be counting the wrong thing.
+        const recalls = session.recalls ?? 0;
         return (
-          <li key={session.session_id} className="running-session">
+          <li
+            key={session.session_id}
+            className="running-session"
+            data-confidence={recalls > 0 ? "measured" : undefined}
+          >
             <div className="running-head">
               <span className="fact">{session.agent}</span>
               <span className="running-title">{session.work_title ?? "free-form task"}</span>
               <span className="fact running-clock">{clock(session.elapsed_s)}</span>
             </div>
-            <RunStrip ticks={session.ticks} />
+            <RunStrip
+              ticks={session.ticks}
+              recallAt={session.recall_at}
+              startedAt={session.started_at}
+              elapsedS={session.elapsed_s}
+            />
             <div className="running-foot">
               <span className="fact running-step">{session.step ?? "starting…"}</span>
               {/* Zero is left as a dash until a delivery is actually recorded. Early in a run
                   nothing has been delivered yet, and "0 recalls" would read as a measurement that
                   memory did not help rather than one that has not happened yet. */}
               <span className="fact running-recalls" data-confidence={recalls > 0 ? "measured" : "unknown"}>
-                {recalls > 0 ? `${recalls} recalls` : "—"}
+                {recalls > 0 ? `${recalls} ${recalls === 1 ? "recall" : "recalls"}` : "—"}
               </span>
               {onStop && (
                 <button type="button" className="running-stop" onClick={() => onStop(session.session_id)}>
+                  <StopCircle size={14} strokeWidth={1.75} aria-hidden />
                   Stop
                 </button>
               )}
@@ -136,18 +202,57 @@ function RunningBand({
 
 function AgentLine({ agent }: { agent: AgentDto }): ReactElement {
   const working = agent.status === "active";
+  const StateIcon = working ? CircleDot : agent.status === "silent" ? AlertTriangle : CircleSlash;
   return (
-    <li className="observed-agent">
-      <span className="fact">{agent.agent}</span>
+    <li className="list-row" data-confidence={working ? "measured" : agent.status === "silent" ? "critical" : undefined}>
+      <span className="list-row-icon" aria-hidden="true">
+        <StateIcon size={16} strokeWidth={1.75} />
+      </span>
+      <span className="list-row-primary">{agent.agent}</span>
       <span className="observed-state" data-status={working ? "measured" : agent.status === "silent" ? "critical" : undefined}>
         <span className="status-glyph" aria-hidden="true">{working ? "●" : agent.status === "silent" ? "▲" : "○"}</span>
         {working ? "Active" : agent.status === "silent" ? "Never seen" : "Idle"}
       </span>
-      <span className="fact observed-count" data-confidence={agent.durable_observations > 0 ? "measured" : "unknown"}>
+      <span className="list-row-meta observed-count" data-confidence={agent.durable_observations > 0 ? "measured" : "unknown"}>
         {agent.durable_observations > 0 ? `${agent.durable_observations.toLocaleString()} learned` : "—"}
       </span>
     </li>
   );
+}
+
+/**
+ * One line saying whether the loop is doing its job right now.
+ *
+ * This used to read "N agents running · N recalls delivered · N decisions waiting" — three counts of
+ * ACTIVITY, which is not the same thing as an outcome, and which showed "0 recalls delivered" on a
+ * run where memory simply had not landed yet. Kage's claim is that memory reaches an agent before it
+ * repeats a failure the team already solved, so the line leads with whether that has happened and
+ * says what is missing when it has not. No zero stands in for "not yet".
+ *
+ * Every figure is either a count of props this page already receives or the measured `recalls` from
+ * the delivery rows — nothing new is computed and nothing is estimated.
+ */
+function statLede(sessions: RunningSession[], attentionCount: number): string {
+  const waiting =
+    attentionCount > 0 ? `${attentionCount} ${attentionCount === 1 ? "decision" : "decisions"} waiting` : null;
+
+  if (sessions.length === 0) {
+    // No session means there is nothing to say about memory reaching one. Saying "0 recalls" here
+    // would read as a measurement that memory did not help.
+    return [waiting, "no agent running"].filter(Boolean).join(" · ");
+  }
+
+  const recalls = sessions.reduce((sum, session) => sum + (session.recalls ?? 0), 0);
+  const pronoun = sessions.length === 1 ? "it" : "them";
+  return [
+    `${sessions.length} ${sessions.length === 1 ? "agent" : "agents"} running`,
+    recalls > 0
+      ? `memory reached ${pronoun} ${recalls} ${recalls === 1 ? "time" : "times"}`
+      : "no memory delivered yet",
+    waiting,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function ActivityPage({
@@ -176,21 +281,25 @@ export function ActivityPage({
 
   return (
     <section aria-label="Activity">
-      <h1 className="visually-hidden">Activity</h1>
-
-      {canStartAgents && (
-        <div className="activity-actions">
-          <button type="button" className="activity-start" onClick={onStartAgent}>
-            Start an agent
-          </button>
-        </div>
-      )}
+      <PageHeader
+        icon={ActivityIcon}
+        title="Activity"
+        lede={statLede(sessions, attention.length)}
+        action={
+          canStartAgents && (
+            <button type="button" className="activity-start" onClick={onStartAgent}>
+              Start an agent
+            </button>
+          )
+        }
+      />
 
       <RunningBand sessions={sessions} onStop={onStopSession} />
 
       {blocking && (
         <div className="activity-blocking">
           <span className="fact activity-severity" data-status={blocking.severity >= 80 ? "critical" : "attention"}>
+            <AlertTriangle size={16} strokeWidth={1.75} aria-hidden />
             {Math.round(blocking.severity)}
           </span>
           <div>
@@ -204,11 +313,16 @@ export function ActivityPage({
 
       {finished.length > 0 && (
         <>
-          <p className="activity-band">Earlier</p>
+          <p className="activity-band">
+            Earlier<span className="activity-band-sub">— finished, with receipts</span>
+          </p>
           <ul className="finished-list">
             {finished.map((task) => (
               <li key={task.task_id}>
                 <a className="finished-title" href={withBase(`/tasks/${encodeURIComponent(task.task_id)}`)}>
+                  <span className="list-row-icon" aria-hidden="true">
+                    <CheckCircle2 size={16} strokeWidth={1.75} />
+                  </span>
                   {task.outcome ?? task.task_id}
                 </a>
                 <span className="fact finished-meta">{duration(task.started_at, task.ended_at) ?? "—"}</span>
@@ -221,7 +335,9 @@ export function ActivityPage({
 
       {observed.length > 0 && (
         <>
-          <p className="activity-band">Observed elsewhere</p>
+          <p className="activity-band">
+            Observed elsewhere<span className="activity-band-sub">— seen, not launched here</span>
+          </p>
           <ul className="observed-list">
             {observed.map((agent) => (
               <AgentLine key={agent.agent} agent={agent} />

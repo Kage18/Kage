@@ -16,11 +16,18 @@ function session(): AgentSession {
   return newSession({ session_id: "s-1", work_id: "repo:x:proposal:one", agent: "claude" });
 }
 
+// A deterministic clock: one second per stream line, so observed times are predictable. The app
+// stamps `at` at the process edge for exactly this reason — the parser never reads a clock.
+const EPOCH = Date.parse("2026-07-30T12:00:00.000Z");
+const atSecond = (n: number) => new Date(EPOCH + n * 1000).toISOString();
+
 function feed(lines: string[]): AgentSession {
   let current = session();
-  for (const line of lines) {
-    for (const event of parseStreamLine(line)) current = applyEvent(current, event);
-  }
+  lines.forEach((line, index) => {
+    for (const event of parseStreamLine(line)) {
+      current = applyEvent(current, { ...event, at: atSecond(index) });
+    }
+  });
   return current;
 }
 
@@ -122,24 +129,20 @@ test("the strip draws one tick per tool call, and nothing per prose", () => {
   assert.equal(stripTicks(s.events).length, 3);
 });
 
-// The honesty rule that makes the strip worth showing at all: a green tick asserts that memory
-// reached the agent, and that fact lives in the proxy. With nothing supplied, there are none.
-test("with no recall data the strip shows NO recalls rather than inventing them", () => {
-  const s = feed([INIT, tool("Read", {}), tool("Edit", {})]);
-  assert.equal(stripTicks(s.events).every((tick) => !tick.recall), true);
-});
-
-test("recalls are marked by assistant TURN index, never by timing", () => {
-  const s = feed([
-    text("turn one"),
-    tool("Read", {}),
-    text("turn two"),
-    tool("Edit", {}),
-    tool("Bash", {}),
-  ]);
-  // The proxy attached memory on the second turn only.
-  const ticks = stripTicks(s.events, new Set([2]));
-  assert.deepEqual(ticks.map((t) => t.recall), [false, true, true]);
+// The load-bearing change. The strip previously marked recalls by assistant-turn index, on the
+// reasoning that the Nth proxy request is structurally the Nth turn. That is false in the store:
+// `buildProxyDelivery` writes no row when nothing was composed, so delivery rows are a SUBSEQUENCE
+// of requests and the index is gone. Nobody ever supplied the turn set, so the marks never rendered
+// at all. Ticks now carry the time the app observed them, and recalls are placed on the same axis
+// from their own recorded `delivered_at`.
+test("each tick carries the time the app observed it, so the strip has a real axis", () => {
+  const s = feed([INIT, tool("Read", {}), text("thinking"), tool("Edit", {})]);
+  const ticks = stripTicks(s.events);
+  assert.deepEqual(
+    ticks.map((tick) => tick.at),
+    [atSecond(1), atSecond(3)],
+    "a tick's time is the observation, not its position in the list",
+  );
 });
 
 test("an empty session has an empty strip, not a placeholder", () => {

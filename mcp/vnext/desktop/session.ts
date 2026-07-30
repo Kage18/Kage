@@ -13,8 +13,20 @@
 // everywhere else and would be no more honest here.
 //
 // What this module does NOT do: invent recall marks. Tool ticks come from the agent's own stream
-// and are therefore directly observed; recall marks are supplied by the caller from the receipt
-// store, and when they are unavailable the strip simply has none.
+// and are therefore directly observed; recall marks come from the proxy's own delivery rows, and
+// when there are none the strip simply has none.
+//
+// PLACEMENT, revised. An earlier version marked recalls by ASSISTANT TURN INDEX, reasoning that the
+// Nth proxy request is structurally the Nth turn. That mapping does not survive contact with the
+// delivery store: `buildProxyDelivery` writes NO ROW for a request that composed nothing, so the
+// rows are a SUBSEQUENCE of the requests and the index is genuinely lost. Nobody ever supplied the
+// turn set, so the strip's whole thesis — memory reaching an agent mid-flight — could not render.
+//
+// So the strip is a TIMELINE rather than an index sequence. Every tool tick carries the time the app
+// observed it, every recall carries the `delivered_at` the proxy recorded, and both are read from
+// the same system clock because the app spawns the proxy itself. No correspondence is claimed
+// between a mark and a tick — they are two measured series plotted on one axis, which is strictly
+// more honest than the index scheme AND actually renders.
 
 export type SessionState = "starting" | "running" | "exited" | "failed";
 
@@ -23,6 +35,14 @@ export interface SessionEvent {
   kind: "started" | "tool" | "text" | "result" | "error";
   /** One line a person can read. Never raw JSON. */
   summary: string;
+  /**
+   * When the app OBSERVED this event, ISO-8601.
+   *
+   * Stamped at the process edge — main reads the agent's stdout as it arrives — rather than inside
+   * `parseStreamLine`, which stays pure. The agent's stream carries no timestamps of its own, so
+   * this is the only real reading available, and it is an observation rather than an inference.
+   */
+  at: string;
 }
 
 export interface AgentSession {
@@ -78,8 +98,11 @@ function describeTool(name: string, input: unknown): string {
  * Returns an array because a single assistant message can carry both prose and several tool calls.
  * Unparseable or uninteresting lines yield nothing — an agent is free to print whatever it likes,
  * and a stray line must never break a running session.
+ *
+ * PURE: no `at`, because this function reads no clock. The stream carries no timestamps, so the only
+ * honest reading is when the app observed the line, and that belongs at the process edge.
  */
-export function parseStreamLine(line: string): Array<Omit<SessionEvent, "seq">> {
+export function parseStreamLine(line: string): Array<Omit<SessionEvent, "seq" | "at">> {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return [];
 
@@ -99,7 +122,7 @@ export function parseStreamLine(line: string): Array<Omit<SessionEvent, "seq">> 
   if (type === "assistant") {
     const message = (parsed.message ?? {}) as { content?: unknown };
     const content = Array.isArray(message.content) ? message.content : [];
-    const events: Array<Omit<SessionEvent, "seq">> = [];
+    const events: Array<Omit<SessionEvent, "seq" | "at">> = [];
     for (const block of content) {
       const item = (block ?? {}) as Record<string, unknown>;
       if (item.type === "tool_use" && typeof item.name === "string") {
@@ -148,28 +171,20 @@ export function closeSession(session: AgentSession, exitCode: number | null): Ag
 }
 
 export interface Tick {
-  /** True where the proxy recorded that memory was injected for this turn. */
-  recall: boolean;
+  /** When the app observed the tool call, ISO-8601 — carried through from the event. */
+  at: string;
   /** 0..1, for tick height. Uniform when nothing better is known. */
   weight: number;
 }
 
 /**
- * The run strip's data: one tick per tool call the agent actually made.
+ * The run strip's tool-call series: one tick per tool call the agent actually made, at the time the
+ * app observed it. Prose contributes nothing — a tick is an action, not a thought.
  *
- * `recallTurns` is the set of assistant-turn indices where the proxy attached memory, supplied by
- * the caller from the receipt store. It is a SET OF INDICES rather than timestamps on purpose —
- * the Nth proxy request corresponds to the Nth assistant turn structurally, whereas matching on
- * time would be a guess dressed as a measurement. Pass an empty set and the strip honestly shows
- * no recalls rather than inventing them.
+ * Recall marks are NOT produced here. They come from the proxy's delivery rows and are placed on the
+ * same time axis by the caller; see the PLACEMENT note at the top of this file for why the previous
+ * turn-index scheme was abandoned.
  */
-export function stripTicks(events: readonly SessionEvent[], recallTurns: ReadonlySet<number> = new Set()): Tick[] {
-  const ticks: Tick[] = [];
-  let turn = 0;
-  for (const event of events) {
-    if (event.kind === "text") turn += 1; // prose marks the start of an assistant turn
-    if (event.kind !== "tool") continue;
-    ticks.push({ recall: recallTurns.has(turn), weight: 0.5 });
-  }
-  return ticks;
+export function stripTicks(events: readonly SessionEvent[]): Tick[] {
+  return events.filter((event) => event.kind === "tool").map((event) => ({ at: event.at, weight: 0.5 }));
 }
