@@ -2027,7 +2027,7 @@ code {
   gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
@@ -3150,15 +3150,15 @@ button.list-row {
   padding: 0;
 }
 
+/* Ruled, like every other list in the app. These were filled bordered tiles with a hover lift, which
+   is the pattern the design pass replaced everywhere else — leaving this page converted halfway is
+   worse than either state. */
 .knowledge-row {
-  padding: var(--space-3);
-  margin: 0 calc(var(--space-3) * -1) var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.knowledge-row:hover { background: var(--color-surface-raised); box-shadow: var(--shadow-1); }
+.knowledge-row:hover .knowledge-title { color: var(--color-accent); }
 
 .knowledge-row:last-child { border-bottom: 0; }
 
@@ -3196,3 +3196,7 @@ button.list-row {
   line-height: var(--line-height-base);
   letter-spacing: var(--tracking-sans);
 }
+
+/* A count still in flight sits at the quiet rung. Deliberately NOT the unknown/dash treatment: this
+   value is arriving, not absent, and the two must not look alike. */
+.kind-count[data-state="loading"] { color: var(--lum-quiet); }

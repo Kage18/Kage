@@ -96,7 +96,13 @@ export function KnowledgePage({
               onClick={() => onSelect(kind.kind)}
             >
               {kind.label}{" "}
-              <span className="kind-count">{kind.count === null ? "…" : kind.count.toLocaleString()}</span>
+              {/* An ellipsis, NOT a dash — and the distinction is the whole point of this field's
+                  type. A dash is the ladder's mark for "nobody measured this"; null here means the
+                  count is still in flight and will arrive in a moment. Rendering it as a dash would
+                  claim a kind was never counted every time the page is opened. */}
+              <span className="kind-count" data-state={kind.count === null ? "loading" : undefined}>
+                {kind.count === null ? "…" : kind.count.toLocaleString()}
+              </span>
             </button>
           ))}
         </div>
