@@ -119,7 +119,7 @@ export function WorkItemPage({ detail }: { detail: WorkDetailDto }): React.React
       ) : null}
 
       {detail.knowledge.length ? (
-        <Band label="What the team already knows">
+        <Band label="What's already known">
           <ul className="board-card-knowledge detail-knowledge">
             {detail.knowledge.map((entry) => (
               <li key={entry.title}>{entry.title}</li>

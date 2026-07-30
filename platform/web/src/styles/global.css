@@ -12,8 +12,15 @@
   box-sizing: border-box;
 }
 
+/* MONO IS THE BASE VOICE, not one of two.
+   An earlier pass split the interface into two typefaces with jobs — mono for machine facts, sans for
+   human prose. The reasoning was sound and the result was wrong: sans prose is what made the app read
+   as a website in a window, because a website is the only thing that looks like that. Nearly every
+   string here is machine output — a branch, a path, a count, a status, a derived title — and the few
+   that a person wrote are read in the same breath as the facts around them. One voice, and it is the
+   machine's. `--font-sans` stays defined for genuinely long-form prose, and Activity uses none. */
 html {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 16px;
   line-height: var(--line-height-base);
   -webkit-text-size-adjust: 100%;
@@ -32,11 +39,13 @@ h3,
 h4 {
   margin: 0 0 var(--space-3);
   line-height: 1.25;
-  font-weight: var(--font-weight-bold);
+  /* Semibold, not bold. At mono's already-heavy stems, bold headings shout; the design gets its
+     hierarchy from size and from the accent, not from weight. */
+  font-weight: var(--font-weight-semibold);
 }
 
 h1 {
-  font-size: var(--font-size-2xl);
+  font-size: var(--font-size-xl);
 }
 h2 {
   font-size: var(--font-size-xl);
@@ -2118,35 +2127,40 @@ code {
    medium weight and full-contrast text so it visually outranks its own metadata; a hover
    background is the one cue (besides an underline on hover) that a row is actually a target,
    not a printed table cell. */
+/* Ruled, not tiled — the same correction as `.finished-list li`. Giving every row its own fill and
+   border turned lists into stacks of buttons, which is what made the interface read as a web
+   dashboard; a hairline between rows separates them at no visual cost. The row is still legible at
+   rest in a screenshot, because the rule is always there and never waits for a hover. */
 .list-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   min-height: var(--space-7);
-  padding: var(--space-2) var(--space-3);
-  margin: 0 calc(var(--space-3) * -1) var(--space-2);
-  border-radius: var(--radius-md);
-  /* Visible at rest, not just on hover — a row that only reveals its surface when the mouse
-     happens to be over it is indistinguishable from plain text in a screenshot or a glance. */
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.list-row:last-child {
+  border-bottom: none;
 }
 
 a.list-row,
 button.list-row {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--color-border);
+  background: none;
   font: inherit;
   color: inherit;
   text-decoration: none;
-  cursor: pointer;
+  /* No `cursor: pointer`. macOS does not switch to the hand for a control, and it is the single
+     fastest tell that a window is a web page — which is exactly the impression this pass is undoing.
+     It had crept back in here. */
 }
 
-.list-row:hover {
-  background: var(--color-surface-raised);
-  border-color: color-mix(in srgb, var(--color-accent) 25%, var(--color-border));
-  box-shadow: var(--shadow-1);
+/* Hover brightens the TYPE, and nothing else. A background shift plus a shadow lift is a web
+   affordance; native list rows do not rise toward the pointer. */
+.list-row:hover .list-row-primary {
+  color: var(--color-text);
 }
 
 .list-row-icon {
@@ -2185,25 +2199,62 @@ button.list-row {
   font-variant-numeric: tabular-nums;
 }
 
+/* A band label. Uppercase and letterspaced, because at this size in mono that is what reads as a
+   structural marker rather than as content — the same treatment the sidebar's group captions get.
+   The `— sub` clause after it drops back to sentence case: it is a gloss, not part of the label. */
 .activity-band {
-  margin: 0 0 var(--space-3);
+  margin: var(--space-6) 0 var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
-  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
   color: var(--lum-quiet);
 }
 
 .activity-band-sub {
-  color: var(--lum-quiet);
+  color: var(--color-text-muted);
   font-weight: var(--font-weight-normal);
   text-transform: none;
   letter-spacing: 0;
   margin-left: var(--space-2);
 }
 
+/* ── The headline band ──────────────────────────────────────────────────────────────────────────
+   The one lit thing on the screen, and the design's most distinctive element: what the loop actually
+   did, on a rail in the accent. It is lit ONLY when there is a measurement — with nothing delivered
+   the rail goes dashed and quiet, and the band carries no number at all. A zero in this position
+   would be the loudest possible lie. */
+.outcome-band {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border-left: var(--rail-width) solid var(--confidence-measured);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+.outcome-band[data-confidence="unknown"] {
+  border-left-style: dashed;
+  border-left-color: var(--confidence-unknown);
+  background: none;
+}
+
+.outcome-count {
+  color: var(--confidence-measured);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
 .activity-empty {
   margin: 0 0 var(--space-8);
-  max-width: 56ch;
+  /* Mono is wide. A 56ch measure that reads comfortably in sans becomes a narrow ragged column here,
+     stranded in the middle of the page — the measure has to be set for the face actually in use. */
+  max-width: 78ch;
   color: var(--color-text-muted);
   line-height: var(--line-height-base);
 }
@@ -2312,16 +2363,26 @@ button.list-row {
   stroke-linecap: butt;
 }
 
+/* A blocking decision wears a rail in its own severity colour — the same device as the headline
+   band, so "this is the state of something" reads consistently down the page. The severity number is
+   visible because the ranking has to be auditable. */
 .activity-blocking {
   display: flex;
+  align-items: baseline;
   gap: var(--space-3);
-  margin: 0 0 var(--space-8);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border-left: var(--rail-width) solid var(--color-critical);
 }
 
 .activity-severity {
-  padding-top: 2px;
+  padding-top: 0;
   background: none;
   border: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
 }
 
 .activity-severity[data-status="critical"] { color: var(--color-critical); }
@@ -2338,34 +2399,40 @@ button.list-row {
   color: var(--color-text-muted);
 }
 
+/* A list is RULED, not tiled. These rows were filled, bordered, rounded cards with a hover lift —
+   which is the single most generic pattern in dark-dashboard design, and it turned two honest lists
+   into a stack of buttons. A hairline between rows separates them for free; macOS does not put a web
+   hover highlight on list rows either. */
 .finished-list li,
 .observed-list li {
   display: flex;
   align-items: baseline;
   gap: var(--space-4);
-  padding: var(--space-2) var(--space-3);
-  margin: 0 calc(var(--space-3) * -1) var(--space-2);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.finished-list li:hover,
-.observed-list li:hover {
-  background: var(--color-surface-raised);
-  box-shadow: var(--shadow-1);
+.finished-list li:last-child,
+.observed-list li:last-child {
+  border-bottom: none;
+}
+
+.finished-glyph {
+  color: var(--confidence-measured);
+  flex-shrink: 0;
 }
 
 .finished-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-muted);
+  color: var(--color-text);
   text-decoration: none;
-  letter-spacing: var(--tracking-sans);
 }
 
 .finished-title:hover { color: var(--color-text); }
@@ -2403,7 +2470,16 @@ button.list-row {
   color: var(--color-text);
   font: inherit;
   font-size: var(--font-size-sm);
-  letter-spacing: var(--tracking-sans);
+}
+
+/* The screen's one primary action, so it carries the accent as an outline. Outline rather than fill:
+   a filled accent button would be the brightest thing on the page, and brightness is reserved for
+   what was measured. */
+.activity-start {
+  padding: var(--space-2) var(--space-4);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  letter-spacing: var(--tracking-label);
 }
 
 .running-stop {

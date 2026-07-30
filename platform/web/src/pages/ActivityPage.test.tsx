@@ -185,23 +185,68 @@ describe("Activity", () => {
   });
 });
 
-describe("The lede states whether the loop is working, not how busy it is", () => {
-  // It used to read "0 agents running · 0 recalls delivered · …" — a zero standing in for "nothing
-  // is happening yet", which is the one thing this product's confidence ladder forbids.
-  test("with nothing running it says so, and never claims zero recalls", () => {
-    render(page({ sessions: [] }));
-    expect(screen.getByText(/no agent running/)).toBeTruthy();
-    expect(screen.queryByText(/0 recalls/)).toBeNull();
+// The headline band. The design's mockup puts "2 repeat failures prevented this week" here — a
+// number Kage does not and cannot measure without a counterfactual. The band keeps the form and
+// states what IS measured: deliveries into live runs, counted from the proxy's own rows.
+describe("The headline band states the loop's measured outcome, or no number at all", () => {
+  test("a delivered count is lit, and the number is the measured one", () => {
+    const { container } = render(page({ sessions: [session({ recalls: 4, recall_at: [into(1)] })] }));
+    const band = container.querySelector(".outcome-band");
+    expect(band?.getAttribute("data-confidence")).toBe("measured");
+    expect(band?.querySelector(".outcome-count")?.textContent).toBe("4");
+    expect(band?.textContent).toMatch(/times memory reached a running agent/);
   });
 
-  test("a run before memory has landed says so, rather than reporting a zero", () => {
-    render(page({ sessions: [session()] }));
-    expect(screen.getByText(/no memory delivered yet/)).toBeTruthy();
+  test("one delivery reads as one time, not one times", () => {
+    const { container } = render(page({ sessions: [session({ recalls: 1, recall_at: [into(1)] })] }));
+    expect(container.querySelector(".outcome-band")?.textContent).toMatch(/1time memory/);
   });
 
-  test("once memory lands, the lede states the outcome and agrees with the count", () => {
-    render(page({ sessions: [session({ recalls: 4, recall_at: [into(1)] })] }));
-    expect(screen.getByText(/memory reached it 4 times/)).toBeTruthy();
+  // THE rule for this element. A zero in the headline position would be the loudest lie the app could
+  // tell: it reads as "memory did not help", when the truth is that nothing has landed yet.
+  test("a run with nothing delivered shows NO number and an unlit rail", () => {
+    const { container } = render(page({ sessions: [session()] }));
+    const band = container.querySelector(".outcome-band");
+    expect(band?.getAttribute("data-confidence")).toBe("unknown");
+    expect(band?.querySelector(".outcome-count")).toBeNull();
+    expect(band?.textContent).not.toMatch(/\d/);
+  });
+
+  // With no session there is no loop state to report, and the empty state below already says what
+  // would start one. Two elements delivering the same message is worse than one.
+  test("with nothing running there is no band at all, and the empty state carries the instruction", () => {
+    const { container } = render(page({ sessions: [] }));
+    expect(container.querySelector(".outcome-band")).toBeNull();
+    expect(screen.getByText(/No agent is running/)).toBeTruthy();
+  });
+
+  test("the sum is across every running session, not just the first", () => {
+    const { container } = render(
+      page({
+        sessions: [
+          session({ session_id: "a", recalls: 3, recall_at: [into(1)] }),
+          session({ session_id: "b", recalls: 2, recall_at: [into(2)] }),
+        ],
+      }),
+    );
+    expect(container.querySelector(".outcome-count")?.textContent).toBe("5");
+  });
+});
+
+// The plan's rule, and a regression it exists to catch: "No other iconography. The mockup uses none —
+// labels and rails carry the meaning." A pass after the design added a lucide glyph to every nav item,
+// every page title and every row, which is most of why the app stopped looking like its own design.
+describe("No iconography anywhere", () => {
+  test("the page renders no icon elements, only type and rails", () => {
+    const { container } = render(
+      page({
+        sessions: [session({ recalls: 1, recall_at: [into(1)] })],
+        agents: agents([agent({ agent: "claude-code", status: "active" })]),
+      }),
+    );
+    // The run strip is the one legitimate <svg>: it is a chart of recorded events, not an icon.
+    const svgs = [...container.querySelectorAll("svg")];
+    expect(svgs.every((node) => node.classList.contains("run-strip"))).toBe(true);
   });
 });
 

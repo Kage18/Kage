@@ -14,7 +14,6 @@ import type {
   EntityDetailDto,
   EntityListDto,
   FeatureListDto,
-  IntegrationsDto,
   OverviewDto,
   DecisionDetailDto,
   ReviewDecisionRequestDto,
@@ -87,7 +86,6 @@ export interface KageApiClient {
   tasks(): Promise<TasksDto>;
   task(taskId: string): Promise<TaskDetailDto>;
   taskReceipt(taskId: string): Promise<TaskReceiptDto>;
-  integrations(): Promise<IntegrationsDto>;
 }
 
 export class KageApi implements KageApiClient {
@@ -292,9 +290,5 @@ export class KageApi implements KageApiClient {
 
   taskReceipt(taskId: string): Promise<TaskReceiptDto> {
     return this.get<TaskReceiptDto>(`/v2/tasks/${encodeURIComponent(taskId)}/receipt`);
-  }
-
-  integrations(): Promise<IntegrationsDto> {
-    return this.get<IntegrationsDto>("/v2/integrations");
   }
 }

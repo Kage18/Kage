@@ -1,37 +1,18 @@
-import { render, screen, within } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
-import { IntegrationsPage } from "./IntegrationsPage";
+import { render, screen, within, fireEvent } from "@testing-library/react";
+import { describe, expect, test, vi } from "vitest";
 import { SettingsPage } from "./SettingsPage";
 import { AdminDiagnosticsPage } from "./AdminDiagnosticsPage";
-import { fixtureIntegration } from "../test/fixtures";
+import type { DesktopRepo } from "../desktop";
 
-describe("IntegrationsPage", () => {
-  test("shows adapter health by text, never color alone", () => {
-    render(
-      <IntegrationsPage
-        integrations={[
-          fixtureIntegration({ id: "anthropic-proxy", name: "Anthropic proxy", state: "degraded" }),
-        ]}
-      />,
-    );
-    expect(screen.getByRole("heading", { name: "Integrations" })).toBeInTheDocument();
-    expect(screen.getByText("Anthropic proxy")).toBeInTheDocument();
-    // StatusBadge carries the meaning in text.
-    expect(screen.getByText("Degraded but attaching")).toBeInTheDocument();
-  });
-
-  test("an empty integration list states the reality rather than implying healthy silence", () => {
-    render(<IntegrationsPage integrations={[]} />);
-    expect(screen.getByText(/no integrations are attached/i)).toBeInTheDocument();
-  });
-
-  test("never renders raw diagnostics (packets, graph edges, database) on the main portal", () => {
-    render(<IntegrationsPage integrations={[fixtureIntegration()]} />);
-    expect(screen.queryByText(/raw graph edges/i)).toBeNull();
-    expect(screen.queryByText(/packet files/i)).toBeNull();
-    expect(screen.queryByText(/database diagnostics/i)).toBeNull();
-  });
-});
+function fixtureDesktopRepo(overrides: Partial<DesktopRepo> = {}): DesktopRepo {
+  return {
+    path: "/Users/kushal/code/kage",
+    name: "kage",
+    port: 4317,
+    daemon: "running",
+    ...overrides,
+  };
+}
 
 describe("SettingsPage", () => {
   test("shows the local privacy posture, retention, and budget as configured facts", () => {
@@ -50,6 +31,45 @@ describe("SettingsPage", () => {
     // Settings itself never inlines raw packet/graph/database dumps.
     expect(screen.queryByText(/raw graph edges/i)).toBeNull();
     expect(screen.queryByText(/packet files/i)).toBeNull();
+  });
+
+  test("renders no Repositories section outside the desktop app", () => {
+    render(<SettingsPage />);
+    expect(screen.queryByRole("heading", { name: "Repositories" })).toBeNull();
+  });
+
+  test("lists every repository, marks the active one, and lets you switch, add, and remove", () => {
+    const onSwitchRepo = vi.fn();
+    const onAddRepo = vi.fn();
+    const onRemoveRepo = vi.fn();
+    const repos = [
+      fixtureDesktopRepo({ path: "/a", name: "acme" }),
+      fixtureDesktopRepo({ path: "/b", name: "beta", daemon: "stopped" }),
+    ];
+    render(
+      <SettingsPage
+        desktopRepos={repos}
+        activeRepoPath="/a"
+        onSwitchRepo={onSwitchRepo}
+        onAddRepo={onAddRepo}
+        onRemoveRepo={onRemoveRepo}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Repositories" })).toBeInTheDocument();
+    expect(screen.getByText("acme")).toBeInTheDocument();
+    expect(screen.getByText("beta")).toBeInTheDocument();
+    expect(screen.getByText("Current")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /switch to this repository/i }));
+    expect(onSwitchRepo).toHaveBeenCalledWith("/b");
+
+    fireEvent.click(screen.getByRole("button", { name: /add a repository/i }));
+    expect(onAddRepo).toHaveBeenCalledTimes(1);
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[0]);
+    expect(onRemoveRepo).toHaveBeenCalledWith("/a");
+    confirmSpy.mockRestore();
   });
 });
 

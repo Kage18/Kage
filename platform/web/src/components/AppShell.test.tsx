@@ -108,3 +108,31 @@ describe("StatusBadge", () => {
     expect(icon).not.toBeNull();
   });
 });
+
+// THE design rule, guarded because it has already regressed once: "No other iconography. The mockup
+// uses none — labels and rails carry the meaning." A pass after the design added a lucide glyph to
+// every nav item, every page title, every row and the repo switcher, and that is most of why the app
+// stopped resembling its own design. An icon set is a second visual vocabulary competing with the
+// luminance ladder; the app has exactly one mark, the eye, drawn inline in the sidebar.
+describe("The interface ships no icon set", () => {
+  test("no source file imports an icon library", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const path = join(dir, entry);
+        if (statSync(path).isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry) || /\.test\.tsx?$/.test(entry)) continue;
+        if (/from "lucide-react"|from 'lucide-react'/.test(readFileSync(path, "utf8"))) offenders.push(path);
+      }
+    };
+    walk(join(__dirname, ".."));
+
+    expect(offenders).toEqual([]);
+  });
+});

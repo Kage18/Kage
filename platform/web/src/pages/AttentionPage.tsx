@@ -11,6 +11,7 @@
 import React, { useState } from "react";
 import type { AttentionItemDto, AttentionActionResultDto } from "../api/types";
 import { withBase } from "../router";
+import { PageHeader } from "../components/PageHeader";
 
 const KIND_LABEL: Record<AttentionItemDto["kind"], string> = {
   unclaimed_building: "unclaimed work",
@@ -56,8 +57,7 @@ export function AttentionPage({
 
   return (
     <section aria-label="Needs you">
-      <h1 className="visually-hidden">Needs you</h1>
-      <p className="board-lede">Ranked by what each one costs while it waits.</p>
+      <PageHeader title="Needs you" lede="Ranked by what each one costs while it waits." />
 
       {items.length === 0 ? (
         <p className="activity-empty">

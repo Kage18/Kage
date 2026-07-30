@@ -15,6 +15,7 @@
 import { useMemo, useState, type ReactElement } from "react";
 import type { EntityListDto } from "../api/types";
 import { withBase } from "../router";
+import { PageHeader } from "../components/PageHeader";
 
 export interface KnowledgeKind {
   kind: string;
@@ -68,13 +69,12 @@ export function KnowledgePage({
 
   return (
     <section aria-label="Knowledge">
-      <header>
-        <h1 className="visually-hidden">Knowledge</h1>
-        <p className="board-lede">
-          A kind is a filter rather than a destination, so a search covers all of them at once — an
-          answer you half-remember is rarely filed where you expect it.
-        </p>
+      <PageHeader
+        title="Knowledge"
+        lede="A kind is a filter rather than a destination, so a search covers all of them at once — an answer you half-remember is rarely filed where you expect it."
+      />
 
+      <div className="knowledge-controls">
         <div className="kind-chips" role="group" aria-label="Filter by kind">
           <button
             type="button"
@@ -133,7 +133,7 @@ export function KnowledgePage({
             ? `${total.toLocaleString()} ${total === 1 ? "entry" : "entries"}`
             : `${filtered.length.toLocaleString()} of ${total.toLocaleString()} shown`}
         </p>
-      </header>
+      </div>
 
       {filtered.length === 0 ? (
         <p className="empty-state">
@@ -150,20 +150,26 @@ export function KnowledgePage({
                 <span className="fact knowledge-kind">{label}</span>
                 {/* Health carries the confidence rung: a claim nobody verified must not look like
                     one that was, and a stale one has to be visible without opening it. */}
-                <span
-                  className="fact knowledge-health"
-                  data-confidence={
+                {(() => {
+                  const confidence =
                     entity.stale_claims > 0 || entity.disputed_claims > 0
                       ? "attention"
                       : entity.verified_claims > 0
                         ? "measured"
-                        : "unknown"
-                  }
-                >
-                  {entity.verified_claims > 0 ? `${entity.verified_claims} verified` : "unverified"}
-                  {entity.stale_claims > 0 && ` · ${entity.stale_claims} stale`}
-                  {entity.disputed_claims > 0 && ` · ${entity.disputed_claims} disputed`}
-                </span>
+                        : "unknown";
+                  // A glyph in type, not an icon — and the same three silhouettes the agent-status
+                  // rows use, so one vocabulary covers health everywhere. Differs in SHAPE, because
+                  // green and red collide under deuteranopia.
+                  const glyph = confidence === "attention" ? "\u25b2" : confidence === "measured" ? "\u2713" : "\u25cb";
+                  return (
+                    <span className="fact knowledge-health" data-confidence={confidence}>
+                      <span className="status-glyph" aria-hidden="true">{glyph}</span>
+                      {entity.verified_claims > 0 ? `${entity.verified_claims} verified` : "unverified"}
+                      {entity.stale_claims > 0 && ` · ${entity.stale_claims} stale`}
+                      {entity.disputed_claims > 0 && ` · ${entity.disputed_claims} disputed`}
+                    </span>
+                  );
+                })()}
               </div>
               <a className="knowledge-title" href={withBase(`/${kind}/${entity.slug}`)}>
                 {entity.canonical_name}

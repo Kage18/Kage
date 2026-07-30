@@ -12,6 +12,7 @@
 import React from "react";
 import type { WorkBoardDto, WorkCardDto } from "../api/types";
 import { withBase } from "../router";
+import { PageHeader } from "../components/PageHeader";
 
 // Most-active first. `done` is last because it is the only group you scroll past rather than to.
 const STAGE_ORDER: Array<WorkCardDto["stage"]> = ["building", "verifying", "claimed", "proposed", "done"];
@@ -79,15 +80,16 @@ export function WorkPage({
 
   return (
     <section aria-label="Board">
-      <h1 className="visually-hidden">Board</h1>
-
-      <div className="board-head">
-        <p className="board-lede">Every stage is derived from git and the command log. Nobody typed any of it.</p>
-        <label className="board-actor">
-          <span className="fact">acting as</span>
-          <input value={actor} onChange={(event) => onActorChange(event.target.value)} aria-label="Acting as" />
-        </label>
-      </div>
+      <PageHeader
+        title="Board"
+        lede="Every stage is derived from git and the command log. Nobody typed any of it."
+        action={
+          <label className="board-actor">
+            <span className="fact">acting as</span>
+            <input value={actor} onChange={(event) => onActorChange(event.target.value)} aria-label="Acting as" />
+          </label>
+        }
+      />
 
       {error ? <p className="sheet-error">{error}</p> : null}
 
@@ -96,7 +98,8 @@ export function WorkPage({
           No work items yet. Create one from an intent: <code>kage plan --intent "…"</code>
         </p>
       ) : (
-        grouped.map((group) => (
+        <div className="board-cols">
+          {grouped.map((group) => (
           <div key={group.stage} className="board-group">
             <p className="board-group-head">
               <span>{STAGE_LABEL[group.stage]}</span>
@@ -111,7 +114,7 @@ export function WorkPage({
                   </a>
                   <p className="fact board-card-evidence">{evidenceLine(card)}</p>
 
-                  {/* What the team already knows about the code this touches — the reason to read
+                  {/* What's already known about the code this touches — the reason to read
                       the board before starting, rather than after. */}
                   {card.knowledge.length > 0 && (
                     <ul className="board-card-knowledge">
@@ -132,7 +135,7 @@ export function WorkPage({
                     {card.stage === "proposed" && (
                       <button
                         type="button"
-                        className="board-action"
+                        className="board-action button-primary"
                         disabled={pending === card.work_id || !actor.trim()}
                         onClick={() => onCommand("task.claimed", card.work_id)}
                       >
@@ -143,11 +146,11 @@ export function WorkPage({
                       <>
                         <button
                           type="button"
-                          className="board-action"
+                          className="board-action button-primary"
                           disabled={pending === card.work_id || !actor.trim()}
                           onClick={() => onCommand("gate.approved", card.work_id)}
                         >
-                          Approve ship gate
+                            Approve ship gate
                         </button>
                         {/* Quiet: releasing is the undo, not the intent. */}
                         <button
@@ -156,7 +159,7 @@ export function WorkPage({
                           disabled={pending === card.work_id || !actor.trim()}
                           onClick={() => onCommand("task.released", card.work_id)}
                         >
-                          Release
+                            Release
                         </button>
                       </>
                     )}
@@ -165,7 +168,8 @@ export function WorkPage({
               ))}
             </ul>
           </div>
-        ))
+          ))}
+        </div>
       )}
     </section>
   );

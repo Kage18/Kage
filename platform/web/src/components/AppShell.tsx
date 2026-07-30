@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { RepositoryDto } from "../api/types";
+import type { DesktopRepo } from "../desktop";
 import { navGroups, withBase } from "../router";
 import { RepositorySwitcher } from "./RepositorySwitcher";
 import { LiveIndicator } from "./LiveIndicator";
@@ -8,10 +9,15 @@ import { LiveIndicator } from "./LiveIndicator";
 //
 // Two things about it are deliberate and easy to undo by accident:
 //
-//   The nav groups are separated by SPACE, not by rendered captions. `NOW` / `WORK` / `MEMORY` in
-//   letterspaced caps was the noisiest thing on the sidebar and said nothing a gap does not. The
-//   group name survives as `aria-label`, so assistive tech still gets the structure a sighted
-//   reader gets from the spacing.
+//   The nav groups render a quiet caption — `NOW` / `WORK` / `MEMORY` — dim and small. A nav with
+//   zero visible grouping relies entirely on spatial memory, which is a real source of "confusing
+//   IA" for anyone but the person who built it.
+//
+//   There are NO ICONS, here or anywhere. That is the design's rule, not an omission: one mark (the
+//   eye) and nothing else. An icon set would be a second visual vocabulary competing with the one
+//   that already carries the meaning — labels, rails, and the luminance ladder. A previous pass
+//   added a lucide glyph to every nav item, every page title and every row, and that is most of why
+//   the app stopped looking like its own design.
 //
 //   In the desktop app the traffic lights are inset over the top-left of the window, so the banner
 //   reserves space for them and becomes the drag region. Gated on `data-kage-desktop`, which the
@@ -21,6 +27,12 @@ interface AppShellProps {
   repository: RepositoryDto | null;
   route: string;
   children: ReactNode;
+  /** Present only inside the desktop app; undefined in the browser, where there is nothing to switch. */
+  desktopRepos?: DesktopRepo[];
+  activeRepoPath?: string | null;
+  onSwitchRepo?: (path: string) => void;
+  onAddRepo?: () => void;
+  onRemoveRepo?: (path: string) => void;
 }
 
 function firstSegment(path: string): string {
@@ -48,7 +60,16 @@ function Mark(): React.ReactElement {
   );
 }
 
-export function AppShell({ repository, route, children }: AppShellProps): React.ReactElement {
+export function AppShell({
+  repository,
+  route,
+  children,
+  desktopRepos,
+  activeRepoPath,
+  onSwitchRepo,
+  onAddRepo,
+  onRemoveRepo,
+}: AppShellProps): React.ReactElement {
   return (
     <div className="kage-app">
       <a className="skip-link" href="#main-content">
@@ -63,28 +84,47 @@ export function AppShell({ repository, route, children }: AppShellProps): React.
               shows up for someone navigating by landmark. */}
           <header className="shell-identity">
             <Mark />
-            <RepositorySwitcher repository={repository} />
+            <RepositorySwitcher
+              repository={repository}
+              desktopRepos={desktopRepos}
+              activeRepoPath={activeRepoPath}
+              onSwitchRepo={onSwitchRepo}
+              onAddRepo={onAddRepo}
+              onRemoveRepo={onRemoveRepo}
+            />
           </header>
 
           <nav className="shell-nav" aria-label="Sections">
           {navGroups.map((group) => (
-            <ul key={group.label} className="nav-group" aria-label={group.label}>
-              {group.links.map((link) => {
-                const active = isActive(link.href, route);
-                return (
-                  <li key={link.href}>
-                    <a href={withBase(link.href)} aria-current={active ? "page" : undefined}>
-                      {link.label}
-                    </a>
-                  </li>
-                );
-              })}
-            </ul>
+            <div key={group.label} className="nav-group-block">
+              <span className="nav-group-label" aria-hidden="true">
+                {group.label}
+              </span>
+              <ul className="nav-group" aria-label={group.label}>
+                {group.links.map((link) => {
+                  const active = isActive(link.href, route);
+                  return (
+                    <li key={link.href}>
+                      <a href={withBase(link.href)} aria-current={active ? "page" : undefined}>
+                        {link.label}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
           ))}
 
           </nav>
 
           <div className="shell-nav-foot">
+            <a
+              href={withBase("/settings")}
+              className="shell-preferences-link"
+              aria-current={isActive("/settings", route) ? "page" : undefined}
+            >
+              Preferences
+            </a>
             <LiveIndicator />
           </div>
         </div>

@@ -12,6 +12,12 @@
  * Single scheme, deliberately. A light variant would have to invert the metaphor — "certainty is
  * darker" — which is not the same idea wearing different clothes, it is a different idea. The
  * design commits to one visual world rather than shipping a second one that argues with it.
+ *
+ * Surfaces and elevation were revised after the ladder concept read as "spreadsheet, not
+ * product" in practice: near-zero shadow at this darkness is genuinely invisible, and a 2-4%
+ * lift between background and card was not enough separation on its own. Depth now comes from
+ * BOTH a wider surface gap and a real (if still restrained) shadow scale — the ladder still does
+ * the semantic work, elevation does the physical-object work it was never doing before.
  */
 
 :root {
@@ -24,35 +30,47 @@
      dash is the message. */
   --lum-measured: #5fe0a4;  /* the system observed this */
   --lum-derived: #c3cabf;   /* inferred from evidence it can cite */
-  --lum-context: #838a80;   /* supporting prose */
-  --lum-quiet: #4a504a;     /* present, deliberately receded */
-  --lum-unknown: #252a25;   /* never measured — barely above ground */
-  --lum-ground: #0a0c0b;    /* shadow */
+  --lum-context: #6e7d75;   /* supporting prose */
+  --lum-quiet: #414944;     /* present, deliberately receded */
+  --lum-unknown: #232a26;   /* never measured — barely above ground */
+  --lum-ground: #05070a;    /* shadow */
 
-  /* Surfaces. They lift by almost nothing: depth here is light, not elevation. */
+  /* Surfaces. ONE step above the ground, and a narrow one.
+     A previous pass widened this gap and added radii, on the reasoning that a card should read as a
+     physical object — which pulled the interface toward a generic dark dashboard and away from the
+     instrument panel the design is. Separation comes from the corner brackets, the rails and the
+     rules; a surface is a change of ground, not a floating card. */
   --color-background: var(--lum-ground);
-  --color-surface: #101312;
-  --color-surface-raised: #161917;
-  --color-text: #f2f5f0;
-  --color-text-muted: var(--lum-context);
-  --color-border: #1b1f1c;
-  --color-border-strong: #2e332e;
+  --color-surface: #0b0f0d;         /* resting surface: cards, rows, inputs */
+  --color-surface-raised: #101512;  /* one narrow step, for a surface sitting on a surface */
+  --color-surface-overlay: #151b17; /* menus, sheets, modals — the only things that float */
+  --color-text: #e7f2ec;
+  --color-text-muted: #6e7d75;
+  --color-text-faint: #4a534d;      /* a quiet rung for prose, distinct from --lum-quiet's structural use */
+  --color-border: #1b211d;
+  --color-border-strong: #2a322d;
 
   /* One accent, and it means "measured". It is the brightest thing in the room,
-     which is the theme stated literally. */
+     which is the theme stated literally. Hover/active states so it behaves like an
+     interactive color, not just a status color. */
   --color-accent: var(--lum-measured);
+  --color-accent-hover: #7ceab6;
+  --color-accent-active: #46c489;
   --color-accent-contrast: #06120c;
   --color-focus: #7ae9b6;
 
   --color-success: var(--lum-measured);
   --color-success-tint: #0f2a1e;
   /* Warm lights in a cold room — the only hues that are not the accent. */
-  --color-warning: #d9a93f;
+  --color-warning: #c9a227;
   --color-warning-tint: #2b2311;
-  --color-critical: #e07a8c;
-  --color-critical-tint: #2e161c;
+  /* Orange-red rather than pink. Both collide with the success green under deuteranopia — that is
+     why status always carries a glyph and a word — but this one at least stays distinguishable from
+     the accent under protanopia, and it reads as an alarm lamp in a cold room. */
+  --color-critical: #ff6b4a;
+  --color-critical-tint: #2a1510;
   --color-neutral: var(--lum-context);
-  --color-neutral-tint: #161917;
+  --color-neutral-tint: #1c211e;
 
   /* The ladder, named by meaning rather than by value, so components never
      reference a rung directly. `unknown` must never be able to LOOK like
@@ -68,18 +86,26 @@
   --evidence-bg: rgba(95, 224, 164, 0.07);
   --evidence-border: rgba(95, 224, 164, 0.22);
 
-  /* Spacing scale (4px base). */
+  /* Spacing scale (4px base). --space-7 is the redesigned list-row's row height; --space-10 is
+     page-level and empty-state vertical rhythm. */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+  --space-7: 2.5rem;
   --space-8: 3rem;
+  --space-10: 4rem;
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  /* Square. Rounded corners were the other half of the "card as physical object" pass, and together
+     with the wide surface gap they are what made the app read as a web dashboard rather than an
+     instrument. Nothing in the design is a pill or a floating tile. Overlays keep a hairline so a
+     sheet still reads as a distinct plane. */
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 2px;
+  --radius-full: 999px;
 
   /* ── Two voices ────────────────────────────────────────────────────────────
      IBM Plex Mono is the MACHINE's voice; IBM Plex Sans is the HUMAN's.
@@ -89,34 +115,47 @@
      output, so the display face should be the one that says so.
 
      One superfamily, so the pairing is designed rather than assembled. Both are
-     bundled and self-hosted: the portal ships a strict CSP and the desktop app
-     loads nothing remote, so a font CDN would silently fall back to system-ui. */
+     bundled and self-hosted: the app loads nothing remote, so a font CDN would
+     silently fall back to system-ui. */
   --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* A compressed scale off a 15px base. An operator tool needs few sizes: too
-     many and nothing reads as primary. */
-  --font-size-xs: 0.6875rem;   /* structural labels */
-  --font-size-sm: 0.8125rem;   /* metadata, evidence */
-  --font-size-base: 0.9375rem; /* body */
-  --font-size-lg: 1.0625rem;   /* card titles */
-  --font-size-xl: 1.3125rem;   /* section headings */
-  --font-size-2xl: 1.625rem;   /* page title */
-  --font-size-display: 2.75rem;/* a MEASURED number, and nothing else */
+  /* A compressed scale off a 15px base, widened at the top: the original scale had no room
+     between "card title" and "page title", so nothing but colour ever read as loud. */
+  --font-size-xs: 0.6875rem;    /* structural labels */
+  --font-size-sm: 0.8125rem;    /* metadata, evidence */
+  --font-size-base: 0.9375rem;  /* body */
+  --font-size-lg: 1.0625rem;    /* card titles */
+  --font-size-xl: 1.3125rem;    /* section headings */
+  --font-size-2xl: 1.75rem;     /* page title */
+  --font-size-3xl: 2.25rem;     /* section-level hero number, secondary metrics in a grid */
+  --font-size-display: 3rem;    /* the ONE measured number per screen, and nothing else */
 
   --line-height-base: 1.55;
   --line-height-data: 1.3;
+  --line-height-tight: 1.15;   /* display numbers, nav labels */
   --tracking-label: 0.06em;
   /* Light type on a dark ground needs slightly positive tracking to breathe. */
   --tracking-sans: 0.2px;
 
+  /* --font-weight-semibold is what card/section titles use (h2-h4). --font-weight-bold is
+     reserved for exactly two things — the page <h1> and a --font-size-display number — so that
+     weight actually reinforces hierarchy instead of every heading using the same weight the old
+     single "bold" rung gave everything. */
   --font-weight-normal: 400;
   --font-weight-medium: 500;
-  --font-weight-bold: 600;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
 
-  /* Elevation is nearly absent by design — light does the separating, not shadow. */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.55);
+  /* Elevation. Restrained but real — three rungs, used deliberately rather than everywhere: 1
+     for resting cards, 2 for anything that floats above the page (open menus, popovers), 3 for
+     anything that blocks the page (sheets, modals). --glow-measured is a sparing accent ring for
+     states that have earned brightness (a running agent, a just-verified claim) — never a
+     default treatment. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 1px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.45);
+  --glow-measured: 0 0 0 1px rgba(95, 224, 164, 0.35), 0 0 24px rgba(95, 224, 164, 0.08);
 
   --sidebar-width: 13rem;
   --content-max-width: 78rem;

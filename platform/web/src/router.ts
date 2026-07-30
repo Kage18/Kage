@@ -34,9 +34,7 @@ export type Route =
   | { page: "tasks" }
   | { page: "task"; id: string }
   | { page: "costs" }
-  | { page: "integrations" }
   | { page: "settings" }
-  | { page: "billing" }
   | { page: "admin-diagnostics" }
   | { page: "not-found"; path: string };
 
@@ -98,13 +96,10 @@ export const navLinks: NavLink[] = navGroups.flatMap((group) => group.links);
 //   /costs        rendered AgentTasksContainer verbatim, i.e. the Agent Tasks table under a second
 //                 name. The real cost view (CostBreakdown) lives on a task's receipt page, which is
 //                 reachable from Agent Tasks. A duplicate entry is worse than none.
-//   /integrations the read model returns a hardcoded `integrations: []` (api/router.ts), so the page
-//                 could only ever say "no integrations".
-//   /settings     three paragraphs of static prose; it never reads the real vNext config.
-//   /billing      the local daemon has no workspace-billing feed and passes `billing={null}`, so the
-//                 page is permanently "No workspace connected".
-// The routes themselves still resolve, so nothing breaks for a bookmark; they are simply not
-// advertised as working surfaces until they read something real.
+// Settings is real (repository management) and reachable from the sidebar foot, not this nav — see
+// AppShell. Billing and Integrations were deleted outright: Kage ships only as a single-user
+// Electron desktop app, so a workspace-billing panel and an adapter-fleet-health page can never be
+// real. The route themselves still resolve for `/costs`, so nothing breaks for a bookmark.
 
 // The daemon serves the portal under `/app/`. Detect that mount from the current pathname so the SPA
 // can strip it before routing and re-add it on every internal link — the portal uses root-absolute
@@ -208,14 +203,8 @@ export function parseRoute(input: string): Route {
     case "costs":
       if (segments.length === 1) return { page: "costs" };
       break;
-    case "integrations":
-      if (segments.length === 1) return { page: "integrations" };
-      break;
     case "settings":
       if (segments.length === 1) return { page: "settings" };
-      break;
-    case "billing":
-      if (segments.length === 1) return { page: "billing" };
       break;
     case "admin":
       // The segregated operator surface. Raw packets, graph edges, checkpoints, and DB diagnostics
@@ -279,12 +268,8 @@ export function routeToPath(route: Route): string {
       return `/tasks/${encodeURIComponent(route.id)}`;
     case "costs":
       return "/costs";
-    case "integrations":
-      return "/integrations";
     case "settings":
       return "/settings";
-    case "billing":
-      return "/billing";
     case "admin-diagnostics":
       return "/admin/diagnostics";
     case "not-found":

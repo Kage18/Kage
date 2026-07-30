@@ -11,6 +11,7 @@
 
 import React from "react";
 import type { ProofMetricDto, ProofReportDto, TeamReportDto } from "../api/types";
+import { PageHeader } from "../components/PageHeader";
 
 function compactNumber(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -85,7 +86,7 @@ export function ProofPage({
 
   return (
     <section aria-label="Proof">
-      <h1 className="visually-hidden">Proof</h1>
+      <PageHeader title="Proof" />
 
       {lead ? (
         <>
@@ -98,7 +99,7 @@ export function ProofPage({
             <p className="proof-lead-caption">
               times an agent was handed something
               <br />
-              the team already knew
+              already known
             </p>
           </div>
           <p className="fact proof-lead-note">

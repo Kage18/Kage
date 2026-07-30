@@ -14,7 +14,6 @@
 // something there. It never renders a zero dressed up as a measurement.
 
 import type { ReactElement } from "react";
-import { Activity as ActivityIcon, AlertTriangle, CheckCircle2, CircleDot, CircleSlash, StopCircle } from "lucide-react";
 import type { AgentDto, AgentsReportDto, AttentionItemDto, TaskSummaryDto } from "../api/types";
 import { withBase } from "../router";
 import { PageHeader } from "../components/PageHeader";
@@ -188,7 +187,6 @@ function RunningBand({
               </span>
               {onStop && (
                 <button type="button" className="running-stop" onClick={() => onStop(session.session_id)}>
-                  <StopCircle size={14} strokeWidth={1.75} aria-hidden />
                   Stop
                 </button>
               )}
@@ -202,12 +200,10 @@ function RunningBand({
 
 function AgentLine({ agent }: { agent: AgentDto }): ReactElement {
   const working = agent.status === "active";
-  const StateIcon = working ? CircleDot : agent.status === "silent" ? AlertTriangle : CircleSlash;
+  // The status already carries a text glyph AND a word below. A lucide icon here was a third encoding
+  // of one fact, and the design has no icon set.
   return (
     <li className="list-row" data-confidence={working ? "measured" : agent.status === "silent" ? "critical" : undefined}>
-      <span className="list-row-icon" aria-hidden="true">
-        <StateIcon size={16} strokeWidth={1.75} />
-      </span>
       <span className="list-row-primary">{agent.agent}</span>
       <span className="observed-state" data-status={working ? "measured" : agent.status === "silent" ? "critical" : undefined}>
         <span className="status-glyph" aria-hidden="true">{working ? "●" : agent.status === "silent" ? "▲" : "○"}</span>
@@ -221,38 +217,38 @@ function AgentLine({ agent }: { agent: AgentDto }): ReactElement {
 }
 
 /**
- * One line saying whether the loop is doing its job right now.
+ * The headline band: the loop's outcome, given the visual weight it deserves.
  *
- * This used to read "N agents running · N recalls delivered · N decisions waiting" — three counts of
- * ACTIVITY, which is not the same thing as an outcome, and which showed "0 recalls delivered" on a
- * run where memory simply had not landed yet. Kage's claim is that memory reaches an agent before it
- * repeats a failure the team already solved, so the line leads with whether that has happened and
- * says what is missing when it has not. No zero stands in for "not yet".
+ * The design's mockup puts a lit band at the top of this screen reading "2 repeat failures prevented
+ * this week". That number does not exist: preventing a repeat failure needs a counterfactual nobody
+ * measured, and Kage records no such figure. Shipping it would be precisely the lie the confidence
+ * ladder exists to stop.
  *
- * Every figure is either a count of props this page already receives or the measured `recalls` from
- * the delivery rows — nothing new is computed and nothing is estimated.
+ * So the band keeps its form and states the strongest thing that IS measured — how many times memory
+ * actually reached a running agent, counted from the proxy's own delivery rows. When that has not
+ * happened there is NO NUMBER at all, and the rail goes dashed: a zero here would read as "memory did
+ * not help" rather than "nothing has landed yet".
  */
-function statLede(sessions: RunningSession[], attentionCount: number): string {
-  const waiting =
-    attentionCount > 0 ? `${attentionCount} ${attentionCount === 1 ? "decision" : "decisions"} waiting` : null;
+function OutcomeBand({ sessions }: { sessions: RunningSession[] }): ReactElement {
+  const recalls = sessions.reduce((sum, session) => sum + (session.recalls ?? 0), 0);
 
-  if (sessions.length === 0) {
-    // No session means there is nothing to say about memory reaching one. Saying "0 recalls" here
-    // would read as a measurement that memory did not help.
-    return [waiting, "no agent running"].filter(Boolean).join(" · ");
+  if (recalls > 0) {
+    return (
+      <p className="outcome-band" data-confidence="measured">
+        <b className="outcome-count">{recalls}</b>
+        <span>
+          {recalls === 1 ? "time" : "times"} memory reached a running agent — each one is a mark on its
+          run strip
+        </span>
+      </p>
+    );
   }
 
-  const recalls = sessions.reduce((sum, session) => sum + (session.recalls ?? 0), 0);
-  const pronoun = sessions.length === 1 ? "it" : "them";
-  return [
-    `${sessions.length} ${sessions.length === 1 ? "agent" : "agents"} running`,
-    recalls > 0
-      ? `memory reached ${pronoun} ${recalls} ${recalls === 1 ? "time" : "times"}`
-      : "no memory delivered yet",
-    waiting,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  return (
+    <p className="outcome-band" data-confidence="unknown">
+      <span>No memory has reached these agents yet — each delivery appears here, and on the run strip, as it lands.</span>
+    </p>
+  );
 }
 
 export function ActivityPage({
@@ -282,9 +278,8 @@ export function ActivityPage({
   return (
     <section aria-label="Activity">
       <PageHeader
-        icon={ActivityIcon}
         title="Activity"
-        lede={statLede(sessions, attention.length)}
+        lede="Every agent touching this repo, however it got here — and the memory steering it."
         action={
           canStartAgents && (
             <button type="button" className="activity-start" onClick={onStartAgent}>
@@ -294,12 +289,20 @@ export function ActivityPage({
         }
       />
 
+      {/* No session means no loop state to report. The empty state below already says what would
+          start one, and two elements delivering one message is worse than one. */}
+      {sessions.length > 0 && <OutcomeBand sessions={sessions} />}
+
+      {sessions.length > 0 && (
+        <p className="activity-band">
+          Running now<span className="activity-band-sub">— started here</span>
+        </p>
+      )}
       <RunningBand sessions={sessions} onStop={onStopSession} />
 
       {blocking && (
         <div className="activity-blocking">
           <span className="fact activity-severity" data-status={blocking.severity >= 80 ? "critical" : "attention"}>
-            <AlertTriangle size={16} strokeWidth={1.75} aria-hidden />
             {Math.round(blocking.severity)}
           </span>
           <div>
@@ -320,9 +323,8 @@ export function ActivityPage({
             {finished.map((task) => (
               <li key={task.task_id}>
                 <a className="finished-title" href={withBase(`/tasks/${encodeURIComponent(task.task_id)}`)}>
-                  <span className="list-row-icon" aria-hidden="true">
-                    <CheckCircle2 size={16} strokeWidth={1.75} />
-                  </span>
+                  {/* A finished run's mark is a checked glyph in type, not an icon. */}
+                  <span className="finished-glyph" aria-hidden="true">✓</span>
                   {task.outcome ?? task.task_id}
                 </a>
                 <span className="fact finished-meta">{duration(task.started_at, task.ended_at) ?? "—"}</span>

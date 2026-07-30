@@ -60,7 +60,6 @@ describe("parseRoute", () => {
     expect(parseRoute("/features")).toEqual({ page: "features" });
     expect(parseRoute("/review")).toEqual({ page: "review" });
     expect(parseRoute("/settings")).toEqual({ page: "settings" });
-    expect(parseRoute("/billing")).toEqual({ page: "billing" });
   });
 
   test("parses the segregated admin diagnostics route", () => {

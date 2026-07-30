@@ -23,6 +23,18 @@ const TRUST_LABELS: Record<TrustState, string> = {
   archived: "Archived",
 };
 
+// Distinct glyph shapes so sighted users who cannot distinguish the tints still get a non-color
+// cue — the same discipline as StatusBadge and health.ts.
+const TRUST_ICONS: Record<TrustState, string> = {
+  proposed: "○",
+  verified: "●",
+  approved: "●",
+  stale: "◐",
+  disputed: "▲",
+  superseded: "◐",
+  archived: "◐",
+};
+
 export function ClaimCard({ claim, showTrustLabel = false }: ClaimCardProps): React.ReactElement {
   return (
     <article className="claim-card" data-trust={claim.trust_state}>
@@ -30,6 +42,9 @@ export function ClaimCard({ claim, showTrustLabel = false }: ClaimCardProps): Re
       <p className="claim-meta">
         {showTrustLabel && (
           <span className="claim-trust" data-trust={claim.trust_state}>
+            <span className="claim-trust-icon" aria-hidden="true">
+              {TRUST_ICONS[claim.trust_state]}
+            </span>
             {TRUST_LABELS[claim.trust_state]}
           </span>
         )}
