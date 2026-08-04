@@ -1,0 +1,199 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+
+import { BRIEF_BEGIN, BRIEF_END, applyBrief, briefTarget, composeBrief } from "./brief.js";
+import type { Card } from "./types.js";
+
+let seq = 0;
+function card(overrides: Partial<Card> = {}): Card {
+  seq += 1;
+  return {
+    id: `card_${seq.toString(16).padStart(8, "0")}`,
+    kind: "caution",
+    state: "approved",
+    verify: "verified",
+    title: `claim number ${seq}`,
+    claim: "The first sentence carries the fact. The rest is context an index line cannot afford.",
+    citations: [{ path: "src/a.ts" }],
+    trigger: "editing src/a.ts",
+    provenance: { source: "session", ref: "s-1", at: "2026-08-04T10:00:00.000Z" },
+    tags: [],
+    createdAt: "2026-08-04T10:00:00.000Z",
+    updatedAt: "2026-08-04T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** The card lines alone: everything between the begin-fence+header and the end-fence. */
+function cardLines(brief: string): string[] {
+  return brief.split("\n").slice(2, -1);
+}
+
+// ── Composition ──────────────────────────────────────────────────────────────────────────────
+
+test("only approved cards enter the brief — proposed and superseded are invisible", () => {
+  const brief = composeBrief([
+    card({ id: "card_proposd1", state: "proposed" }),
+    card({ id: "card_superd01", state: "superseded" }),
+    card({ id: "card_retird01", state: "retired" }),
+    card({ id: "card_approvd1", state: "approved" }),
+  ]);
+  assert.ok(brief.includes("card_approvd1"));
+  for (const excluded of ["card_proposd1", "card_superd01", "card_retird01"]) {
+    assert.ok(!brief.includes(excluded), excluded);
+  }
+});
+
+// THE exclusion. The brief is always-on context served to every session; a stale claim here
+// would reach every agent on every task — the exact failure this product exists to prevent.
+test("a stale card never enters the brief, even while approved", () => {
+  const brief = composeBrief([
+    card({ id: "card_stale001", state: "approved", verify: "stale" }),
+    card({ id: "card_fresh001", state: "approved", verify: "verified" }),
+  ]);
+  assert.ok(!brief.includes("card_stale001"));
+  assert.match(brief.split("\n")[1], /^<!-- 1 card;/);
+});
+
+test("verified cards lead, then unverified, newest first within each band", () => {
+  const brief = composeBrief([
+    card({ id: "card_unv_old1", verify: "unverified", updatedAt: "2026-08-01T00:00:00.000Z" }),
+    card({ id: "card_ver_old1", verify: "verified", updatedAt: "2026-08-01T00:00:00.000Z" }),
+    card({ id: "card_unv_new1", verify: "unverified", updatedAt: "2026-08-03T00:00:00.000Z" }),
+    card({ id: "card_ver_new1", verify: "verified", updatedAt: "2026-08-03T00:00:00.000Z" }),
+  ]);
+  const ids = cardLines(brief).map((line) => /\((card_\w+)\)/.exec(line)?.[1]);
+  assert.deepEqual(ids, ["card_ver_new1", "card_ver_old1", "card_unv_new1", "card_unv_old1"]);
+});
+
+test("a card line is the promised shape: kind, title, first sentence, id", () => {
+  const brief = composeBrief([
+    card({
+      id: "card_deadbeef",
+      kind: "decision",
+      title: "we chose the shadow repo",
+      claim: "Memory lives outside the product repo. The old model put 405 packets in it.",
+      verify: "verified",
+    }),
+  ]);
+  assert.equal(
+    cardLines(brief)[0],
+    "- [decision] we chose the shadow repo — Memory lives outside the product repo. (card_deadbeef)",
+  );
+});
+
+// The agent reading the brief has no other channel for trust state — an unmarked unverified
+// claim would read as verified.
+test("an unverified line says so; a verified line says nothing", () => {
+  const lines = cardLines(
+    composeBrief([card({ verify: "unverified" }), card({ verify: "verified" })]),
+  );
+  assert.ok(!lines[0].endsWith("(unverified)"), "verified sorts first and carries no suffix");
+  assert.ok(lines[1].endsWith(" (unverified)"));
+});
+
+test("a multi-line, multi-sentence claim contributes one flat first sentence", () => {
+  const brief = composeBrief([
+    card({
+      claim: "The fix lives in src/limits.ts and\nnowhere else. Two PRs flipped it. Do not be the third.",
+    }),
+  ]);
+  const line = cardLines(brief)[0];
+  // The dot in "limits.ts" must not end the sentence, and the newline must not survive.
+  assert.ok(line.includes("The fix lives in src/limits.ts and nowhere else."));
+  assert.ok(!line.includes("Two PRs flipped it"));
+});
+
+test("a claim with no sentence terminator is used whole", () => {
+  const brief = composeBrief([card({ claim: "run kage up before anything else" })]);
+  assert.ok(cardLines(brief)[0].includes("run kage up before anything else ("));
+});
+
+// ── The header and the cap ───────────────────────────────────────────────────────────────────
+
+test("the header names the generator and the count", () => {
+  const brief = composeBrief([card(), card()]);
+  assert.equal(brief.split("\n")[1], "<!-- 2 cards; generated by Kage — edit cards, not this block -->");
+  assert.ok(!brief.includes("dropped"), "nothing was dropped, so the header does not say so");
+});
+
+test("the cap counts every line including the fences, and the header admits the drop", () => {
+  const cards = [
+    card({ id: "card_keep0001", verify: "verified", updatedAt: "2026-08-04T00:00:00.000Z" }),
+    card({ id: "card_keep0002", verify: "verified", updatedAt: "2026-08-03T00:00:00.000Z" }),
+    card({ id: "card_drop0001", verify: "unverified", updatedAt: "2026-08-04T00:00:00.000Z" }),
+    card({ id: "card_drop0002", verify: "unverified", updatedAt: "2026-08-03T00:00:00.000Z" }),
+  ];
+  const brief = composeBrief(cards, { maxLines: 5 });
+  const lines = brief.split("\n");
+  assert.equal(lines.length, 5, "fences + header + 2 card lines is exactly the cap");
+  assert.equal(lines[0], BRIEF_BEGIN);
+  assert.equal(lines.at(-1), BRIEF_END);
+  assert.match(lines[1], /2 cards, 2 dropped to fit 5 lines/);
+  // The lowest-ranked fall off the bottom: the verified pair survives the cut.
+  assert.ok(brief.includes("card_keep0001") && brief.includes("card_keep0002"));
+  assert.ok(!brief.includes("card_drop0001") && !brief.includes("card_drop0002"));
+});
+
+test("an empty store still yields a well-formed block", () => {
+  const brief = composeBrief([]);
+  assert.deepEqual(brief.split("\n"), [
+    BRIEF_BEGIN,
+    "<!-- 0 cards; generated by Kage — edit cards, not this block -->",
+    BRIEF_END,
+  ]);
+});
+
+// ── The splice ───────────────────────────────────────────────────────────────────────────────
+
+test("a missing file becomes the block alone with a trailing newline", () => {
+  const brief = composeBrief([card()]);
+  assert.equal(applyBrief(null, brief), brief + "\n");
+  assert.equal(applyBrief("", brief), brief + "\n", "an empty file gets the absent-file treatment");
+});
+
+test("a file without the block gets it appended after one blank line", () => {
+  const brief = composeBrief([card()]);
+  assert.equal(applyBrief("# Agents\n\nHouse rules.\n", brief), `# Agents\n\nHouse rules.\n\n${brief}\n`);
+  assert.equal(applyBrief("no trailing newline", brief), `no trailing newline\n\n${brief}\n`);
+});
+
+// The team's file is the team's. Odd whitespace, tabs, a missing final newline — none of it
+// is ours to fix, and "Kage reformatted my CLAUDE.md" is a bug report we never want.
+test("replacing the block leaves every surrounding byte untouched", () => {
+  const before = "# Agents\n\nweird  spacing\t and trailing spaces   \n\n";
+  const after = "\n\ntail with no final newline";
+  const existing = before + composeBrief([card({ title: "the old brief" })]) + after;
+  const next = composeBrief([card({ title: "the new brief" }), card()]);
+  const result = applyBrief(existing, next);
+  assert.equal(result, before + next + after);
+});
+
+test("applying the same brief twice yields identical bytes", () => {
+  const brief = composeBrief([card(), card({ verify: "unverified" })]);
+  for (const start of [null, "# Doc\n\nProse.\n", "no markers, no trailing newline"]) {
+    const once = applyBrief(start, brief);
+    assert.equal(applyBrief(once, brief), once, JSON.stringify(start).slice(0, 20));
+  }
+});
+
+// ── Target selection ─────────────────────────────────────────────────────────────────────────
+
+test("an empty repo is pointed at AGENTS.md — the vendor-neutral file to be created", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-brief-"));
+  const target = briefTarget(dir);
+  assert.equal(target, join(dir, "AGENTS.md"));
+  assert.ok(isAbsolute(target));
+  assert.ok(!existsSync(target), "briefTarget names the file; it never creates it");
+});
+
+test("CLAUDE.md is the target only until an AGENTS.md exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-brief-"));
+  writeFileSync(join(dir, "CLAUDE.md"), "# rules\n");
+  assert.equal(briefTarget(dir), join(dir, "CLAUDE.md"));
+  writeFileSync(join(dir, "AGENTS.md"), "# agents\n");
+  assert.equal(briefTarget(dir), join(dir, "AGENTS.md"));
+});
