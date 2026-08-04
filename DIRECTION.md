@@ -115,12 +115,28 @@ honestly, approvals badge), **Inbox** (cards + specs as diffs; keyboard; deliber
 like code review), **Work**, **Knowledge** (cards, supersede chains, a Misleading tab),
 **Receipts** (counted numbers only; unmeasured = an unlock action, never a zero).
 
-## Pricing
+## Pricing — SUPERSEDED 2026-08-05, see [GTM.md](GTM.md)
 
-Solo **free forever** (inference rides their subscription; claude-mem's 89K stars prove the
-funnel). Team **$20/seat** (hosted shadow-repo remote, roles, misleading-attribution, team
-receipts). Business **$40/seat** (SSO, audit, retention, org views). The pitch: *"your
-agents' subscription pays for the intelligence; you pay Kage for trust, sync, governance."*
+> ~~Solo **free forever**. Team **$20/seat** (hosted shadow-repo remote, roles, team receipts).
+> Business **$40/seat** (SSO, audit, retention, org views). "You pay Kage for trust, sync,
+> governance."~~
+
+Every priced item above was wrong, and the reasons are worth keeping rather than deleting:
+
+- **Sync cannot be sold.** The shadow store is a git repo; a team points it at their own remote in
+  five minutes and pays nothing, forever. Conceded permanently.
+- **Seats cannot be enforced.** `vnext/license/license.ts` documents it in its own comments — with
+  no server and no directory, headcount is a number Kage cannot verify, and acting on unverifiable
+  numbers is the one thing this product refuses everywhere else.
+- **SSO/audit/retention is an enterprise cost structure under a card-swipe price**, and it inverts
+  the ~zero marginal cost that makes the free tier sustainable.
+- **Anything gated by `if (licensed)` in an MIT client is one deleted line from free.** A flag is
+  not a business.
+
+What replaced it: **Kage free (everything local, plus uncapped sync), and Kage Watch at $49 per
+watched repository per month** — a hosted service that re-reads every claim against the new code on
+every merge. Sell the run, not the transport. The full model, the kill criteria, what not to build,
+and the measurements that produced all of it are in [GTM.md](GTM.md).
 
 ## Kill list (deliberate contract change)
 
