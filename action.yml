@@ -1,0 +1,113 @@
+# Kage — re-check your team's engineering memory on every push.
+#
+# This action is the free half of the product, published deliberately. It does the same job the
+# paid hosted service would do at a coarser grain: re-audit every approved card against the tree as
+# it now stands, and fail the run if a claim your agents are still being told has become
+# unresolvable. If your platform team would rather own a CI job than pay anyone, own it — you will
+# be right that it was cheap to write. We would rather ship it than pretend it is hard.
+#
+# What it CANNOT do, stated here rather than discovered later: it runs when CI runs, on the repo CI
+# can see, and it judges resolvability only — file present, symbol present. It does not read a
+# claim against changed code to decide whether the claim is still TRUE. That distinction matters,
+# because measured across four mature repositories, hard staleness is 0-29% a year while drift —
+# the symbol still resolving under changed code — is 54-100%.
+#
+# usage:
+#   - uses: kage-core/Kage@main
+#     with:
+#       store: ${{ github.workspace }}/../kage-store   # a checkout of your shadow store
+#       fail-on-stale: true
+
+name: "Kage — verify engineering memory"
+description: "Re-audit every approved card against the current tree and fail if a claim no longer resolves."
+author: "Kage"
+
+branding:
+  icon: "eye"
+  color: "green"
+
+inputs:
+  project:
+    description: "Path to the repository whose code the cards cite."
+    required: false
+    default: "."
+  store:
+    description: "Path to a checkout of the shadow card store. Omit to use ~/.kage/store, which in CI is empty."
+    required: false
+    default: ""
+  fail-on-stale:
+    description: "Fail the job when an approved card no longer resolves. Set false to report only."
+    required: false
+    default: "true"
+  version:
+    description: "npm version of @kage-core/kage-graph-mcp to run."
+    required: false
+    default: "latest"
+
+outputs:
+  checked:
+    description: "Cards audited."
+    value: ${{ steps.verify.outputs.checked }}
+  stale:
+    description: "Cards whose citations no longer resolve. These are withheld from agents."
+    value: ${{ steps.verify.outputs.stale }}
+  unverified:
+    description: "Cards that still resolve but whose cited code changed since it was pinned."
+    value: ${{ steps.verify.outputs.unverified }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Verify cards against the tree
+      id: verify
+      shell: bash
+      env:
+        # The store root is read at the CLI edge; pointing it at a checkout is what makes this
+        # runnable in CI at all, since a runner has no ~/.kage.
+        KAGE_STORE_ROOT: ${{ inputs.store }}
+      run: |
+        set -euo pipefail
+
+        REPORT=$(npx -y "@kage-core/kage-graph-mcp@${{ inputs.version }}" cards verify \
+          --project "${{ inputs.project }}" --json)
+        echo "$REPORT"
+
+        checked=$(echo "$REPORT" | python3 -c "import json,sys;print(json.load(sys.stdin).get('checked',0))")
+        stale=$(echo "$REPORT" | python3 -c "import json,sys;print(json.load(sys.stdin).get('stale',0))")
+        unverified=$(echo "$REPORT" | python3 -c "import json,sys;print(json.load(sys.stdin).get('unverified',0))")
+
+        {
+          echo "checked=$checked"
+          echo "stale=$stale"
+          echo "unverified=$unverified"
+        } >> "$GITHUB_OUTPUT"
+
+        # A job summary rather than a wall of log: the numbers are the point, and a reader should
+        # not have to expand a step to learn whether their memory is still true.
+        {
+          echo "### Kage — engineering memory"
+          echo ""
+          echo "| | count | meaning |"
+          echo "|---|---:|---|"
+          echo "| checked | $checked | approved cards audited against this commit |"
+          echo "| **stale** | **$stale** | citation no longer resolves — **withheld from every agent** |"
+          echo "| unverified | $unverified | still resolves, but the cited code changed since it was pinned |"
+          echo ""
+          if [ "$stale" -gt 0 ]; then
+            echo "\`$stale\` approved claim(s) no longer resolve. They are withheld rather than served,"
+            echo "so nothing false reaches an agent — but the knowledge is now missing. Run"
+            echo "\`kage cards list --state approved\` locally to re-ground or retire them."
+          else
+            echo "Every approved claim still resolves against this commit."
+          fi
+          if [ "$unverified" -gt 0 ]; then
+            echo ""
+            echo "> \`$unverified\` card(s) sit on code that has changed. This action cannot tell you"
+            echo "> whether those claims are still TRUE — only that they still point at something."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.fail-on-stale }}" = "true" ] && [ "$stale" -gt 0 ]; then
+          echo "::error::$stale approved card(s) no longer resolve against this commit."
+          exit 1
+        fi
