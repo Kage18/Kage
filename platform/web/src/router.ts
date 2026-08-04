@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 
 export type Route =
   | { page: "activity" }
+  | { page: "inbox" }
   | { page: "attention" }
   | { page: "work" }
   | { page: "proof" }
@@ -66,6 +67,9 @@ export const navGroups: NavGroup[] = [
     label: "Now",
     links: [
       { label: "Activity", href: "/activity" },
+      // The Librarian's proposals and everything else awaiting a human judgment. The design's
+      // heart: an ambient approval console, deliberately boring, like code review.
+      { label: "Inbox", href: "/inbox" },
       { label: "Needs you", href: "/attention" },
     ],
   },
@@ -136,6 +140,9 @@ export function parseRoute(input: string): Route {
   switch (head) {
     case "activity":
       if (segments.length === 1) return { page: "activity" };
+      break;
+    case "inbox":
+      if (segments.length === 1) return { page: "inbox" };
       break;
     case "attention":
       if (segments.length === 1) return { page: "attention" };
@@ -220,6 +227,8 @@ export function routeToPath(route: Route): string {
   switch (route.page) {
     case "activity":
       return "/activity";
+    case "inbox":
+      return "/inbox";
     case "attention":
       return "/attention";
     case "work":

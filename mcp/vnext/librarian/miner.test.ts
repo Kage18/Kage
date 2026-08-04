@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildHistoryDigest, mineHistory, miningPrompt } from "./miner.js";
+
+/** The same pinned identity the rest of this file uses, so machine git config is never assumed. */
+const GIT_ID = ["-c", "user.email=t@t.dev", "-c", "user.name=T"];
 import { fakeProvider } from "./provider.js";
 import type { Card, CardProposal } from "./types.js";
 
@@ -323,4 +326,27 @@ test("a reply with no recoverable array yields an empty batch without throwing",
     assert.deepEqual(result.rejected, [], JSON.stringify(reply));
     assert.equal(result.digest.commits, 3, "the digest is still returned — the run happened");
   }
+});
+
+// Found by dogfooding, which is the only way this class of bug ever surfaces: the miner used
+// `git log --grep=Revert`, which searches the WHOLE message. The commit that introduced this
+// module has a body reading "Reverts are gold", so the miner reported it as reverted — and the
+// Librarian dutifully proposed a card warning that the Librarian itself had been rolled back.
+// A revert is a commit whose SUBJECT is `Revert "..."`, nothing looser.
+test("a commit that merely discusses reverting is not counted as a revert", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-miner-revert-"));
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  execFileSync("git", [...GIT_ID, "add", "-A"], { cwd: dir });
+  execFileSync("git", [...GIT_ID, "commit", "-qm", "feat: the new core\n\nReverts are gold — something was tried and undone.\nhistory/blame/revert are native git."], { cwd: dir });
+
+  writeFileSync(join(dir, "b.txt"), "two\n");
+  execFileSync("git", [...GIT_ID, "add", "-A"], { cwd: dir });
+  execFileSync("git", [...GIT_ID, "commit", "-qm", 'Revert "feat: the thing that did not work"'], { cwd: dir });
+
+  const digest = buildHistoryDigest(dir);
+  assert.equal(digest.commits, 2);
+  assert.equal(digest.reverts, 1, "only the commit whose SUBJECT is a revert counts");
+  assert.match(digest.text, /Revert "feat: the thing that did not work"/);
+  assert.doesNotMatch(digest.text.split("REVERTS")[1] ?? "", /the new core/);
 });

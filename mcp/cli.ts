@@ -199,6 +199,7 @@ Getting started:
   kage up [--project <dir>]                  bring the ambient stack up ONCE: audit config + runtime + background proxy
   kage run -- <command>                      run any agent through the proxy (sets ANTHROPIC_BASE_URL for it)
   kage down [--project <dir>]                stop the background proxy + runtime daemon that \`kage up\` started
+  kage cards [list|mine|approve|reject|verify|brief|recall|receipts]   the Librarian's memory: propose, review, recall
   kage context "<query>" --project <dir>     validate + recall + code graph + knowledge graph in one call
   kage check [--project <dir>]               verify CLAUDE.md/AGENTS.md/docs claims against the code — counted, not estimated
   kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
@@ -299,6 +300,7 @@ Usage:
   kage graph "<query>" --project <dir> [--json]
   kage graph-registry --project <dir> [--json]
   kage embeddings build --project <dir> [--model Xenova/all-MiniLM-L6-v2] [--json]
+  kage cards [list|show|approve|reject|mine|verify|brief|recall|receipts] --project <dir> [--json]   the Librarian's memory: propose cards from history or sessions, review them, recall them at the moment of an action
   kage context "<query>" --project <dir> [--limit <n>] [--targets a,b] [--changed-files a,b] [--session <id>] [--json]   the kage_context MCP tool, reproducible outside an agent session
   kage community-domains                                list community knowledge-graph domains (untrusted, advisory)
   kage community-search "<query>" [--domain <name>]      search the community knowledge graph (untrusted, advisory)
@@ -1499,6 +1501,18 @@ async function main(): Promise<void> {
       return;
     }
     console.log(renderReceipts(report));
+    return;
+  }
+
+  // The Librarian's cards — the new memory core (DIRECTION.md). ONE branch here rather than
+  // seven: the dispatcher lives beside the store it drives, where it is unit-tested, and this
+  // file stays a router.
+  if (command === "cards") {
+    const { runCardsCommand } = await import("./vnext/librarian/cli.js");
+    // `args` still carries the command itself; the dispatcher wants only what follows it.
+    const result = await runCardsCommand(args.slice(1), projectArg(args));
+    if (result.out) console.log(result.out);
+    if (result.exitCode !== 0) process.exit(result.exitCode);
     return;
   }
 

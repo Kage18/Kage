@@ -106,6 +106,73 @@ export interface AgentSession {
   events: SessionEvent[];
 }
 
+// ── The Librarian's surface (mcp/vnext/librarian) ────────────────────────────────────────────
+//
+// Mirrored rather than imported, like everything else in this file. That tree is builtin-only by
+// construction — a hard requirement, since the packaged app ships mcp/dist with no node_modules —
+// and these declarations are the typed promise that the shell only ever calls the verbs in
+// `operations.ts`, never the store primitives underneath them.
+
+/** A handle to one repository's shadow card store. Plain data, threaded explicitly. */
+export interface CardStore {
+  projectDir: string;
+  dir: string;
+}
+
+/** Into the working tree, or into history. `blobSha` pins what the claim was written against. */
+export type LibrarianCitation = { path: string; symbol?: string; blobSha?: string } | { ref: string };
+
+export interface LibrarianCard {
+  id: string;
+  kind: "decision" | "runbook" | "caution";
+  state: "proposed" | "approved" | "superseded" | "retired";
+  /** The live trust reading, separate from the lifecycle: stale cards are withheld from recall. */
+  verify: "verified" | "unverified" | "stale";
+  title: string;
+  claim: string;
+  citations: LibrarianCitation[];
+  trigger: string;
+  provenance: { source: "session" | "mining" | "human"; ref: string; at: string };
+  tags: string[];
+  supersedes?: string;
+  supersededBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedBy?: string;
+  reviewNote?: string;
+}
+
+export interface CardVerdictResult {
+  ok: boolean;
+  card?: LibrarianCard;
+  error?: string;
+}
+
+export interface MineSummary {
+  ok: boolean;
+  proposed: number;
+  deduped: number;
+  rejected: number;
+  problems: string[];
+  /** Measured when the runner reported usage; null is honest and rendered as such. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  commits: number;
+  reverts: number;
+  error?: string;
+}
+
+/** The LLM seam. The app hands it the user's own agent — Kage pays for no inference, ever. */
+export interface LibrarianProvider {
+  complete(input: { prompt: string; tier: "triage" | "extract" }): Promise<{
+    text: string;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    costUsd: number | null;
+  }>;
+}
+
 export interface KageCore {
   emptyState(): DesktopState;
   loadState(home: string): DesktopState;
@@ -158,6 +225,37 @@ export interface KageCore {
   applyEvent(session: AgentSession, event: Omit<SessionEvent, "seq">): AgentSession;
   closeSession(session: AgentSession, exitCode: number | null): AgentSession;
   stripTicks(events: readonly SessionEvent[]): Array<{ at: string; weight: number }>;
+
+  // The Librarian. Only the verbs from `operations.ts` are exposed, plus the two reads the app
+  // needs: approving a card is not one write, and a surface reaching past these into the store
+  // would be assembling the sequence a second time.
+  /** Open (creating if needed) the shadow store for a project. `root` defaults to ~/.kage/store. */
+  storeFor(projectDir: string, root?: string): CardStore;
+  listCards(store: CardStore, filter?: { state?: LibrarianCard["state"] }): LibrarianCard[];
+  /** Re-pins citations, resolves a supersede, appends a receipt, regenerates the BRIEF block. */
+  approveCard(
+    store: CardStore,
+    projectDir: string,
+    id: string,
+    reviewer: string,
+    note?: string,
+  ): CardVerdictResult;
+  rejectCard(store: CardStore, id: string, reviewer: string, reason: string): CardVerdictResult;
+  /** Day-one mining: reads git history through the caller's provider and proposes cited cards. */
+  mineRepository(
+    provider: LibrarianProvider,
+    store: CardStore,
+    projectDir: string,
+    opts?: { maxCommits?: number },
+  ): Promise<MineSummary>;
+  /** The real provider: the user's own `claude`, headless. `command` is resolved by the caller. */
+  claudeProvider(opts?: {
+    command?: string;
+    cwd?: string;
+    triageModel?: string;
+    extractModel?: string;
+    timeoutMs?: number;
+  }): LibrarianProvider;
 }
 
 export function loadKageCore(resourcesPath: string): KageCore {
@@ -172,6 +270,12 @@ export function loadKageCore(resourcesPath: string): KageCore {
   // the packaged app ships mcp/dist WITHOUT node_modules — requiring them killed the packaged app
   // on launch ("Cannot find module 'typescript'") while working perfectly from a source checkout.
   const portalAssets = require(join(dir, "vnext", "desktop", "portal-assets.js"));
+  // The Librarian, required the same way for the same reason. `operations.js` reaches the store,
+  // the verifier, the receipts ledger and (dynamically) the miner — all of it node builtins only,
+  // which is what makes it loadable from the packaged app at all.
+  const librarian = require(join(dir, "vnext", "librarian", "operations.js"));
+  const cardStore = require(join(dir, "vnext", "librarian", "store.js"));
+  const librarianProvider = require(join(dir, "vnext", "librarian", "provider.js"));
   /* eslint-enable @typescript-eslint/no-var-requires */
 
   return {
@@ -196,6 +300,12 @@ export function loadKageCore(resourcesPath: string): KageCore {
     applyEvent: sessionMod.applyEvent,
     closeSession: sessionMod.closeSession,
     stripTicks: sessionMod.stripTicks,
+    storeFor: librarian.storeFor,
+    listCards: cardStore.listCards,
+    approveCard: librarian.approve,
+    rejectCard: librarian.reject,
+    mineRepository: librarian.mineRepository,
+    claudeProvider: librarianProvider.claudeProvider,
   };
 }
 

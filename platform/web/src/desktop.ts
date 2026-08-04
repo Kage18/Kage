@@ -37,6 +37,36 @@ export interface DesktopRepo {
   daemon: "starting" | "running" | "stopped" | "failed";
 }
 
+/** A card over the IPC bridge — the Librarian's unit of memory, shaped for review. */
+export interface DesktopCard {
+  id: string;
+  kind: "decision" | "runbook" | "caution";
+  state: "proposed" | "approved" | "superseded" | "retired";
+  verify: "verified" | "unverified" | "stale";
+  title: string;
+  claim: string;
+  citations: Array<{ path?: string; symbol?: string; ref?: string }>;
+  trigger: string;
+  provenance: { source: "session" | "mining" | "human"; ref: string; at: string };
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  reviewedBy?: string;
+  reviewNote?: string;
+}
+
+export interface MineOutcome {
+  ok: boolean;
+  proposed: number;
+  rejected: number;
+  deduped: number;
+  /** Measured when the runner reported usage; null is honest and rendered as such. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  error?: string;
+}
+
 export interface KageDesktop {
   isDesktop: true;
   getState(): Promise<{ repos: DesktopRepo[]; active: string | null }>;
@@ -50,6 +80,15 @@ export interface KageDesktop {
   /** Fires when this repository's memory or work changed. One connection, held in main. */
   onChanged(listener: () => void): () => void;
   onSessions(listener: (sessions: DesktopSession[]) => void): () => void;
+
+  // ── The Librarian's cards (DIRECTION.md). Review is a desktop act — approval mutates the
+  //    shadow store and regenerates the BRIEF block, so none of this exists in a browser. ──
+  listCards(filter?: { state?: DesktopCard["state"] }): Promise<DesktopCard[]>;
+  approveCard(id: string): Promise<{ ok: boolean; error?: string }>;
+  rejectCard(id: string, reason: string): Promise<{ ok: boolean; error?: string }>;
+  /** Day-one mining: the Librarian reads git history on the user's own subscription. */
+  mineHistory(): Promise<MineOutcome>;
+  onCardsChanged(listener: () => void): () => void;
 }
 
 declare global {

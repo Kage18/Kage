@@ -26,11 +26,12 @@ import { AgentTasksPage } from "./pages/AgentTasksPage";
 import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
+import { InboxPage } from "./pages/InboxPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { ActivityPage } from "./pages/ActivityPage";
 import { FREE_FORM, StartAgentSheet } from "./components/StartAgentSheet";
-import { buildBrief, buildFreeFormBrief, desktop, type Brief, type DesktopRepo, type DesktopSession } from "./desktop";
+import { buildBrief, buildFreeFormBrief, desktop, type Brief, type DesktopCard, type DesktopRepo, type DesktopSession, type MineOutcome } from "./desktop";
 import { FirstRunPage } from "./pages/FirstRunPage";
 import { KnowledgePage, type KnowledgeKind } from "./pages/KnowledgePage";
 import { WORK_CHANGED_EVENT } from "./components/LiveIndicator";
@@ -692,6 +693,77 @@ function EntityListContainer({
   return <EntityListPage title={title} section={section} list={state.list} />;
 }
 
+
+// The Inbox: the Librarian's proposals awaiting a human verdict. Desktop-only mutations — the
+// browser portal renders the list read-only, because approval mutates the shadow store.
+function InboxContainer(): React.ReactElement {
+  const bridge = desktop();
+  const [cards, setCards] = useState<DesktopCard[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [mining, setMining] = useState(false);
+  const [lastMine, setLastMine] = useState<MineOutcome | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (!bridge) {
+      setCards([]);
+      return;
+    }
+    bridge
+      .listCards()
+      .then(setCards)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+  }, [bridge]);
+
+  useEffect(() => {
+    load();
+    return bridge?.onCardsChanged(load);
+  }, [bridge, load]);
+
+  const verdict = useCallback(
+    (action: Promise<{ ok: boolean; error?: string }>, id: string) => {
+      setBusy(id);
+      setError(null);
+      void action
+        .then((result) => {
+          if (!result.ok) setError(result.error ?? "the verdict could not be recorded");
+        })
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => {
+          setBusy(null);
+          load();
+        });
+    },
+    [load],
+  );
+
+  return (
+    <InboxPage
+      cards={cards}
+      busy={busy}
+      mining={mining}
+      lastMine={lastMine}
+      error={error}
+      canMutate={bridge !== null}
+      onApprove={(id) => bridge && verdict(bridge.approveCard(id), id)}
+      onReject={(id, reason) => bridge && verdict(bridge.rejectCard(id, reason), id)}
+      onMine={() => {
+        if (!bridge) return;
+        setMining(true);
+        setError(null);
+        void bridge
+          .mineHistory()
+          .then(setLastMine)
+          .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+          .finally(() => {
+            setMining(false);
+            load();
+          });
+      }}
+    />
+  );
+}
+
 function RoutedPage({
   route,
   overview,
@@ -714,6 +786,8 @@ function RoutedPage({
   switch (route.page) {
     case "activity":
       return <ActivityContainer api={api} />;
+    case "inbox":
+      return <InboxContainer />;
     case "attention":
       return <AttentionContainer api={api} />;
     case "work":

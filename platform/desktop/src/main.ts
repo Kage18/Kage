@@ -41,6 +41,12 @@ import {
   type DesktopState,
   type KageCore,
 } from "./kage-core.js";
+import {
+  createLibrarianHost,
+  mineFailed,
+  type DesktopCard,
+  type LibrarianHost,
+} from "./librarian-host.js";
 
 // The scheme must be registered as privileged BEFORE the app is ready, or fetch/XHR from the
 // renderer is blocked and every API call the portal makes fails silently.
@@ -61,6 +67,7 @@ let state: DesktopState;
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let supervisor: InstanceType<KageCore["DaemonSupervisor"]>;
+let librarian: LibrarianHost;
 
 /** Refs already alerted on, per repository. See the core's `decideAlerts` for the rules. */
 const alertMemory = new Map<string, { seen: string[]; observedBefore: boolean }>();
@@ -629,6 +636,19 @@ function stopSession(id: string): void {
   // `exit` fires and endSession does the rest, including reaping the proxy.
 }
 
+// ── Cards ────────────────────────────────────────────────────────────────────────────────────
+//
+// Review is a desktop act. Approving a card mutates the shadow store and regenerates the BRIEF
+// block agents actually read, so it lives in the app and nowhere else — the portal running in a
+// browser has no bridge to any of this. Every handler is scoped to the ACTIVE repository for the
+// same reason the protocol handler is: a card id means nothing without the store it came from.
+
+/** A verdict landed. The Inbox refetches, and the tray recounts what is still waiting. */
+function cardsChanged(): void {
+  window?.webContents.send("kage:cards-changed");
+  refreshTray();
+}
+
 // ── Alerts ───────────────────────────────────────────────────────────────────────────────────
 
 const POLL_MS = 30_000;
@@ -674,15 +694,32 @@ async function pollAll(): Promise<void> {
 
 let lastBlockedCount = 0;
 
+function count(n: number, singular: string): string {
+  return `${n} ${n === 1 ? singular : `${singular}s`}`;
+}
+
 function refreshTray(blocked = lastBlockedCount): void {
   lastBlockedCount = blocked;
   if (!tray) return;
-  // The badge is the whole point of the menubar presence: how many decisions are waiting on a
-  // human, across every repository at once.
-  tray.setTitle(blocked > 0 ? ` ${blocked}` : "");
+  // Proposals are counted HERE rather than passed in, so every path that touches the tray — a
+  // verdict, a repository switch, the attention poll — sees one number computed one way.
+  //
+  // A store that cannot be read contributes nothing rather than a zero: `proposedCount` returns
+  // null for "could not count", and a fabricated 0 would claim the inbox is clear when nobody
+  // looked. Under-counting a badge is survivable; a badge that lies about an empty inbox is not.
+  const proposals = state.repos.reduce((total, repo) => total + (librarian.proposedCount(repo.path) ?? 0), 0);
+  // The badge is the whole point of the menubar presence: how much is waiting on a human, across
+  // every repository at once. Cards belong in it because the approval habit is the product — a
+  // proposal nobody is nudged toward is memory that never becomes team knowledge.
+  const waiting = blocked + proposals;
+  tray.setTitle(waiting > 0 ? ` ${waiting}` : "");
+  const summary = [
+    ...(blocked > 0 ? [count(blocked, "decision")] : []),
+    ...(proposals > 0 ? [count(proposals, "proposal")] : []),
+  ].join(" and ");
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: blocked > 0 ? `${blocked} decisions need you` : "Nothing needs you", enabled: false },
+      { label: waiting > 0 ? `${summary} ${waiting === 1 ? "needs" : "need"} you` : "Nothing needs you", enabled: false },
       { type: "separator" },
       ...state.repos.map((repo) => ({
         label: `${repo.name}${supervisor.statusFor(repo.path)?.state === "running" ? "" : "  (stopped)"}`,
@@ -726,6 +763,9 @@ app.whenReady().then(async () => {
 
   portalDir = core.resolvePortalDir(coreDir);
   state = core.loadState(homedir());
+  // Before the tray exists: its badge counts proposals, and the first refreshTray runs inside
+  // createTray below.
+  librarian = createLibrarianHost(core);
 
   try {
     supervisor = new core.DaemonSupervisor(
@@ -768,6 +808,38 @@ app.whenReady().then(async () => {
   ipcMain.handle("kage:sessions:stop", (_event, id: string) => {
     stopSession(id);
     return publicSessions();
+  });
+
+  ipcMain.handle("kage:cards:list", (_event, filter?: { state?: DesktopCard["state"] }) => {
+    const active = core.activeRepo(state);
+    // No repository open means no store to read, not an empty inbox — but the window is showing
+    // onboarding in that state, so nothing renders the difference and there is nothing to say.
+    return active ? librarian.listCards(active.path, filter) : [];
+  });
+  ipcMain.handle("kage:cards:approve", (_event, id: string) => {
+    const active = core.activeRepo(state);
+    if (!active) return { ok: false, error: "no repository is open" };
+    const verdict = librarian.approve(active.path, id);
+    if (verdict.ok) cardsChanged();
+    return verdict;
+  });
+  ipcMain.handle("kage:cards:reject", (_event, id: string, reason: string) => {
+    const active = core.activeRepo(state);
+    if (!active) return { ok: false, error: "no repository is open" };
+    const verdict = librarian.reject(active.path, id, reason);
+    if (verdict.ok) cardsChanged();
+    return verdict;
+  });
+  ipcMain.handle("kage:cards:mine", async () => {
+    const active = core.activeRepo(state);
+    if (!active) return mineFailed("no repository is open");
+    // Minutes, awaited: the renderer holds its "Mining history…" state until this settles, and the
+    // main process stays live throughout because the model call is an async child process.
+    const outcome = await librarian.mine(active.path);
+    // Announced even on a failure — a run can land several proposals and then fail, and the Inbox
+    // should show the ones that made it rather than wait for the next refetch to notice.
+    cardsChanged();
+    return outcome;
   });
   ipcMain.handle("kage:repos:switch", async (_event, path: string) => {
     state = core.openRepo(state, path);

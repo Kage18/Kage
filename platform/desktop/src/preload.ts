@@ -55,7 +55,56 @@ contextBridge.exposeInMainWorld("kageDesktop", {
     ipcRenderer.on("kage:sessions", handler);
     return () => ipcRenderer.removeListener("kage:sessions", handler);
   },
+
+  // The Librarian's cards. These belong to the APP rather than to a repository read: a verdict
+  // mutates the shadow store and regenerates the BRIEF block, which is not something a browser tab
+  // may do. All four are scoped to the active repository by main — the renderer never names one.
+  listCards: (filter?: { state?: DesktopCard["state"] }): Promise<DesktopCard[]> =>
+    ipcRenderer.invoke("kage:cards:list", filter),
+  approveCard: (id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("kage:cards:approve", id),
+  rejectCard: (id: string, reason: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("kage:cards:reject", id, reason),
+  /** Minutes, on the user's own Claude subscription. The promise settles when the run is over. */
+  mineHistory: (): Promise<MineOutcome> => ipcRenderer.invoke("kage:cards:mine"),
+
+  /** Fires after any verdict or mining run. The Inbox refetches; nothing is pushed with it. */
+  onCardsChanged: (listener: () => void): (() => void) => {
+    const handler = () => listener();
+    ipcRenderer.on("kage:cards-changed", handler);
+    return () => ipcRenderer.removeListener("kage:cards-changed", handler);
+  },
 });
+
+/** The Librarian's unit of memory, shaped for review. Mirrors platform/web/src/desktop.ts. */
+export interface DesktopCard {
+  id: string;
+  kind: "decision" | "runbook" | "caution";
+  state: "proposed" | "approved" | "superseded" | "retired";
+  verify: "verified" | "unverified" | "stale";
+  title: string;
+  claim: string;
+  citations: Array<{ path?: string; symbol?: string; ref?: string }>;
+  trigger: string;
+  provenance: { source: "session" | "mining" | "human"; ref: string; at: string };
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  reviewedBy?: string;
+  reviewNote?: string;
+}
+
+export interface MineOutcome {
+  ok: boolean;
+  proposed: number;
+  rejected: number;
+  deduped: number;
+  /** Measured when the runner reported usage; null is honest and rendered as such. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  error?: string;
+}
 
 export interface DesktopSession {
   session_id: string;

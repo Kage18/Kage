@@ -3200,3 +3200,89 @@ button.list-row {
 /* A count still in flight sits at the quiet rung. Deliberately NOT the unknown/dash treatment: this
    value is arriving, not absent, and the two must not look alike. */
 .kind-count[data-state="loading"] { color: var(--lum-quiet); }
+
+/* ── Inbox: the approval console ─────────────────────────────────────────────────────────────
+   Ruled rows like every list; the selected row carries the accent rail (keyboard focus is real
+   state, not decoration); kinds are bracketed text — the design ships no icon set. */
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.inbox-card {
+  padding: var(--space-4) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  border-left: var(--rail-width) solid transparent;
+}
+
+.inbox-card[data-selected="true"] {
+  border-left-color: var(--color-accent);
+  background: var(--color-surface);
+}
+
+.inbox-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.inbox-kind { color: var(--color-text-muted); }
+.inbox-card[data-kind="caution"] .inbox-kind { color: var(--color-warning); }
+.inbox-card[data-kind="decision"] .inbox-kind { color: var(--lum-derived); }
+.inbox-card[data-kind="runbook"] .inbox-kind { color: var(--color-text-muted); }
+
+.inbox-title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+.inbox-claim {
+  margin: 0 0 var(--space-2);
+  max-width: 82ch;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+}
+
+.inbox-citations {
+  margin: 0 0 var(--space-3);
+  color: var(--color-accent);
+}
+
+.inbox-card-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.inbox-provenance,
+.inbox-trigger { color: var(--lum-quiet); }
+.inbox-trigger { flex: 1; min-width: 0; }
+
+.inbox-verdict { display: inline-flex; gap: var(--space-2); }
+
+.inbox-approve,
+.inbox-reject {
+  padding: var(--space-1) var(--space-3);
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.inbox-approve { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* The mining outcome: a measured line, lit only when it is a measurement. */
+.inbox-mine-result {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-surface);
+  border-left: var(--rail-width) solid var(--confidence-unknown);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+.inbox-mine-result[data-confidence="measured"] { border-left-color: var(--confidence-measured); }

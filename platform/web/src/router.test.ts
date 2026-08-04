@@ -85,10 +85,14 @@ describe("navLinks", () => {
   test("declares the full information architecture, grouped, in order", () => {
     // Three nouns: what is happening NOW, the WORK it happens to, the MEMORY it produces.
     expect(navGroups.map((g) => g.label)).toEqual(["Now", "Work", "Memory"]);
-    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Activity", "Needs you"]);
+    expect(navGroups[0].links.map((l) => l.label)).toEqual(["Activity", "Inbox", "Needs you"]);
     expect(navGroups[1].links.map((l) => l.label)).toEqual(["Board", "Proof"]);
     expect(navLinks.map((l) => l.label)).toEqual([
       "Activity",
+      // The Librarian's approval console. Added when capture moved from heuristics to a real
+      // extraction pass: nothing becomes team knowledge without passing a human, so the queue
+      // that human clears is a primary destination, not a detail on another page.
+      "Inbox",
       "Needs you",
       "Board",
       "Proof",
@@ -96,7 +100,7 @@ describe("navLinks", () => {
       "System map",
       "Review",
     ]);
-    expect(navLinks.length).toBe(7);
+    expect(navLinks.length).toBe(8);
   });
 
   // A deliberate contract change, not a loosened test. What left the sidebar, and why:

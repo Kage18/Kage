@@ -46,9 +46,14 @@ export function buildHistoryDigest(projectDir: string, opts?: { maxCommits?: num
   const commitLines = gitLog(projectDir, [...range, "--pretty=format:%h|%ad|%s"])
     .split("\n")
     .filter(Boolean);
-  const revertLines = gitLog(projectDir, [...range, "--grep=Revert", "--pretty=format:%h|%ad|%s"])
-    .split("\n")
-    .filter(Boolean);
+  // A revert is a commit whose SUBJECT is `Revert "..."` — the shape `git revert` writes.
+  //
+  // This was `--grep=Revert`, which searches the whole message and matched any commit that merely
+  // DISCUSSED reverting. Caught by dogfooding: the commit introducing this module has a body
+  // reading "Reverts are gold", so the miner reported it as reverted, and the Librarian duly
+  // proposed a card warning that the Librarian had been rolled back. Filtering on the subject in
+  // JS rather than asking git to grep is both correct and cheaper — the subjects are already here.
+  const revertLines = commitLines.filter((line) => /^[^|]*\|[^|]*\|Revert[ "']/.test(line));
 
   // An empty pretty format leaves only file paths and blank separators — count the paths.
   const fileCounts = new Map<string, number>();
