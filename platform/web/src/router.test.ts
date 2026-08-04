@@ -86,7 +86,7 @@ describe("navLinks", () => {
     // Three nouns: what is happening NOW, the WORK it happens to, the MEMORY it produces.
     expect(navGroups.map((g) => g.label)).toEqual(["Now", "Work", "Memory"]);
     expect(navGroups[0].links.map((l) => l.label)).toEqual(["Activity", "Inbox", "Needs you"]);
-    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Board", "Proof"]);
+    expect(navGroups[1].links.map((l) => l.label)).toEqual(["Board", "Receipts"]);
     expect(navLinks.map((l) => l.label)).toEqual([
       "Activity",
       // The Librarian's approval console. Added when capture moved from heuristics to a real
@@ -95,7 +95,10 @@ describe("navLinks", () => {
       "Inbox",
       "Needs you",
       "Board",
-      "Proof",
+      // Receipts replaced Proof, and Knowledge now points at cards rather than the legacy entity
+      // browser: both surfaces read the Librarian's store, which is the only memory the product
+      // still writes. The old routes still resolve so a bookmark keeps working.
+      "Receipts",
       "Knowledge",
       "System map",
       "Review",

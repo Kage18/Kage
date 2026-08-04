@@ -27,6 +27,8 @@ import { DecisionPage } from "./pages/DecisionPage";
 import { EntityListPage } from "./pages/EntityListPage";
 import { AttentionPage } from "./pages/AttentionPage";
 import { InboxPage } from "./pages/InboxPage";
+import { CardsPage, type CardsFilter, type KnowledgeCard } from "./pages/CardsPage";
+import { ReceiptsPage, type ReceiptsView } from "./pages/ReceiptsPage";
 import { ProofPage } from "./pages/ProofPage";
 import { WorkItemPage } from "./pages/WorkItemPage";
 import { ActivityPage } from "./pages/ActivityPage";
@@ -764,6 +766,54 @@ function InboxContainer(): React.ReactElement {
   );
 }
 
+
+// Cards — what the team currently believes. Reads the same bridge the Inbox does; the only
+// mutation offered here is supersede, and it is null in a browser where it could not execute.
+function CardsContainer(): React.ReactElement {
+  const bridge = desktop();
+  const [cards, setCards] = useState<KnowledgeCard[] | null>(null);
+  const [filter, setFilter] = useState<CardsFilter>({ kind: "all", trust: "all" });
+
+  const load = useCallback(() => {
+    if (!bridge) {
+      setCards([]);
+      return;
+    }
+    bridge.listCards().then((next) => setCards(next as KnowledgeCard[])).catch(() => setCards([]));
+  }, [bridge]);
+
+  useEffect(() => {
+    load();
+    return bridge?.onCardsChanged(load);
+  }, [bridge, load]);
+
+  return <CardsPage cards={cards} filter={filter} onFilter={setFilter} onSupersede={null} />;
+}
+
+// Receipts — counted events only. `loading` is threaded as its own state because an unread ledger
+// and an empty one are different claims.
+function ReceiptsContainer(): React.ReactElement {
+  const bridge = desktop();
+  const [view, setView] = useState<ReceiptsView | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!bridge) {
+      setLoading(false);
+      return;
+    }
+    let live = true;
+    bridge
+      .readReceipts()
+      .then((next) => { if (live) setView(next as ReceiptsView); })
+      .catch(() => { if (live) setView(null); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [bridge]);
+
+  return <ReceiptsPage view={view} loading={loading} />;
+}
+
 function RoutedPage({
   route,
   overview,
@@ -788,6 +838,10 @@ function RoutedPage({
       return <ActivityContainer api={api} />;
     case "inbox":
       return <InboxContainer />;
+    case "cards":
+      return <CardsContainer />;
+    case "receipts":
+      return <ReceiptsContainer />;
     case "attention":
       return <AttentionContainer api={api} />;
     case "work":

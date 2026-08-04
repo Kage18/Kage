@@ -262,6 +262,26 @@ export interface KageCore {
     note?: string,
   ): CardVerdictResult;
   rejectCard(store: CardStore, id: string, reviewer: string, reason: string): CardVerdictResult;
+  /**
+   * The counted ledger. Every number the Receipts surface shows comes from here and nowhere else,
+   * which is the whole point: an event happened or it did not, and an absent type is unmeasured
+   * rather than zero.
+   */
+  receiptCounts(storeDir: string): Partial<Record<string, number>>;
+  readReceipts(storeDir: string, opts?: { limit?: number }): Array<{
+    type: string;
+    at: string;
+    cardId?: string;
+    sessionRef?: string;
+    detail?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    costUsd?: number;
+  }>;
+  /** Cards authored by someone else and served to this person — the honest team number. */
+  crossPollination(store: CardStore, me: string): { total: number; byAuthor: Array<{ author: string; delivered: number }> };
+  /** Whether this store has a shared remote at all; solo is configured:false, never an error. */
+  remoteStatus(store: CardStore): { configured: boolean; url: string | null };
   /** Day-one mining: reads git history through the caller's provider and proposes cited cards. */
   mineRepository(
     provider: LibrarianProvider,
@@ -315,6 +335,8 @@ export function loadKageCore(resourcesPath: string): KageCore {
   const librarian = require(join(dir, "vnext", "librarian", "operations.js"));
   const cardStore = require(join(dir, "vnext", "librarian", "store.js"));
   const librarianProvider = require(join(dir, "vnext", "librarian", "provider.js"));
+  const receipts = require(join(dir, "vnext", "librarian", "receipts.js"));
+  const team = require(join(dir, "vnext", "librarian", "team.js"));
   // The capture loop: the watcher reads quiet sessions, the schedule decides whether it may.
   // Both are builtin-only for the same packaging reason as everything above them.
   const watcher = require(join(dir, "vnext", "librarian", "watcher.js"));
@@ -353,6 +375,10 @@ export function loadKageCore(resourcesPath: string): KageCore {
     shouldRunTick: schedule.shouldRunTick,
     recordTick: schedule.recordTick,
     claudeProvider: librarianProvider.claudeProvider,
+    receiptCounts: receipts.receiptCounts,
+    readReceipts: receipts.readReceipts,
+    crossPollination: team.crossPollination,
+    remoteStatus: team.remoteStatus,
   };
 }
 

@@ -19,7 +19,7 @@ describe("AppShell", () => {
       expect(screen.getByRole("list", { name: group })).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: group })).not.toBeInTheDocument();
     }
-    for (const label of ["Activity", "Needs you", "Board", "Proof", "Knowledge", "System map", "Review"]) {
+    for (const label of ["Activity", "Inbox", "Needs you", "Board", "Receipts", "Knowledge", "System map", "Review"]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
   });

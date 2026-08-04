@@ -10,6 +10,8 @@ import { useEffect, useState } from "react";
 export type Route =
   | { page: "activity" }
   | { page: "inbox" }
+  | { page: "cards" }
+  | { page: "receipts" }
   | { page: "attention" }
   | { page: "work" }
   | { page: "proof" }
@@ -77,7 +79,7 @@ export const navGroups: NavGroup[] = [
     label: "Work",
     links: [
       { label: "Board", href: "/work" },
-      { label: "Proof", href: "/proof" },
+      { label: "Receipts", href: "/receipts" },
     ],
   },
   {
@@ -86,7 +88,9 @@ export const navGroups: NavGroup[] = [
       // ONE entry, not ten. Features/Components/Flows/Runbooks/Decisions/Contracts/
       // Data Models/Invariants/Incidents/Documents were ten sidebar peers rendering the
       // identical page with a different filter. Their URLs still resolve; they preselect the kind.
-      { label: "Knowledge", href: "/knowledge" },
+      // Cards are what the team now believes. The legacy entity browser stays reachable by URL
+      // while the packet store is retired, but it is no longer a destination.
+      { label: "Knowledge", href: "/cards" },
       { label: "System map", href: "/system-map" },
       { label: "Review", href: "/review" },
     ],
@@ -143,6 +147,12 @@ export function parseRoute(input: string): Route {
       break;
     case "inbox":
       if (segments.length === 1) return { page: "inbox" };
+      break;
+    case "cards":
+      if (segments.length === 1) return { page: "cards" };
+      break;
+    case "receipts":
+      if (segments.length === 1) return { page: "receipts" };
       break;
     case "attention":
       if (segments.length === 1) return { page: "attention" };
@@ -229,6 +239,10 @@ export function routeToPath(route: Route): string {
       return "/activity";
     case "inbox":
       return "/inbox";
+    case "cards":
+      return "/cards";
+    case "receipts":
+      return "/receipts";
     case "attention":
       return "/attention";
     case "work":

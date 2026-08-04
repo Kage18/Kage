@@ -89,6 +89,21 @@ export interface LibrarianHost {
   tickIfDue(repo: string): Promise<TickOutcome>;
   /** Proposals waiting on a human here, or null when the store could not be read at all. */
   proposedCount(repo: string): number | null;
+  /**
+   * The counted ledger for the Receipts surface.
+   *
+   * Lives here rather than in main so the cached store handle never leaves this module: a caller
+   * holding its own handle would open a second one per read, and `storeFor` git-inits.
+   */
+  receipts(repo: string): ReceiptsPayload;
+}
+
+export interface ReceiptsPayload {
+  /** Counted events by type. A MISSING key is unmeasured; a present 0 is a real reading. */
+  counts: Partial<Record<string, number>>;
+  recent: Array<{ type: string; at: string; cardId?: string; detail?: string; inputTokens?: number; outputTokens?: number; costUsd?: number }>;
+  /** Absent on a solo store: a team number of 0 is a claim about a team that does not exist. */
+  crossPollination: { total: number; byAuthor: Array<{ author: string; delivered: number }> } | null;
 }
 
 /**
@@ -387,6 +402,25 @@ export function createLibrarianHost(core: KageCore): LibrarianHost {
       // the budget, which is why `error` and not `proposed` is what is being asked about here.
       ticks.set(repo, core.recordTick(before, { ok: result.error === undefined, nowMs: Date.now() }));
       return { ran: true, reason: decision.reason, result };
+    },
+
+    receipts(repo) {
+      const empty: ReceiptsPayload = { counts: {}, recent: [], crossPollination: null };
+      try {
+        const store = storeFor(repo);
+        // Cross-pollination is measured only where a team exists. Without a remote there is no
+        // second person for a card to have travelled to, so the number is ABSENT — not zero.
+        const shared = core.remoteStatus(store).configured;
+        return {
+          counts: core.receiptCounts(store.dir),
+          recent: core.readReceipts(store.dir, { limit: 40 }),
+          crossPollination: shared ? core.crossPollination(store, reviewerFor(repo)) : null,
+        };
+      } catch (error) {
+        // An unreadable ledger renders as UNMEASURED upstream, never measured-and-empty.
+        console.error("[kage] receipts:", error);
+        return empty;
+      }
     },
 
     proposedCount(repo) {

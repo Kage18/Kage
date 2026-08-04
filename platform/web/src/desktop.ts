@@ -88,6 +88,12 @@ export interface KageDesktop {
   rejectCard(id: string, reason: string): Promise<{ ok: boolean; error?: string }>;
   /** Day-one mining: the Librarian reads git history on the user's own subscription. */
   mineHistory(): Promise<MineOutcome>;
+  /** The counted ledger behind the Receipts surface. Never estimates — see receipts.ts. */
+  readReceipts(): Promise<{
+    counts: Partial<Record<string, number>>;
+    recent: Array<{ type: string; at: string; cardId?: string; detail?: string; inputTokens?: number; outputTokens?: number; costUsd?: number }>;
+    crossPollination?: { total: number; byAuthor: Array<{ author: string; delivered: number }> } | null;
+  }>;
   onCardsChanged(listener: () => void): () => void;
 }
 

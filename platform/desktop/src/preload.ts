@@ -67,6 +67,8 @@ contextBridge.exposeInMainWorld("kageDesktop", {
     ipcRenderer.invoke("kage:cards:reject", id, reason),
   /** Minutes, on the user's own Claude subscription. The promise settles when the run is over. */
   mineHistory: (): Promise<MineOutcome> => ipcRenderer.invoke("kage:cards:mine"),
+  /** The counted ledger. Every number on the Receipts surface comes from here. */
+  readReceipts: (): Promise<unknown> => ipcRenderer.invoke("kage:cards:receipts"),
 
   /** Fires after any verdict or mining run. The Inbox refetches; nothing is pushed with it. */
   onCardsChanged: (listener: () => void): (() => void) => {

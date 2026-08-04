@@ -874,6 +874,14 @@ app.whenReady().then(async () => {
     cardsChanged();
     return outcome;
   });
+  ipcMain.handle("kage:cards:receipts", () => {
+    const active = core.activeRepo(state);
+    // No repository open is neither an error nor an empty ledger — it is nothing to read, and the
+    // renderer shows its own empty state rather than being handed a fabricated zero-count object.
+    if (!active) return { counts: {}, recent: [], crossPollination: null };
+    return librarian.receipts(active.path);
+  });
+
   ipcMain.handle("kage:repos:switch", async (_event, path: string) => {
     state = core.openRepo(state, path);
     persist();
