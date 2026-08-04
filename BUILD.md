@@ -1,6 +1,6 @@
 # What is built, how it works, and what comes next
 
-*State of the rebuild as of 2026-08-04. The product argument lives in [DIRECTION.md](./DIRECTION.md);
+*State of the rebuild as of 2026-08-05. The product argument lives in [DIRECTION.md](./DIRECTION.md);
 this document is the engineering counterpart — what actually exists, what it does when you run it,
 and what is still missing. Every number here was measured, not estimated.*
 
@@ -186,21 +186,37 @@ readily as what is the thing.**
 
 ---
 
-## What is not wired
+## What is wired now
 
-Stated plainly, because a half-wired loop that looks whole is worse than an honest gap.
+The loop closed on 2026-08-05. Measured on this repository, from the packaged app:
+
+| | |
+|---|---|
+| `librarian_run` receipts | **23** — the watcher fired on its own, no command typed |
+| cards distilled from real sessions | **3**, from the one session in 23 with something durable |
+| triage rejection rate | ~87%, which is the design working, not failing |
+| cards by origin | 10 mined from history · 19 imported from legacy · 3 from sessions |
+| `kage_cards_recall` | serves cards to an agent, re-auditing trust at serve time |
+| pre-edit hook | fires on Edit/Write/MultiEdit, silent when nothing matches |
+| legacy migration | 230 packets → 19 cards through the gate |
+
+Two bugs the dogfood found, both fixed and pinned by tests:
+
+- The pre-edit hook served an agent a card titled `Change memory: release/v2.0.0` whose body was a
+  raw diff dump. **Half** the first import was that shape. They passed because they were filed
+  under ordinary types, so the type map could not catch them — bookkeeping is now refused by SHAPE.
+- An imported card reached the Inbox carrying the OKF round-trip payload inside its claim
+  (`{"schema_version":2,…`). Found only in the packaged app. Fenced blocks are stripped now.
+
+### Still not wired
 
 | gap | consequence |
 |---|---|
-| `watcher.ts` is built and tested, but **no timer calls it** | your agent works all day and the Librarian never wakes |
-| **no MCP tool or hook serves cards** | cards reach agents only via the passive BRIEF; the trigger-scoped tier does not exist in practice |
-| `mineHistory` does not use the reconciler | a second mining run proposed 10 fresh cards and `0 already known` — the Inbox will bury you |
-| **legacy capture still runs** | two stores, two capture paths, two staleness checkers; junk accumulates in the weaker one |
+| **legacy capture still runs** | two stores, two capture paths; junk accumulates in the weaker one |
 | OKF is still tangled into `kernel.ts` | that kill-list item is deferred — an extraction from 24k lines, not a delete |
-| the CLI is **118 commands** (from 131) | the collapse has barely started |
-| **no team sync** | the shadow store has no remote story yet |
-
----
+| the CLI is **118 commands** | the collapse has barely started |
+| team sync is built but **unproven** | `team.ts` push/pull/cross-pollination has tests, no two-machine run |
+| mined cards cite commits, not files | so the file-triggered hook cannot serve them; the BRIEF covers them |
 
 ## What comes next
 
