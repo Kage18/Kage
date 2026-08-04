@@ -45,6 +45,22 @@ const PLUGIN_HOOKS = join(__dirname, "..", "..", "..", "..", "plugin", "hooks");
 const ADAPTER_SCRIPT = join(PLUGIN_HOOKS, "kage-vnext-adapter.sh");
 const TOKEN = "klt_0123456789012345678901234567890123456789012";
 
+/**
+ * The budget a FUNCTIONAL test passes so it is not secretly a latency test.
+ *
+ * The production event budget is 150 ms and failing open past it is correct — a slow runtime must
+ * never stall an agent. But a test whose intent is "the client posts to /v2/events with the right
+ * auth and reports accepted" must not also depend on a localhost round-trip beating 150 ms on a
+ * loaded machine, or it reports a product failure when the only thing wrong was the CPU. That is
+ * not hypothetical: a stray background process on this machine turned three of these into red.
+ *
+ * The budget itself is still asserted, deterministically and without a stopwatch — by value in
+ * "adapter timeouts are the budgeted 150 ms and 500 ms" and by the --max-time flags the shell
+ * adapter emits. Tests that pass a deliberately tiny timeout to prove the fail-open path keep it;
+ * there the budget IS the assertion.
+ */
+const FUNCTIONAL_TIMEOUT_MS = 60_000;
+
 function fixtureRepositoryIdentity(): RepositoryIdentity {
   return {
     repo_id: "repo_fixture",
@@ -338,7 +354,12 @@ test("adapter client delivers an event to a live runtime", async () => {
     res.end(JSON.stringify({ status: "inserted" }));
   });
   try {
-    const result = await sendAdapterEvent({ url: stub.url, token: TOKEN, event: fixtureEvidenceEvent() });
+    const result = await sendAdapterEvent({
+      url: stub.url,
+      token: TOKEN,
+      event: fixtureEvidenceEvent(),
+      timeout_ms: FUNCTIONAL_TIMEOUT_MS,
+    });
     assert.equal(result.status, "accepted");
     assert.equal(stub.requests.length, 1);
     assert.equal(stub.requests[0].path, "/v2/events");
@@ -354,7 +375,14 @@ test("an authentication failure fails open and never echoes the prompt", async (
     res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
   });
   try {
-    const result = await sendAdapterEvent({ url: stub.url, token: "klt_wrong", event: fixtureEvidenceEvent() });
+    // Generous budget on purpose: this asserts the REASON is `unauthorized`, and a 150 ms race
+    // would report `timeout` instead — a green-to-red flip that says nothing about auth.
+    const result = await sendAdapterEvent({
+      url: stub.url,
+      token: "klt_wrong",
+      event: fixtureEvidenceEvent(),
+      timeout_ms: FUNCTIONAL_TIMEOUT_MS,
+    });
     assert.equal(result.status, "failed_open");
     assert.equal(result.reason, "unauthorized");
     assert.ok(!result.reason.includes("refund"), "the prompt text never reaches an adapter reason");
@@ -397,7 +425,12 @@ test("a cold context build times out, fails open, and does NOT cost the evidence
     assert.equal(context.reason, "timeout");
     assert.equal(context.capsule, undefined);
 
-    const event = await sendAdapterEvent({ url: stub.url, token: TOKEN, event: fixtureEvidenceEvent() });
+    const event = await sendAdapterEvent({
+      url: stub.url,
+      token: TOKEN,
+      event: fixtureEvidenceEvent(),
+      timeout_ms: FUNCTIONAL_TIMEOUT_MS,
+    });
     assert.equal(event.status, "accepted", "the evidence event survives a context timeout");
     assert.ok(stub.requests.some((entry) => entry.path === "/v2/events"));
   } finally {

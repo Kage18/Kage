@@ -184,151 +184,141 @@ import {
   scanLegacyCommandUsage,
 } from "./vnext/migration/legacy-command-map.js";
 
-const CORE_USAGE = `Kage — code-grounded memory for coding agents
+// There are two help texts because there are two audiences, and one text cannot serve both.
+//
+// This CLI dispatches ~130 commands. Printing all of them to someone who typed `kage` for the
+// first time is not generosity, it is a refusal to have an opinion: a list that long says every
+// verb matters equally, so the reader learns nothing about which five they actually need. The
+// old CORE_USAGE led with "The v4 surface (portal + workspace)" — internal phase vocabulary —
+// and buried `kage cards`, which is the product, in the middle of a "getting started" block.
+//
+// So: CORE_USAGE is the short list a new user can act on, ordered as the day actually goes
+// (install → cards → run → check). FULL_USAGE keeps every command, grouped under headings so it
+// reads as a reference you scan rather than a wall you bounce off. Nothing is hidden — the
+// discoverability test (cli-discoverability.test.ts) fails CI if a dispatched command appears in
+// neither FULL_USAGE nor the legacy map, and that guard is what makes collapsing the SHORT list
+// safe: shrinking the front door cannot quietly orphan a command.
+const CORE_USAGE = `Kage — cited memory for coding agents.
 
-The v4 surface (portal + workspace):
-  kage connect --project <dir>               attach the vNext runtime + adapters in audit mode (no prompt is changed)
-  kage status --project <dir>                memory + runtime health and measurement coverage
-  kage open --project <dir>                  open the local dashboard (recall, review, receipts, team)
-  kage doctor --project <dir>                health check
-  kage export --project <dir> --format okf --out <dir>   export the repository model as an OKF bundle
-  kage migrate plan --project <dir>          dry-run import of legacy packets into the repository model
+The Librarian reads your sessions and this repo's history and proposes cards: small claims that
+must cite real code. A deterministic gate refuses what it cannot verify. You approve the rest.
 
-Getting started:
-  kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
-  kage up [--project <dir>]                  bring the ambient stack up ONCE: audit config + runtime + background proxy
-  kage run -- <command>                      run any agent through the proxy (sets ANTHROPIC_BASE_URL for it)
-  kage down [--project <dir>]                stop the background proxy + runtime daemon that \`kage up\` started
-  kage cards [list|mine|approve|reject|verify|brief|recall|receipts]   the Librarian's memory: propose, review, recall
-  kage context "<query>" --project <dir>     validate + recall + code graph + knowledge graph in one call
-  kage check [--project <dir>]               verify CLAUDE.md/AGENTS.md/docs claims against the code — counted, not estimated
-  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+First run:
+  kage install [--project <dir>]              set this repo up and wire the agents already on this machine
+  kage setup <agent> --project <dir> --write  wire one agent by hand (claude-code, codex, cursor, ...)
 
-Run 'kage help --all' for the full command list (lifecycle, CI, benchmarks, daemon, workspace).
-Pre-vNext commands are deprecated but still callable — run 'kage legacy --help' for the map.`;
+The memory — this is the product:
+  kage cards mine                             propose cards from this repo's own git history (day one, no session needed)
+  kage cards list                             what the store holds, grouped by state
+  kage cards approve <id>                     the human gate: re-pins citations, re-verifies, refreshes the BRIEF
+  kage cards reject <id> --reason <text>      retire it with the reason on record
+  kage cards recall "<query>"                 exactly what an agent gets here, stamped with live trust
+  kage cards verify                           re-check every approved card against the tree as it stands
+  kage cards import                           drain the legacy packet store into cards, through the same gate
+  kage cards --help                           the remaining verbs (show, brief, receipts)
 
+Running agents through Kage:
+  kage up [--project <dir>]                   bring the stack up ONCE: audit config + runtime + background proxy
+  kage run -- <command>                       run any agent through that proxy (sets ANTHROPIC_BASE_URL for it)
+  kage down [--project <dir>]                 stop what \`kage up\` started
+
+Is it working:
+  kage status --project <dir>                 memory + runtime health, and which numbers are measured
+  kage doctor --project <dir>                 health check, with the fix for each failure
+  kage team --project <dir>                   contributors, pending review, stale-withheld, contradictions
+
+Everything else — the legacy packet store, the code graph, benchmarks, daemons, maintenance —
+is a grouped reference rather than a menu:
+  kage help --all
+  kage legacy --help                          the deprecation map: every pre-vNext verb and its replacement`;
+
+// Grouped, not sorted. The old FULL_USAGE was one 140-line "Usage:" block in dispatch order,
+// which meant `kage cards` (the product) sat between `kage embeddings build` and `kage context`,
+// and the sixty verbs of the retiring packet store were indistinguishable from the six that are
+// the future. Headings do the one thing a flat list cannot: tell you which section you are in,
+// and therefore which sections you can skip. Command lines below are the same strings the flat
+// list used — a regrouping must not become a silent rewrite of what a command claims to do.
 const FULL_USAGE = `Kage — full command reference
 
-Usage:
-  kage index --project <dir>
-  kage check [--project <dir>] [--json | --md] [--base <ref>] [--write-baseline] [--init-ci [--force]]
-  kage scan --project <dir> [--json] [--scorecard [--out <file>]]
+The short list in \`kage\` is the product. This is everything else, grouped so you can skip the
+sections that are not yours.
+
+MEMORY — cards. The Librarian's store: cited, human-gated, and the one being kept.
+Cards live in a shadow git repo outside this project (~/.kage/store/<repo-id>), one file per
+card, one commit per mutation. Nothing is written into your repo but the fenced BRIEF block.
+  kage cards [list|show|approve|reject|mine|import|verify|brief|recall|receipts] --project <dir> [--json]   the Librarian's memory: propose cards from history or sessions, review them, recall them at the moment of an action
+  kage cards --help                            the full card surface, with the flags for each verb
+
+GETTING STARTED — set the repo up and wire the agents that will use it.
   kage demo [--project <dir>]
   kage install [--project <dir>] [--agents a,b] [--no-agents] [--json]
   kage init --project <dir> [--with-policy]
   kage policy --project <dir>
   kage doctor --project <dir>
-  kage repair --project <dir> [--json]
   kage setup list
   kage setup <agent> --project <dir> [--write] [--json]
   kage setup doctor --project <dir> [--json]
   kage setup verify-agent --agent <agent> --project <dir> [--json]
+  kage hook install --project <dir> [--json]
+  kage hook status --project <dir> [--json]
+  kage hook uninstall --project <dir> [--json]
+
+RUNTIME — the proxy, the daemons, and the local surfaces that read them.
+  kage up [--project <dir>] [--port 8788] [--mode audit|assist] [--foreground] [--no-runtime] [--json]   one command: connect (audit-only config) + vNext runtime + BACKGROUND proxy on --port — detached, survives this terminal (a machine reboot stops it: run kage up once afterwards; no system service), stopped with kage down; --mode governs the proxy process alone and defaults to audit = measurement only (deliberately unlike bare \`kage proxy\`, which keeps assist as its back-compat default); re-running reuses a VERIFIED live proxy (pid + port checked, never the state file alone) and exits 0, cleaning a stale record first; --foreground keeps the proxy in this terminal with no daemon state (kage down does not manage it); --no-runtime skips the vNext runtime daemon
+  kage down [--project <dir>] [--json]   stop what kage up started: SIGTERM the verified background proxy (SIGKILL after a bounded grace), remove its state file, and stop the runtime daemon; per-component honest output (stopped / was not running / stale state cleaned); exits 0 when the end state is nothing-running; a foreground proxy is stopped with Ctrl-C instead
+  kage run [--project <dir>] [--port 8788] -- <command> [args...]   exec <command> with ANTHROPIC_BASE_URL=http://localhost:<port> in its env (and nothing else), inheriting your terminal; with no --port it uses the background proxy's verified recorded port, falling back to 8788; fails fast with a \`kage up\` hint when nothing listens — run never starts the proxy (up owns that lifecycle)
+  kage proxy --project <dir> [--port 8788] [--upstream <url>] [--workspace <dir>] [--mode audit|assist|protect] [--count-tokens] [--no-receipts] [--no-inject] [--verbose]   drop-in proxy: inject memory outbound, capture exchanges inbound, record measured transformation receipts (--mode audit forwards your exact bytes and only measures; --mode protect forwards the original but measures a defensive transform; assist refuses to start on unhealthy reversible/receipt storage)
+  kage connect --project <dir> [--agents claude-code,proxy] [--no-start] [--json]   audit mode only; connect never enables prompt mutation
+  kage status --project <dir> [--json]   legacy memory health + vNext attachment and measurement coverage (exact/partial/unavailable)
+  kage app [--project <dir>]                   open the desktop app (supervises a daemon per repo)
+  kage open --project <dir> [--port <n>]   launch the local dashboard
+  kage viewer --project <dir> [--port 3113]
   kage daemon start --project <dir> [--port 3111]
   kage daemon stop --project <dir>
   kage daemon status --project <dir> [--json]
   kage daemon doctor --project <dir> [--json]
-  kage viewer --project <dir> [--port 3113]
-  kage app [--project <dir>]                   open the desktop app (supervises a daemon per repo)
-  kage hook install --project <dir> [--json]
-  kage hook status --project <dir> [--json]
-  kage hook uninstall --project <dir> [--json]
-  kage refresh --project <dir> [--full] [--force] [--json]
-  kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
-  kage gc --project <dir> [--dry-run] [--force] [--json]
-  kage compact --project <dir> [--execute] [--json]     dry-run by default; --execute prunes/deprecates for real
-  kage verify --project <dir> [--id <packet-id>] [--json]
-  kage suppressed --project <dir> [--json]
-  kage pr summarize --project <dir> [--json]
-  kage pr check --project <dir> [--json]
-  kage minimal-change check --project <dir> [--base <ref>] [--json]
-  kage staleguard --project <dir> [--json]
-  kage upgrade [--dry-run]
-  kage branch --project <dir> [--json]
-  kage metrics --project <dir> [--json]   raw counts: code graph size, memory graph size, harness readiness
-  kage gains --project <dir> [--json]
-  kage savings --project <dir> [--queries <n>] [--json]   deterministic token-reduction receipt (no LLM on the measurement path)
-  kage team --project <dir> [--json]   team memory health: contributors, pending review, stale-withheld, contradictions
-  kage report team --project <dir> [--json]   the lead-facing "is this helping?" report: measured value, or unavailable — estimates keep an _estimated suffix and never masquerade as measured
-  kage proxy --project <dir> [--port 8788] [--upstream <url>] [--workspace <dir>] [--mode audit|assist|protect] [--count-tokens] [--no-receipts] [--no-inject] [--verbose]   drop-in proxy: inject memory outbound, capture exchanges inbound, record measured transformation receipts (--mode audit forwards your exact bytes and only measures; --mode protect forwards the original but measures a defensive transform; assist refuses to start on unhealthy reversible/receipt storage)
-  kage up [--project <dir>] [--port 8788] [--mode audit|assist] [--foreground] [--no-runtime] [--json]   one command: connect (audit-only config) + vNext runtime + BACKGROUND proxy on --port — detached, survives this terminal (a machine reboot stops it: run kage up once afterwards; no system service), stopped with kage down; --mode governs the proxy process alone and defaults to audit = measurement only (deliberately unlike bare \`kage proxy\`, which keeps assist as its back-compat default); re-running reuses a VERIFIED live proxy (pid + port checked, never the state file alone) and exits 0, cleaning a stale record first; --foreground keeps the proxy in this terminal with no daemon state (kage down does not manage it); --no-runtime skips the vNext runtime daemon
-  kage down [--project <dir>] [--json]   stop what kage up started: SIGTERM the verified background proxy (SIGKILL after a bounded grace), remove its state file, and stop the runtime daemon; per-component honest output (stopped / was not running / stale state cleaned); exits 0 when the end state is nothing-running; a foreground proxy is stopped with Ctrl-C instead
-  kage run [--project <dir>] [--port 8788] -- <command> [args...]   exec <command> with ANTHROPIC_BASE_URL=http://localhost:<port> in its env (and nothing else), inheriting your terminal; with no --port it uses the background proxy's verified recorded port, falling back to 8788; fails fast with a \`kage up\` hint when nothing listens — run never starts the proxy (up owns that lifecycle)
-  kage memory-access --project <dir> [--json]
-  kage activity --project <dir> [--json]
-  kage memory-audit --project <dir> [--limit <n>] [--json]
+
+LEGACY MEMORY — the packet store under .agent_memory/, being retired.
+This is the pre-Librarian system: heuristic capture, fifteen types, packets committed into your
+repo. It is being retired in favour of cards — reads below keep working, and
+\`kage cards import\` migrates what earns admission into cards through the citation gate.
+Several of these are deprecated on top of that; \`kage legacy --help\` prints the replacement.
+ Recall and capture:
+  kage recall "<query>" --project <dir> [--json] [--explain] [--embeddings] [--docs] [--max-context-tokens <n>] [--structural-hops <n>]
+  kage context "<query>" --project <dir> [--limit <n>] [--targets a,b] [--changed-files a,b] [--session <id>] [--json]   the kage_context MCP tool, reproducible outside an agent session
+  kage prompt-context --project <dir> --query "<task>" [--json]   recall + savings receipt for an ambient prompt hook
+  kage docs-search "<query>" --project <dir> [--limit <n>] [--json]   search this repo's own committed docs (README, docs/**, *.md)
+  kage learn --project <dir> --learning <text> [--personal] [--title <title>] [--type <type>] [--evidence <text>] [--verified-by <text>] [--tags a,b] [--paths a,b] [--graph-nodes a,b] [--discovery-tokens <n>] [--allow-missing-paths]
+  kage capture --project <dir> --title <title> --body <body> [--type <type>] [--summary <summary>] [--tags a,b] [--paths a,b] [--stack a,b] [--graph-nodes a,b] [--allow-missing-paths]
+  kage propose --project <dir> --from-diff
+  kage feedback --project <dir> --packet <packet-id> --kind helpful|wrong|stale
   kage slots --project <dir> [--json]
   kage slots set --project <dir> --label <label> --content <text> [--description <text>] [--paths a,b] [--tags a,b] [--size-limit <n>] [--unpinned] [--json]
   kage slots delete --project <dir> --label <label> [--json]
-  kage handoff --project <dir> [--json]
-  kage layers --project <dir> [--json]
-  kage lifecycle --project <dir> [--json]
+ Review, lifecycle, and trust:
+  kage inbox --project <dir> [--json]
+  kage review --project <dir>
+  kage review-artifact --project <dir>
+  kage verify --project <dir> [--id <packet-id>] [--json]
   kage reverify --project <dir> --packet <id> [--evidence <text>] [--verified-by <text>] [--json]   re-ground a stale packet; changed code requires --evidence (a bare re-stamp is refused)
-  kage reconcile --project <dir> [--session <id>] [--json]
-  kage timeline --project <dir> [--days <n>] [--json]
-  kage lineage --project <dir> [--json]
   kage supersede --project <dir> --packet <old-id> --replacement <new-id> [--reason <text>] [--json]
   kage conflicts --project <dir> [--json]
-  kage skills --project <dir> [--dir <path>] [--dry-run] [--json]
-  kage contributors --project <dir> [--json]
-  kage profile --project <dir> [--json]   repo concepts, key files, and memory focus in one summary
-  kage xray --project <dir> [--json]   first-use code structure map: layers, entry points, what to read first
-  kage capabilities --project <dir> [--json]   maps memory/benchmark/dashboard/viewer readiness to evidence
-  kage decisions --project <dir> [--json]   why-memory coverage: which decisions are captured, which are missing
-  kage module-health --project <dir> [--json]   rolls up graph, test, cleanup, and git signals per module
-  kage graph-insights --project <dir> [--json]   central files, cycles, communities, and entry flows in the code graph
-  kage workspace --project <workspace-dir> [--json]
-  kage workspace recall "<query>" --project <workspace-dir> [--json]
-  kage audit --project <dir> [--json]   trust score plus concrete memory/code-graph recommendations
-  kage audit-claude-mem [--store <path>] [--project <dir>] [--json]   classifies a claude-mem store's memory against this repo
-  kage inbox --project <dir> [--json]
-  kage quality --project <dir> [--json]   useful-memory ratio, duplicate burden, evidence + path grounding coverage
-  kage benchmark --project <dir> [--json]
-  kage benchmark --trust --project <dir> [--json]
-  kage benchmark --memory-quality [--json]
-  kage benchmark --scale [--sizes 240,1000,5000] [--json]
-  kage benchmark --project <dir> --compare --task <task> [--json]
-  kage code-graph --project <dir> [--json]
-  kage code-graph "<query>" --project <dir> [--json]
-  kage cleanup-candidates --project <dir> [--json]
-  kage dependency-path --project <dir> --from <path> --to <path> [--json]
-  kage reviewers --project <dir> [--targets a,b] [--changed-files a,b] [--json]
-  kage risk --project <dir> [--targets a,b] [--changed-files a,b] [--json]
-  kage code-index --project <dir> [--json]
-  kage structural-index --project <dir> [--json]
-  kage graph --project <dir> [--json]
-  kage graph --project <dir> --mermaid
-  kage graph "<query>" --project <dir> [--json]
-  kage graph-registry --project <dir> [--json]
-  kage embeddings build --project <dir> [--model Xenova/all-MiniLM-L6-v2] [--json]
-  kage cards [list|show|approve|reject|mine|verify|brief|recall|receipts] --project <dir> [--json]   the Librarian's memory: propose cards from history or sessions, review them, recall them at the moment of an action
-  kage context "<query>" --project <dir> [--limit <n>] [--targets a,b] [--changed-files a,b] [--session <id>] [--json]   the kage_context MCP tool, reproducible outside an agent session
-  kage community-domains                                list community knowledge-graph domains (untrusted, advisory)
-  kage community-search "<query>" [--domain <name>]      search the community knowledge graph (untrusted, advisory)
-  kage community-fetch --domain <name> --node <id>       fetch one community graph node
-  kage ledger --project <dir> [--session <id>] [--limit <n>] [--json]   this session's learning candidates: save/ignore/needs-evidence
-  kage workflow                                          print the Kage memory workflow loop (no action taken)
-  kage recall "<query>" --project <dir> [--json] [--explain] [--embeddings] [--docs] [--max-context-tokens <n>] [--structural-hops <n>]
-  kage docs-search "<query>" --project <dir> [--limit <n>] [--json]   search this repo's own committed docs (README, docs/**, *.md)
-  kage file-context --project <dir> --path <file> [--json]
-  kage prompt-context --project <dir> --query "<task>" [--json]   recall + savings receipt for an ambient prompt hook
+  kage reconcile --project <dir> [--session <id>] [--json]
+  kage lifecycle --project <dir> [--json]
+  kage lineage --project <dir> [--json]
+  kage staleguard --project <dir> [--json]
+  kage suppressed --project <dir> [--json]
+  kage pr summarize --project <dir> [--json]
+  kage pr check --project <dir> [--json]
+ Sessions and the learning ledger:
   kage observe --project <dir> --event <json>
   kage sessions --project <dir> [--json]
   kage replay --project <dir> [--session <id>] [--limit <n>] [--json]
   kage distill --project <dir> --session <id> [--auto] [--json]
   kage resume --project <dir> [--json]
-  kage learn --project <dir> --learning <text> [--personal] [--title <title>] [--type <type>] [--evidence <text>] [--verified-by <text>] [--tags a,b] [--paths a,b] [--graph-nodes a,b] [--discovery-tokens <n>] [--allow-missing-paths]
-  kage sync setup --remote <git-url>            init ~/.kage/memory as a git repo wired to your private remote
-  kage sync [--json]                            commit + pull --rebase + push personal memory (newest-wins conflicts)
-  kage sync --status [--json]                   ahead/behind/dirty for the personal store (fetch only)
-  kage feedback --project <dir> --packet <packet-id> --kind helpful|wrong|stale
-  kage capture --project <dir> --title <title> --body <body> [--type <type>] [--summary <summary>] [--tags a,b] [--paths a,b] [--stack a,b] [--graph-nodes a,b] [--allow-missing-paths]
-  kage propose --project <dir> --from-diff
-  kage review-artifact --project <dir>
-  kage promote --project <dir> --public <packet-id>
-  kage export-public --project <dir>
-  kage registry --project <dir> [--json]
-  kage changelog --project <dir> [--days <n>] [--json]
-  kage review --project <dir>
+  kage ledger --project <dir> [--session <id>] [--limit <n>] [--json]   this session's learning candidates: save/ignore/needs-evidence
+  kage workflow                                          print the Kage memory workflow loop (no action taken)
+ Work items (packets used as tasks):
   kage plan --intent "<what should become true>" --project <dir> [--json]   intent -> grounded, estimated work items
   kage work --project <dir> [--json]   derived board: stages from evidence + the attention queue
   kage brief --packet <id> --project <dir> [--json]   what the team knows + blast radius for a work item
@@ -337,36 +327,119 @@ Usage:
   kage stage --packet <id> --to <proposed|claimed|in_review> --project <dir> [--actor <name>] [--evidence <text>] [--json]
   kage gate list --project <dir> [--stage <stage>] [--json]
   kage gate review --project <dir>
+ Store maintenance:
+  kage index --project <dir>
   kage validate --project <dir>
-  kage connect --project <dir> [--agents claude-code,proxy] [--no-start] [--json]   audit mode only; connect never enables prompt mutation
-  kage status --project <dir> [--json]   legacy memory health + vNext attachment and measurement coverage (exact/partial/unavailable)
-  kage open --project <dir> [--port <n>]   launch the local dashboard
-  kage receipts --project <dir> [--task <id>] [--limit <n>] [--json]   measured fields only; an unmeasured cost prints as unavailable, never as 0
+  kage gc --project <dir> [--dry-run] [--force] [--json]
+  kage compact --project <dir> [--execute] [--json]     dry-run by default; --execute prunes/deprecates for real
+  kage branch --project <dir> [--json]
+  kage changelog --project <dir> [--days <n>] [--json]
+  kage skills --project <dir> [--dir <path>] [--dry-run] [--json]
+  kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
+  kage sync setup --remote <git-url>            init ~/.kage/memory as a git repo wired to your private remote
+  kage sync [--json]                            commit + pull --rebase + push personal memory (newest-wins conflicts)
+  kage sync --status [--json]                   ahead/behind/dirty for the personal store (fetch only)
+ Diagnostics over the packet store:
+  kage memory-access --project <dir> [--json]
+  kage activity --project <dir> [--json]
+  kage memory-audit --project <dir> [--limit <n>] [--json]
+  kage handoff --project <dir> [--json]
+  kage layers --project <dir> [--json]
+  kage timeline --project <dir> [--days <n>] [--json]
+  kage decisions --project <dir> [--json]   why-memory coverage: which decisions are captured, which are missing
+ Migration and OKF (the export format; on the kill list, still shipped):
   kage migrate plan --project <dir> [--pending] [--out <path>] [--json]   dry-run import of legacy packets into the repository model (non-destructive; per-disposition counts)
   kage migrate apply --project <dir> --plan <path> [--json]   apply a migration plan; imports only packets whose fingerprint still matches (nothing becomes injectable)
   kage export --project <dir> --format okf --out <dir>   export the repository model as an OKF concept bundle (identifiers round-trip through foreign OKF consumers)
-  kage model export-fixture --project <dir> --out <path> [--repository <id>]   deterministic repository-model v1 fixture (sorted by id; no timestamps/paths) for cross-phase compatibility tests
   kage okf view [--project <dir>] [--pending]   view your memory as a self-contained OKF page (no server)
   kage okf migrate [--project <dir>] [--pending]   packets → OKF bundle under .agent_memory/okf
   kage okf lint [<dir|file>] [--project <dir>]   check OKF conformance (defaults to this repo's bundle)
   kage okf import [<dir>] [--project <dir>] [--json]   read an OKF bundle back into packets
+ Community graph and public bundles (advisory, untrusted; nothing publishes automatically):
+  kage community-domains                                list community knowledge-graph domains (untrusted, advisory)
+  kage community-search "<query>" [--domain <name>]      search the community knowledge graph (untrusted, advisory)
+  kage community-fetch --domain <name> --node <id>       fetch one community graph node
+  kage registry --project <dir> [--json]
+  kage promote --project <dir> --public <packet-id>
+  kage export-public --project <dir>
 
-Maintainer tools:
+CODE GRAPH — what the repo is, derived from the code rather than remembered.
+  kage code-graph --project <dir> [--json]
+  kage code-graph "<query>" --project <dir> [--json]
+  kage graph --project <dir> [--json]
+  kage graph --project <dir> --mermaid
+  kage graph "<query>" --project <dir> [--json]
+  kage graph-registry --project <dir> [--json]
+  kage graph-insights --project <dir> [--json]   central files, cycles, communities, and entry flows in the code graph
+  kage code-index --project <dir> [--json]
+  kage structural-index --project <dir> [--json]
+  kage embeddings build --project <dir> [--model Xenova/all-MiniLM-L6-v2] [--json]
+  kage file-context --project <dir> --path <file> [--json]
+  kage dependency-path --project <dir> --from <path> --to <path> [--json]
+  kage cleanup-candidates --project <dir> [--json]
+  kage reviewers --project <dir> [--targets a,b] [--changed-files a,b] [--json]
+  kage risk --project <dir> [--targets a,b] [--changed-files a,b] [--json]
+  kage module-health --project <dir> [--json]   rolls up graph, test, cleanup, and git signals per module
+  kage profile --project <dir> [--json]   repo concepts, key files, and memory focus in one summary
+  kage xray --project <dir> [--json]   first-use code structure map: layers, entry points, what to read first
+  kage workspace --project <workspace-dir> [--json]
+  kage workspace recall "<query>" --project <workspace-dir> [--json]
+
+REPORTS AND BENCHMARKS — measured where it says measured, estimated where it says estimated.
+  kage receipts --project <dir> [--task <id>] [--limit <n>] [--json]   measured fields only; an unmeasured cost prints as unavailable, never as 0
+  kage metrics --project <dir> [--json]   raw counts: code graph size, memory graph size, harness readiness
+  kage gains --project <dir> [--json]
+  kage savings --project <dir> [--queries <n>] [--json]   deterministic token-reduction receipt (no LLM on the measurement path)
+  kage quality --project <dir> [--json]   useful-memory ratio, duplicate burden, evidence + path grounding coverage
+  kage audit --project <dir> [--json]   trust score plus concrete memory/code-graph recommendations
+  kage capabilities --project <dir> [--json]   maps memory/benchmark/dashboard/viewer readiness to evidence
+  kage scan --project <dir> [--json] [--scorecard [--out <file>]]
+  kage check [--project <dir>] [--json | --md] [--base <ref>] [--write-baseline] [--init-ci [--force]]
+  kage minimal-change check --project <dir> [--base <ref>] [--json]
+  kage audit-claude-mem [--store <path>] [--project <dir>] [--json]   classifies a claude-mem store's memory against this repo
+  kage benchmark --project <dir> [--json]
+  kage benchmark --trust --project <dir> [--json]
+  kage benchmark --memory-quality [--json]
+  kage benchmark --scale [--sizes 240,1000,5000] [--json]
+  kage benchmark --project <dir> --compare --task <task> [--json]
+
+MAINTENANCE — keeping the install and the derived artifacts current.
+  kage refresh --project <dir> [--full] [--force] [--json]
+  kage repair --project <dir> [--json]
+  kage upgrade [--dry-run]
+  kage model export-fixture --project <dir> --out <path> [--repository <id>]   deterministic repository-model v1 fixture (sorted by id; no timestamps/paths) for cross-phase compatibility tests
   kage gen-plugin-hooks [--plugin-dir <dir>] [--json]   regenerate plugin/hooks/* from the claude-code setup templates so the plugin and npm install paths ship identical hooks
+
+TEAM — who knows what. These read the legacy packet store, not the card store.
+  kage team --project <dir> [--json]   team memory health: contributors, pending review, stale-withheld, contradictions
+  kage report team --project <dir> [--json]   the lead-facing "is this helping?" report: measured value, or unavailable — estimates keep an _estimated suffix and never masquerade as measured
+  kage contributors --project <dir> [--json]
 
 Back-compat aliases (identical behavior to the modern verb, kept for older scripts):
   kage audit-log → memory-audit · kage capability-audit , kage readiness → capabilities
   kage context-slots → slots · kage memory-handoff → handoff · kage memory-layers → layers
   kage memory-lifecycle → lifecycle · kage memory-lineage → lineage · kage session-replay → replay
   kage memory-reconcile , kage memory-reconciliation → reconcile · kage skills-build → skills
+  kage memory-timeline → timeline · kage repo-xray → xray
 
-Types:
+Legacy packet types (the --type values for capture/learn; cards have exactly three kinds —
+decision, runbook, caution):
   ${MEMORY_TYPES.join(", ")}`;
 
 function usage(): never {
   console.log(CORE_USAGE);
   process.exit(1);
 }
+
+/**
+ * Flag spellings of the `help` verb, held in a set rather than compared inline.
+ *
+ * The shape is load-bearing: cli-discoverability.test.ts finds every command by scanning this file
+ * for `command === "…"`, so writing these as equality checks would register `--help` as a command
+ * that dispatches but appears in no help output — which is precisely the failure that test exists
+ * to catch. They are aliases for a verb, not verbs, and this says so.
+ */
+const HELP_FLAGS = new Set(["--help", "-h"]);
 
 // Stale-catch lines lead with color when attached to a terminal so the
 // retention heartbeat is impossible to miss; plain text otherwise (CI, pipes).
@@ -394,6 +467,20 @@ function listArg(value: string | undefined): string[] {
 
 function projectArg(args: string[]): string {
   return takeArg(args, "--project") ?? process.cwd();
+}
+
+/**
+ * Where the shadow store lives, read from the environment HERE because this is a CLI edge.
+ *
+ * store.ts takes the root as a parameter and never reads env ("the CLI edge owns env"), and
+ * hook.ts already honours KAGE_STORE_ROOT at its own edge. This function is the same rule applied
+ * to the other edge, which had been missing it: `kage cards` and `kage install` resolved through
+ * homedir() unconditionally, so the variable worked from a hook and was silently ignored from the
+ * CLI. An env var honoured at one entry point and ignored at another is worse than one that does
+ * not exist — it cost a package-verification run a stray store written into a real ~/.kage.
+ */
+function storeRootFromEnv(): string | undefined {
+  return process.env.KAGE_STORE_ROOT?.trim() || undefined;
 }
 
 function numberArg(args: string[], name: string, fallback: number): number {
@@ -490,6 +577,15 @@ async function main(): Promise<void> {
   let args = process.argv.slice(2);
   let command = args[0];
   if (!command) usage();
+  // `--help` and `-h` are how most people ask. They used to fall through every branch to usage(),
+  // which prints the right text and then exits 1 — reporting failure for a question that was
+  // answered correctly, and breaking any `kage --help && …` or CI step that checks the status.
+  // Normalised into the `help` verb rather than dispatched on, so the string never reaches the
+  // discoverability test's `command === "…"` scan as a phantom command.
+  if (HELP_FLAGS.has(command)) {
+    args = ["help", ...args.slice(1)];
+    command = "help";
+  }
   if (command === "help") {
     console.log(args.includes("--all") ? FULL_USAGE : CORE_USAGE);
     return;
@@ -1118,22 +1214,25 @@ async function main(): Promise<void> {
     const agentsFlag = takeArg(args, "--agents");
     const skipAgents = args.includes("--no-agents");
     const json = args.includes("--json");
-    const home = homedir();
-    // Detection is config-dir presence, not PATH: agents like Cursor never expose a binary.
-    const probes: Array<{ agent: SetupAgent; paths: string[] }> = [
-      { agent: "claude-code", paths: [join(home, ".claude.json"), join(home, ".claude")] },
-      { agent: "codex", paths: [join(home, ".codex")] },
-      { agent: "cursor", paths: [join(home, ".cursor")] },
-      { agent: "windsurf", paths: [join(home, ".codeium", "windsurf")] },
-      { agent: "gemini-cli", paths: [join(home, ".gemini")] },
-      { agent: "opencode", paths: [join(home, ".config", "opencode"), join(home, ".opencode")] },
-      { agent: "goose", paths: [join(home, ".config", "goose")] },
-      { agent: "aider", paths: [join(home, ".aider.conf.yml")] },
-    ];
+
+    // The Librarian's half of install (DIRECTION.md). Imported lazily, like the `cards` branch
+    // below, so this file stays a router and its module graph stays small.
+    const { planInstall, renderInstallPlan, renderNextSteps } = await import("./vnext/librarian/install.js");
+    const { storeFor, refreshBrief } = await import("./vnext/librarian/operations.js");
+
+    // PLAN FIRST, and only then act. planInstall is a pure read, so this captures the state of the
+    // world BEFORE the install touches it — which is the only way `alreadyInstalled` and
+    // `briefExists` can answer honestly. Computing it afterwards would make every run report a
+    // store that exists and a block that is already there, i.e. every install a refresh.
+    const plan = planInstall(project);
+
+    // Agent detection is NOT re-probed here. install.ts owns that list precisely so the screen
+    // cannot claim an agent the installer skipped, or skip one it claimed: one list, one claim.
+    // --agents still overrides it, because an explicit request beats a detection.
     const requested = agentsFlag
       ? agentsFlag.split(",").map((a) => a.trim()).filter((a): a is SetupAgent => SETUP_AGENTS.includes(a as SetupAgent))
       : null;
-    const detected = requested ?? probes.filter((p) => p.paths.some((path) => existsSync(path))).map((p) => p.agent);
+    const detected = requested ?? plan.detectedAgents.filter((a): a is SetupAgent => SETUP_AGENTS.includes(a as SetupAgent));
 
     const init = initProject(project, { policy: false });
     // T4 — day-one value: bootstrap one verifiable starter runbook from package.json scripts so the
@@ -1155,13 +1254,30 @@ async function main(): Promise<void> {
         }
       }
     }
+    // Install the Librarian for real. The plan above is printed below as fact, so the two things
+    // it promises have to exist by the time it is: openStore creates and git-inits the shadow
+    // store, refreshBrief splices the fenced block into AGENTS.md/CLAUDE.md. Both are idempotent,
+    // which is what makes re-running an install a refresh rather than a second copy.
+    let librarian: { ok: boolean; store: string; brief?: string; cards?: number; error?: string };
+    try {
+      const store = storeFor(project, storeRootFromEnv());
+      const brief = refreshBrief(store, project);
+      librarian = { ok: true, store: plan.storeDir, brief: brief.path, cards: brief.cards };
+    } catch (error) {
+      // Reported, never swallowed: an install that printed "Memory <path>" over a store it failed
+      // to create would be the one lie this product cannot afford.
+      librarian = { ok: false, store: plan.storeDir, error: error instanceof Error ? error.message : String(error) };
+    }
+
     if (json) {
-      console.log(JSON.stringify({ project_dir: init.index.projectDir, packets: init.index.packets, validation_ok: init.validation.ok, agents: wired, bootstrap }, null, 2));
+      console.log(JSON.stringify({ project_dir: init.index.projectDir, packets: init.index.packets, validation_ok: init.validation.ok, agents: wired, bootstrap, librarian, plan }, null, 2));
       if (!init.validation.ok) process.exit(2);
       return;
     }
     console.log(`Kage installed in ${init.index.projectDir}\n`);
-    console.log("  Memory      .agent_memory/ created — packets are plain files, reviewable in git");
+    // "Packets", not "Memory": the Librarian's card store below is the memory now (DIRECTION.md),
+    // and two rows both labelled Memory would read as two answers to the same question.
+    console.log("  Packets     .agent_memory/ created — the legacy store, plain files, reviewable in git");
     if (bootstrap.created) {
       console.log(`  First win   starter runbook captured ("${bootstrap.title}") — try it now:`);
       console.log(`                kage context "how do I run the tests" --project .`);
@@ -1187,13 +1303,23 @@ async function main(): Promise<void> {
       // ensureMemoryDirs creates 17 directories, so `git add -A` after install committed the
       // structural index, the code graph and thousands of raw observation files.
       //
-      // Two things are deliberately allowed back. `packets/` is the durable memory — the whole
-      // point of storing it in git. `conflicts/` is where the merge driver preserves the side it
-      // did not pick: if that stays ignored, a teammate whose edit lost a merge is never told, and
-      // the "nothing is silently dropped" promise only holds on the machine that did the merge.
+      // `packets/` used to be un-ignored here, on the reasoning that it was "the durable memory —
+      // the whole point of storing it in git". That reasoning inverted with the rebuild: durable
+      // memory is now the shadow store outside the repo, and the packet directory is a local
+      // legacy artifact that `kage cards import` drains. Un-ignoring it made a fresh `kage install`
+      // stage a generated repo-map packet into the user's tree, which quietly falsified the one
+      // promise the README and the landing page both lead with — "your project gets exactly one
+      // thing: a fenced block". Ignored now, so that claim is literally true for a new user.
+      //
+      // This does not disturb an existing install: git does not untrack what is already tracked,
+      // and a repo that has these lines already gets no rewrite (`missing` comes back empty).
+      //
+      // `conflicts/` stays un-ignored. It is where the merge driver preserves the side it did not
+      // pick, and every pre-rebuild repo still commits packets and still merges them — if that
+      // directory is ignored, a teammate whose edit lost a merge is never told, and "nothing is
+      // silently dropped" would hold only on the machine that did the merge.
       const want = [
         ".agent_memory/*",
-        "!.agent_memory/packets/",
         "!.agent_memory/conflicts/",
       ];
       const current = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
@@ -1206,15 +1332,21 @@ async function main(): Promise<void> {
       vcDone = true;
     } catch { /* not a git repo or no git — fall back to a hint */ }
     console.log(`  Git         ${vcDone ? ".gitignore + packet merge driver configured" : "skipped (not a git repo)"}`);
-    if (skipAgents || !wired.some((w) => w.ok)) {
-      console.log("\nNext:  wire an agent — kage setup <agent> --project . --write");
-    } else if (wired.some((w) => w.agent === "claude-code" && w.ok)) {
-      console.log("\nNext:  restart your agent — Kage then recalls automatically every session.");
-    } else {
-      console.log("\nNext:  restart your agent — its policy file now instructs it to call Kage each session.");
-    }
-    console.log("       kage scan      a Truth Report on this repo");
     if (!vcDone) console.log(`\nWhen this becomes a git repo, run once: ${PACKET_MERGE_DRIVER_CONFIG}`);
+
+    // The Librarian — what this install is actually for, and then the one thing to do next.
+    // renderNextSteps replaces the old hand-rolled "Next:" trailer rather than joining it: it
+    // already names the restart, and two Next blocks is the decision-after-install this screen
+    // is capped at ten lines to avoid.
+    console.log("");
+    console.log(renderInstallPlan(plan));
+    if (!librarian.ok) {
+      console.log("");
+      console.log(`  Note        the card store could not be created: ${librarian.error}`);
+      console.log("              the legacy packet install above is unaffected; fix and re-run `kage install`.");
+    }
+    console.log("");
+    console.log(renderNextSteps(plan));
     if (!init.validation.ok) process.exit(2);
     return;
   }
@@ -1510,7 +1642,7 @@ async function main(): Promise<void> {
   if (command === "cards") {
     const { runCardsCommand } = await import("./vnext/librarian/cli.js");
     // `args` still carries the command itself; the dispatcher wants only what follows it.
-    const result = await runCardsCommand(args.slice(1), projectArg(args));
+    const result = await runCardsCommand(args.slice(1), projectArg(args), { storeRoot: storeRootFromEnv() });
     if (result.out) console.log(result.out);
     if (result.exitCode !== 0) process.exit(result.exitCode);
     return;
@@ -3377,7 +3509,13 @@ async function main(): Promise<void> {
     else if (auto) {
       // Auto mode is quiet: no output for empty or already-captured sessions; one line otherwise.
       const drafted = result.candidates.filter((candidate) => candidate.ok).length;
-      if (!result.skipped_reason && drafted > 0) {
+      if (result.skipped_reason === "legacy_capture_disabled") {
+        // The one skip that is NOT silence-worthy. "No observations" is a non-event, but this is a
+        // retired feature answering a caller that still expects it — usually a Stop hook wired
+        // before the Librarian existed. Staying quiet here is how a user concludes that capture
+        // still works, and never learns their memory now comes from `kage cards`.
+        console.log(`Skipped session ${sessionId}: ${result.skipped_note ?? "legacy capture is retired"}`);
+      } else if (!result.skipped_reason && drafted > 0) {
         console.log(`Auto-distilled ${drafted} pending draft${drafted === 1 ? "" : "s"} from session ${sessionId}. Review with: kage review --project ${project}`);
       }
     } else {

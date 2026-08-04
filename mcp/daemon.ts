@@ -852,6 +852,41 @@ export function stopDaemon(projectDir: string): { ok: boolean; message: string; 
   }
 }
 
+/** Coalesce a burst of edits (a branch switch, a formatter) into one pass. */
+export const INDEX_DEBOUNCE_MS = 2_000;
+
+/**
+ * The floor between two index passes. A full pass is expensive enough that re-indexing more than
+ * twice a minute is never worth it, and cheap protection against a re-trigger loop is worth far
+ * more than fresher indexes: nothing reads them with sub-minute latency.
+ */
+export const MIN_INDEX_INTERVAL_MS = 30_000;
+
+/**
+ * Does a changed path under the project mean "source moved, re-index"?
+ *
+ * Exported and pure because it is the daemon's most expensive decision, and because getting it
+ * wrong is not a slow daemon but an infinite one. It HAS been wrong: the filter used to name three
+ * `.agent_memory` subdirectories individually (`indexes`, `code_graph`, `graph`) while the
+ * re-index callback wrote to two others — `.agent_memory/structural` (~41 MB rewritten per pass)
+ * and `.agent_memory/daemon/status.json`, whose `last_indexed_at` differs on every single tick.
+ * Each write re-triggered the watcher that caused it, so a daemon on an untouched repository
+ * re-indexed forever. Measured on this machine before the fix: 118 hours of CPU over 5 days
+ * elapsed — 91% of a core, continuously, with zero repo activity.
+ *
+ * So the rule is the whole directory, not a list of its children: the daemon watches source and
+ * never its own output. A deny-list of individual output paths is structurally wrong here, because
+ * every future output directory silently re-arms the loop — which is exactly what happened.
+ *
+ * Deliberate consequence: a packet written by another agent no longer triggers a re-index.
+ * That is correct — `kage_refresh` and `kage_context` rebuild explicitly, and nothing should
+ * depend on the daemon noticing a file the daemon itself might have written.
+ */
+export function shouldTriggerReindex(file: string): boolean {
+  if (!file) return false;
+  return !file.includes("node_modules") && !file.includes(".git") && !file.includes(".agent_memory");
+}
+
 export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number; vnext?: boolean } = {}): Promise<void> {
   const host = options.host ?? DEFAULT_HOST;
   const restPort = options.restPort ?? DEFAULT_REST_PORT;
@@ -874,9 +909,22 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   let watcher: FSWatcher | null = null;
   let refreshTimer: NodeJS.Timeout | null = null;
+  let indexStartedAt = 0;
   const refreshIndex = () => {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
+      // A hard floor between passes, independent of the debounce. The debounce alone only
+      // coalesces a burst; it cannot bound the rate of a self-sustaining loop, because each pass
+      // arrives after the previous one finished. One full pass spawns 8 worker isolates and
+      // rewrites tens of megabytes, so an unbounded loop costs a core — see shouldTriggerReindex
+      // for the incident. Re-arm rather than drop: a real edit must never be forgotten, only
+      // delayed.
+      const waited = Date.now() - indexStartedAt;
+      if (indexStartedAt && waited < MIN_INDEX_INTERVAL_MS) {
+        refreshTimer = setTimeout(refreshIndex, MIN_INDEX_INTERVAL_MS - waited);
+        return;
+      }
+      indexStartedAt = Date.now();
       try {
         indexProject(projectDir);
         lastIndexedAt = new Date().toISOString();
@@ -885,12 +933,11 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
       } catch {
         // Keep the daemon alive; doctor/status surfaces stale indexes separately.
       }
-    }, 350);
+    }, INDEX_DEBOUNCE_MS);
   };
   try {
     watcher = watch(projectDir, { recursive: true }, (_event, filename) => {
-      const file = String(filename ?? "");
-      if (!file || file.includes("node_modules") || file.includes(".git") || file.includes(".agent_memory/indexes") || file.includes(".agent_memory/code_graph") || file.includes(".agent_memory/graph")) return;
+      if (!shouldTriggerReindex(String(filename ?? ""))) return;
       refreshIndex();
     });
     status.index_watch = true;

@@ -126,8 +126,10 @@ agents' subscription pays for the intelligence; you pay Kage for trust, sync, go
 
 Removed with their tests — this is the documented exception to the never-delete-tests rule:
 
-- **OKF tooling** (`okf.ts`, OKF_STANDARD.md round-tripping) — no third-party consumer ever
-  materialized; the "lossless" format doubled every packet.
+- **OKF round-trip tooling** (`okf.ts`'s export/reimport machinery) — the "lossless" `kage-state`
+  JSON fence doubled every packet and leaked into a card's claim during the dogfood run. **The
+  format itself is kept and cards are now conformant** (see below); what died is the second copy,
+  not the standard.
 - **Cloud server/client + billing** — wired at one CLI branch; superseded by the shadow-repo
   remote model.
 - **CLI collapse** — 131 commands to a core set; the CLI is plumbing, the app is the product.
@@ -143,6 +145,21 @@ Symbol-fingerprint anchors + staleness detection; the injection-decision plane a
 receipts; the proxy transport + provider gateway; work-item derivation from git; the vnext
 review-queue trust floor; the code graph; the Electron shell and the design language
 (illumination is certainty; a dash is never a zero).
+
+**OKF as the card file format.** A card file is a conformant Open Knowledge Format concept
+document: `type` plus the recommended keys, the claim as the body, and every Kage-specific
+field namespaced under `x-kage-*`, which OKF reserves for producers and requires consumers to
+ignore. This is kept for one reason, and it is not standards-compliance for its own sake — the
+product's anti-lock-in promise is *"your memory is plain markdown you can read without our
+binary, and it survives us going away."* A bespoke format makes that sentence false, and a
+memory tool asking for a team's institutional knowledge cannot also be a trapdoor. Conformance
+costs six frontmatter keys and no dependency (JSON is a subset of YAML 1.2, so the values the
+hand-rolled parser writes are already legal YAML — verified against a real YAML parser, not
+assumed).
+
+It also states the division of labour exactly: OKF v0.1 standardizes the store and explicitly
+scopes *out* freshness, verification and staleness — which is precisely what a card's trust
+state is. **OKF says what the concept is; `x-kage-*` says whether it is still true.**
 
 ## Known risks, named
 

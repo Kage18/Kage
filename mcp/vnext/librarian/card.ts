@@ -98,35 +98,68 @@ export function canTransition(from: CardState, to: CardState): boolean {
 
 // ── Serialization ─────────────────────────────────────────────────────────────────────────────
 //
-// Frontmatter keys are written in a FIXED order so that identical cards produce identical
-// bytes — the store commits every mutation, and nondeterministic key order would turn every
-// rewrite into a spurious diff.
+// A card file is a conformant Open Knowledge Format concept document. OKF standardizes the
+// container — markdown, YAML frontmatter, `type` the only required key — and explicitly scopes
+// OUT freshness, verification and staleness. That excluded part is exactly what a card's trust
+// state is, so the two compose instead of competing: OKF says what the concept is, `x-kage-*`
+// says whether it is still true. OKF reserves producer-prefixed keys and requires consumers to
+// ignore what they don't recognize, so a vanilla OKF reader sees a clean concept and none of
+// the machinery.
+//
+// Values are still written as JSON, which the hand-rolled parser can read without a YAML
+// dependency and which is legal YAML regardless: JSON is a subset of YAML 1.2.
+//
+// Keys are written in a FIXED order so identical cards produce identical bytes — the store
+// commits every mutation, and nondeterministic key order would make every rewrite a spurious diff.
 
-const FRONTMATTER_ORDER: readonly (keyof Card)[] = [
-  "id",
-  "kind",
-  "state",
-  "verify",
-  "title",
-  "citations",
-  "trigger",
-  "provenance",
-  "tags",
-  "supersedes",
-  "supersededBy",
-  "createdAt",
-  "updatedAt",
-  "reviewedBy",
-  "reviewNote",
-];
+/** OKF display form of a card kind — the value of the standard's one required field. */
+const OKF_TYPE: Record<CardKind, string> = {
+  decision: "Decision",
+  runbook: "Runbook",
+  caution: "Caution",
+};
+
+/**
+ * OKF `description` — the claim's first sentence, so a reader that knows nothing about Kage
+ * still gets the point without opening the body. Derived on write and ignored on read; the
+ * claim in the body is the only copy that is authoritative.
+ */
+export function okfDescription(claim: string): string {
+  const first = claim.trim().split(/(?<=[.!?])\s+/)[0]?.trim() ?? "";
+  return first.length > 200 ? `${first.slice(0, 199).trimEnd()}…` : first;
+}
 
 export function serializeCard(card: Card): string {
   const lines: string[] = ["---"];
-  for (const key of FRONTMATTER_ORDER) {
-    const value = card[key];
-    if (value === undefined) continue;
+  const put = (key: string, value: unknown) => {
+    if (value === undefined) return;
     lines.push(`${key}: ${JSON.stringify(value)}`);
-  }
+  };
+
+  // OKF core — what any OKF consumer reads.
+  put("type", OKF_TYPE[card.kind]);
+  put("title", card.title);
+  put("description", okfDescription(card.claim));
+  // OKF `resource` is "the source of truth to verify against", which is precisely what a code
+  // citation is. Ref-only cards (a commit, a PR) leave it absent rather than inventing a path.
+  put("resource", card.citations.find(isCodeCitation)?.path);
+  if (card.tags.length) put("tags", card.tags);
+  put("timestamp", card.updatedAt);
+
+  // Kage's trust extension.
+  put("x-kage-id", card.id);
+  put("x-kage-kind", card.kind);
+  put("x-kage-state", card.state);
+  put("x-kage-verify", card.verify);
+  put("x-kage-citations", card.citations);
+  put("x-kage-trigger", card.trigger);
+  put("x-kage-provenance", card.provenance);
+  put("x-kage-created-at", card.createdAt);
+  put("x-kage-supersedes", card.supersedes);
+  put("x-kage-superseded-by", card.supersededBy);
+  put("x-kage-reviewed-by", card.reviewedBy);
+  put("x-kage-review-note", card.reviewNote);
+
   lines.push("---", "", card.claim.trim(), "");
   return lines.join("\n");
 }
@@ -151,40 +184,61 @@ export function parseCard(content: string): Card | null {
     }
   }
 
+  // Read the OKF key, fall back to the pre-OKF one. Stores written before the format became
+  // conformant must keep loading: cards are the product, not a cache that can be rebuilt.
+  const at = (okfKey: string, legacyKey: string) => record[okfKey] ?? record[legacyKey];
+
   const claim = match[2].trim();
+  const id = at("x-kage-id", "id");
+  const kind = at("x-kage-kind", "kind");
+  const state = at("x-kage-state", "state");
+  const verify = at("x-kage-verify", "verify");
+  const citations = at("x-kage-citations", "citations");
+  const trigger = at("x-kage-trigger", "trigger");
+  const createdAt = at("x-kage-created-at", "createdAt");
+  const updatedAt = at("timestamp", "updatedAt");
+  const supersedes = at("x-kage-supersedes", "supersedes");
+  const supersededBy = at("x-kage-superseded-by", "supersededBy");
+  const reviewedBy = at("x-kage-reviewed-by", "reviewedBy");
+  const reviewNote = at("x-kage-review-note", "reviewNote");
+
   if (
-    typeof record.id !== "string" ||
-    !CARD_KINDS.includes(record.kind as CardKind) ||
-    !CARD_STATES.includes(record.state as CardState) ||
-    !VERIFY_STATES.includes(record.verify as VerifyState) ||
+    typeof id !== "string" ||
+    !CARD_KINDS.includes(kind as CardKind) ||
+    !CARD_STATES.includes(state as CardState) ||
+    !VERIFY_STATES.includes(verify as VerifyState) ||
     typeof record.title !== "string" ||
-    !Array.isArray(record.citations) ||
-    typeof record.trigger !== "string" ||
-    typeof record.createdAt !== "string" ||
-    typeof record.updatedAt !== "string" ||
+    !Array.isArray(citations) ||
+    typeof trigger !== "string" ||
+    typeof createdAt !== "string" ||
+    typeof updatedAt !== "string" ||
     !claim
   ) {
     return null;
   }
 
   return {
-    id: record.id,
-    kind: record.kind as CardKind,
-    state: record.state as CardState,
-    verify: record.verify as VerifyState,
+    id,
+    kind: kind as CardKind,
+    state: state as CardState,
+    verify: verify as VerifyState,
     title: record.title,
     claim,
-    citations: record.citations as Citation[],
-    trigger: record.trigger,
-    provenance: (record.provenance ?? { source: "human", ref: "unknown", at: record.createdAt }) as Card["provenance"],
+    citations: citations as Citation[],
+    trigger,
+    provenance: (at("x-kage-provenance", "provenance") ?? {
+      source: "human",
+      ref: "unknown",
+      at: createdAt,
+    }) as Card["provenance"],
     tags: Array.isArray(record.tags) ? (record.tags as string[]) : [],
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
+    createdAt,
+    updatedAt,
     // Optional fields are OMITTED when absent, not set to undefined — a parsed card must
     // deep-equal the card that was serialized, and serialization skips absent keys.
-    ...(typeof record.supersedes === "string" ? { supersedes: record.supersedes } : {}),
-    ...(typeof record.supersededBy === "string" ? { supersededBy: record.supersededBy } : {}),
-    ...(typeof record.reviewedBy === "string" ? { reviewedBy: record.reviewedBy } : {}),
-    ...(typeof record.reviewNote === "string" ? { reviewNote: record.reviewNote } : {}),
+    ...(typeof supersedes === "string" ? { supersedes } : {}),
+    ...(typeof supersededBy === "string" ? { supersededBy } : {}),
+    ...(typeof reviewedBy === "string" ? { reviewedBy } : {}),
+    ...(typeof reviewNote === "string" ? { reviewNote } : {}),
   };
 }

@@ -68,3 +68,52 @@ test("kage okf stays discoverable — the command that motivated this test", () 
   // not just a long diff in the test above.
   assert.match(run("help", "--all"), /kage okf/);
 });
+
+// The three tests below guard the OTHER direction, which only became a failure mode when the
+// short help stopped being a near-complete list.
+//
+// `kage` and `kage --help` used to print most of the surface, so "documented" and "promised on
+// the front page" were one set and one guard covered both. They are two sets now: the front page
+// is hand-curated down to the core, and a hand-curated list can promise a verb that was renamed,
+// misspelled, or never existed — with nothing to catch it but a new user typing it and getting
+// `usage`. It can also creep back to 131 lines one reasonable-looking addition at a time, which
+// is precisely how it got there the first time.
+
+/** What `kage` with no arguments prints — the curated front page. It exits 1; run() keeps stdout. */
+function shortHelp(): string {
+  return run();
+}
+
+test("every command the short help promises is a command the CLI dispatches", () => {
+  const dispatched = new Set(dispatchedCommands());
+  const promised = new Set([...shortHelp().matchAll(/kage ([a-z][a-z0-9-]*)/g)].map((match) => match[1]));
+  const phantom = [...promised].filter((command) => !dispatched.has(command)).sort();
+
+  assert.deepEqual(
+    phantom,
+    [],
+    `the front page names commands the CLI does not dispatch, so the first thing a new user types fails:\n  ${phantom.join("\n  ")}`,
+  );
+});
+
+test("the short help leads with cards and points at the reference for everything else", () => {
+  const short = shortHelp();
+  // Cards are the product (DIRECTION.md). A front page that buries them is the state this
+  // collapse was undoing, not a cosmetic preference.
+  assert.match(short, /kage cards/, "`kage cards` must be on the front page");
+  assert.match(short, /kage help --all/, "the front page must say where the other ~120 commands live");
+});
+
+test("the short help stays a core, not a second copy of the reference", () => {
+  const short = shortHelp();
+  // A sample of the long tail, one per section of `help --all`. These are not forbidden forever —
+  // they are the canaries: if any of them is back on the front page, the grouping has been
+  // re-flattened and the reference and the core have merged again.
+  for (const buried of ["kage okf", "kage benchmark", "kage graph-insights", "kage slots", "kage workspace"]) {
+    assert.ok(!short.includes(buried), `${buried} belongs in \`kage help --all\`, not in the short help`);
+  }
+  // A ceiling on ceremony rather than a measurement: the point of the front page is that it can
+  // be read before choosing, and nothing readable in one screen needs eighty lines.
+  const lines = short.split("\n").length;
+  assert.ok(lines <= 50, `the short help is ${lines} lines; it is meant to be readable at a glance`);
+});

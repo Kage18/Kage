@@ -21,6 +21,25 @@ must pass before publishing. Nothing else proves the thing a customer downloads 
 
 ---
 
+## Upgrade note that must ship with this release
+
+A daemon started before this version re-indexed in a loop, because its file watcher did not
+exclude two directories the re-index itself writes to. Measured on the dev machine: **118 hours of
+CPU over 5 days elapsed — 91% of one core, continuously, on a repository nobody was touching.**
+
+Installing the new package does **not** stop an already-running daemon. Anyone who has ever run
+`kage up` needs one line:
+
+```bash
+kage down && kage up
+```
+
+Say this in the release notes rather than letting people discover a hot laptop. `shouldTriggerReindex`
+in `mcp/daemon.ts` now excludes `.agent_memory` wholesale, with a 30 s floor between passes so a
+future mistake of this shape is slow instead of infinite.
+
+---
+
 ## Publishing
 
 ```bash
@@ -64,10 +83,15 @@ The existing answers all fail the same way: CLAUDE.md and rules files rot silent
 nothing checks them against the code, and vector memory retrieves by similarity and will hand
 your agent a fact that stopped being true in March, confidently.
 
-Kage's unit is a claim of at most 120 words that MUST cite code or a commit — a card that
-cites nothing cannot exist, because a claim nothing can falsify is trivia. Every card carries
-a trust state recomputed from your tree. If the cited symbol is gone, the card is withheld
-from every agent, counted, and shown to you. A bad memory is worse than no memory.
+Kage's unit is a short claim — capped, and it MUST cite code or a commit. A card that cites
+nothing cannot exist, because a claim nothing can falsify is trivia. Every card carries a
+trust state recomputed from your tree. If the cited symbol is gone, the card is withheld from
+every agent, counted, and shown to you. A bad memory is worse than no memory.
+
+The cards are files, in a separate git repo you own. Each one is a conformant Open Knowledge
+Format document, so it is readable markdown with or without Kage — the standard says what the
+concept is, and Kage's namespaced fields say whether it is still true. There is no database to
+export from and nothing to be locked into.
 
 The extraction is a background pass on your OWN coding-agent subscription (`claude -p`), so
 the tool pays for zero inference. It triages first and rejects ~90% of sessions — most
@@ -117,6 +141,12 @@ account, and no API key.
 
 **"Is the desktop app required?"**
 No. The CLI and the MCP tools are the whole loop.
+
+**"What happens to my knowledge if you disappear?"**
+Nothing. Cards are markdown files in a git repo you own, in Google's Open Knowledge Format —
+`type`, `title`, `description`, the claim as the body, and Kage's trust metadata namespaced in
+`x-kage-*` fields that any other OKF consumer ignores. Delete Kage and you still have the
+memory, in a format that was not invented here.
 
 ---
 

@@ -5,8 +5,52 @@ import { createServer, get } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appRedirectLocation, daemonContextReport, daemonDoctor, extractWorkItemId, resolveAppAsset, startLiveFeed, startOptionalVnextRuntime, viewerBenchmarkReport, viewerRedirectLocation, viewerReportPaths, viewerStaticHeaders, viewerUrl } from "./daemon.js";
+import { INDEX_DEBOUNCE_MS, MIN_INDEX_INTERVAL_MS, appRedirectLocation, daemonContextReport, daemonDoctor, extractWorkItemId, resolveAppAsset, shouldTriggerReindex, startLiveFeed, startOptionalVnextRuntime, viewerBenchmarkReport, viewerRedirectLocation, viewerReportPaths, viewerStaticHeaders, viewerUrl } from "./daemon.js";
 import { capture, indexProject } from "./kernel.js";
+
+// THE regression test for the worst bug this daemon has had: the watcher re-triggering on files
+// the re-index itself writes. That loop cost 118 hours of CPU over 5 days on an untouched repo —
+// 91% of a core — and it shipped, because the filter named three .agent_memory subdirectories
+// individually while the callback wrote to two others.
+//
+// These assertions are written as "the daemon never re-indexes because of its OWN output", not as
+// "these three paths are excluded", because the latter is the exact shape of the original bug.
+test("the index watcher ignores everything the daemon itself writes", () => {
+  // Every path below is written during a re-index pass. If any one of them triggers another pass,
+  // the daemon feeds itself forever on a repository nobody is touching.
+  for (const written of [
+    ".agent_memory/daemon/status.json", // rewritten EVERY tick — last_indexed_at always differs
+    ".agent_memory/structural/manifest.json", // ~41 MB of structural output per pass
+    ".agent_memory/structural/symbols.json",
+    ".agent_memory/structural/file-cache.json",
+    ".agent_memory/indexes/packets.json",
+    ".agent_memory/code_graph/graph.json",
+    ".agent_memory/graph/graph.json",
+    ".agent_memory/observations/2026-08-05.jsonl",
+    ".agent_memory/packets/some-packet.md",
+  ]) {
+    assert.equal(shouldTriggerReindex(written), false, `${written} must not re-arm the indexer`);
+  }
+
+  // Noise that is never source.
+  assert.equal(shouldTriggerReindex("node_modules/left-pad/index.js"), false);
+  assert.equal(shouldTriggerReindex(".git/index"), false);
+  assert.equal(shouldTriggerReindex(""), false, "a watch event with no filename is not a change");
+
+  // ...and it still does its job: real source edits re-index.
+  for (const source of ["mcp/kernel.ts", "src/limits.ts", "platform/web/src/main.tsx", "README.md"]) {
+    assert.equal(shouldTriggerReindex(source), true, `${source} is source and must re-index`);
+  }
+});
+
+// The debounce coalesces a burst; only the floor bounds the RATE. A loop re-arms after the
+// previous pass finished, so the debounce alone can never stop one — that distinction is why the
+// original bug ran unbounded, and it is worth pinning so neither value is "simplified" away.
+test("index passes are both debounced and rate-floored", () => {
+  assert.ok(INDEX_DEBOUNCE_MS >= 1_000, "a sub-second debounce re-indexes mid-edit");
+  assert.ok(MIN_INDEX_INTERVAL_MS >= 10_000, "the floor is what makes a re-trigger loop cheap");
+  assert.ok(MIN_INDEX_INTERVAL_MS > INDEX_DEBOUNCE_MS, "a floor below the debounce bounds nothing");
+});
 
 test("viewer bare routes redirect to index while preserving query params", () => {
   assert.equal(viewerRedirectLocation("/", "", "?graph=/repo/.agent_memory/graph/graph.json"), "/viewer/index.html?graph=/repo/.agent_memory/graph/graph.json");

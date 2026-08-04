@@ -20,6 +20,7 @@
     "access": "public"
   },
   "scripts": {
+    "prebuild": "node scripts/prune-stale-dist.mjs",
     "build": "tsc",
     "postbuild": "node scripts/bundle-portal.mjs",
     "build:portal": "npm --prefix ../platform/web run build",

@@ -117,6 +117,67 @@ test("corruption parses to null, not an exception", () => {
   }
 });
 
+// The anti-lock-in claim is "your memory is plain markdown in a standard format". That is only
+// true if the file is actually conformant, so it is asserted rather than described in a README.
+test("a card file is a conformant OKF concept document", () => {
+  const text = serializeCard(card());
+  const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? "";
+  const keys = front.split("\n").map((line) => line.slice(0, line.indexOf(": ")));
+
+  // `type` is OKF's one required field.
+  assert.match(front, /^type: "Caution"$/m);
+  // The recommended fields a vanilla OKF consumer displays.
+  for (const key of ["title", "description", "resource", "timestamp"]) {
+    assert.ok(keys.includes(key), `OKF-recommended key ${key} is missing`);
+  }
+  // Everything Kage-specific must be namespaced, because OKF only guarantees that a consumer
+  // ignores keys it does not recognize when they are producer-prefixed.
+  const own = new Set(["type", "title", "description", "resource", "tags", "timestamp"]);
+  const unnamespaced = keys.filter((key) => key && !own.has(key) && !key.startsWith("x-kage-"));
+  assert.deepEqual(unnamespaced, [], "these keys pollute the OKF namespace");
+
+  // The description summarizes — it is the claim's first sentence, not the whole claim, because
+  // the body stays the authoritative copy and a duplicated claim is a second thing to keep true.
+  assert.match(front, /^description: "withinLimit uses < rather than <= .*refused\."$/m);
+  assert.ok(!front.includes("Two PRs flipped it"), "description duplicated the whole claim");
+  // `resource` is the code the claim is verified against — OKF's own definition of the field.
+  assert.match(front, /^resource: "src\/limits\.ts"$/m);
+});
+
+// Cards written before the format became OKF-conformant are real user memory sitting in real
+// shadow stores. A format change that silently drops them would be data loss, not a migration.
+test("a card written in the pre-OKF frontmatter still loads", () => {
+  const original = card({ state: "approved", reviewedBy: "kushal" });
+  const legacy = [
+    "---",
+    ...(
+      [
+        ["id", original.id],
+        ["kind", original.kind],
+        ["state", original.state],
+        ["verify", original.verify],
+        ["title", original.title],
+        ["citations", original.citations],
+        ["trigger", original.trigger],
+        ["provenance", original.provenance],
+        ["tags", original.tags],
+        ["createdAt", original.createdAt],
+        ["updatedAt", original.updatedAt],
+        ["reviewedBy", original.reviewedBy],
+      ] as const
+    ).map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
+    "---",
+    "",
+    original.claim,
+    "",
+  ].join("\n");
+
+  assert.deepEqual(parseCard(legacy), original);
+  // And it is rewritten in the new shape on the next mutation, so stores converge without a
+  // migration step anyone has to remember to run.
+  assert.match(serializeCard(parseCard(legacy)!), /^type: "Caution"$/m);
+});
+
 test("optional fields survive the round trip only when present", () => {
   const reviewed = card({ state: "approved", reviewedBy: "kushal", reviewNote: "checked against main" });
   const parsed = parseCard(serializeCard(reviewed));

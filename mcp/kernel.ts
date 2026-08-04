@@ -617,8 +617,17 @@ export interface DistillResult {
   errors: string[];
   /** "auto" when invoked by the Stop-hook fallback; candidates land in the pending inbox. */
   mode?: "manual" | "auto";
-  /** Set when auto mode quietly skipped a session (no observations, or memory was already captured). */
-  skipped_reason?: "no_observations" | "session_already_captured";
+  /**
+   * Set when distill wrote nothing on purpose: the session was empty, memory was already
+   * captured, or (the default now) the automatic legacy pipeline is retired — see
+   * legacyCaptureEnabled().
+   */
+  skipped_reason?: "no_observations" | "session_already_captured" | "legacy_capture_disabled";
+  /**
+   * Human-readable "why nothing was written", set when the reason code alone would leave a
+   * caller guessing. A silent no-op is how a retired pipeline gets mistaken for a broken one.
+   */
+  skipped_note?: string;
   /** Auto mode only: candidate observations gated out because observationSignalScore was below AUTO_DISTILL_SIGNAL_THRESHOLD. */
   skipped_low_signal?: number;
 }
@@ -17938,6 +17947,35 @@ function hasStructuredEngineeringContext(packet: MemoryPacket): boolean {
   return Boolean(context.why || context.verification || context.risk_if_forgotten || context.stale_when || context.trigger || context.action);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The legacy capture write gate.
+//
+// WHY: the Librarian (mcp/vnext/librarian/) is the capture path now — a real LLM extraction pass
+// that proposes cited cards into a shadow store. This pipeline never had judgment anywhere in it:
+// it scored prose by substring-matching ~26 causal markers (SIGNAL_CAUSAL_MARKERS, below) against
+// a 0.4 threshold, and a string match cannot tell a durable decision from a sentence that merely
+// contains the word "because". That is how this store reached 405 packets with 43% of them dead.
+// Two automatic capture paths mean junk accumulates in the weaker one, so the weaker one stops
+// writing: one capture path, owned by the product.
+//
+// This is a WRITE gate, not a removal. Reads, recall, staleness, gc, supersede, reverify, sync,
+// the review queue, pr_check and the merge driver are untouched; the packets already on disk stay
+// readable and `kage cards import` drains them into cards over time. Explicit human capture
+// (`kage learn`, `kage capture`) is never gated either — a person deliberately filing a memory is
+// intent, not a heuristic guess, and only the guesses were the problem.
+//
+// The escape hatch stays for a user mid-migration who still wants the old flywheel:
+// KAGE_LEGACY_CAPTURE=1 restores automatic legacy distillation exactly as it behaved before.
+// Read per call, never cached at module load, so hooks and tests can flip it per process.
+export function legacyCaptureEnabled(): boolean {
+  return process.env.KAGE_LEGACY_CAPTURE === "1";
+}
+
+// Said once, here, so every surface that refuses a legacy auto-write says the same true thing and
+// points at the replacement. A silent no-op is indistinguishable from a broken pipeline.
+export const LEGACY_CAPTURE_RETIRED_REASON =
+  "legacy capture is retired; the Librarian proposes cards instead (kage cards). Set KAGE_LEGACY_CAPTURE=1 to re-enable the old automatic packet distillation.";
+
 export function learn(input: LearnInput): LearnResult {
   // Redact <private> spans before deriving the title/summary so private text
   // never leaks into derived fields; capture() re-applies the same sanitizer.
@@ -20009,7 +20047,11 @@ export function loadObservations(projectDir: string, sessionId?: string): Observ
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
 
-// Auto-distill quality gate. Observations must score at least this (0..1) on
+// Auto-distill quality gate — now the fallback behind a write gate, not the front line. Automatic
+// distillation runs only under KAGE_LEGACY_CAPTURE=1 (see legacyCaptureEnabled), because a
+// substring score standing in for judgment is exactly what the Librarian replaced; this threshold
+// stays enforced for manual distill and for anyone who re-enables the old flywheel.
+// Observations must score at least this (0..1) on
 // observationSignalScore before they may seed an auto-distilled draft. 0.4 was picked
 // so genuine learnings clear it comfortably (causal prose plus a path, command, or
 // code identifier lands around 0.45-0.65) while machine noise hard-rejects to 0:
@@ -20737,6 +20779,31 @@ export function distillSession(projectDir: string, sessionId: string, options: {
   const auto = Boolean(options.auto);
   const mode = auto ? ("auto" as const) : ("manual" as const);
   const observations = loadObservations(projectDir, sessionId);
+  // THE write gate for automatic legacy capture. Auto mode is the hook-driven path — SessionEnd /
+  // PreCompact / SubagentStop shell out to `kage distill --auto` — i.e. the one that writes packets
+  // without anyone asking for them. It is retired unless KAGE_LEGACY_CAPTURE=1; see
+  // legacyCaptureEnabled(). Manual `kage distill --session <id>` is a deliberate act like
+  // `kage learn` and stays open.
+  //
+  // Answer with the ordinary "nothing to do" shape — ok, zero candidates, a reason — instead of
+  // throwing: this runs inside a Stop hook on every single session, so a throw would surface as a
+  // failing hook forever, and callers already branch on skipped_reason. The observation count is
+  // the real one (they were loaded above): reporting 0 would claim the session was empty, which is
+  // a different, false story. Checked before the empty-session branch so the honest headline is
+  // "the pipeline is off", not "there was nothing here".
+  if (auto && !legacyCaptureEnabled()) {
+    return {
+      ok: true,
+      session_id: sessionId,
+      observations: observations.length,
+      candidates: [],
+      errors: [],
+      mode,
+      skipped_reason: "legacy_capture_disabled",
+      skipped_note: LEGACY_CAPTURE_RETIRED_REASON,
+      skipped_low_signal: 0,
+    };
+  }
   if (observations.length === 0) {
     return { ok: true, session_id: sessionId, observations: 0, candidates: [], errors: [], mode, skipped_reason: "no_observations", skipped_low_signal: 0 };
   }

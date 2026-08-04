@@ -84,6 +84,7 @@ import {
   kageWorkspace,
   kageWorkspaceRecall,
   learn,
+  legacyCaptureEnabled,
   bootstrapStarterMemory,
   codeIndexerStatus,
   workItemBrief,
@@ -199,6 +200,20 @@ function withKageHome<T>(fn: (home: string) => T): T {
     if (previous === undefined) delete process.env.KAGE_HOME;
     else process.env.KAGE_HOME = previous;
   }
+}
+
+// The legacy heuristic capture pipeline no longer writes on its own: automatic distillation runs
+// only under KAGE_LEGACY_CAPTURE=1 (kernel.ts legacyCaptureEnabled). That behavior is still real
+// behavior for a user mid-migration, so the auto-capture tests below keep asserting it instead of
+// being deleted — they just opt in the way that user does, and restore the env afterwards so the
+// default-off test cannot be poisoned by ordering.
+function useLegacyCapture(t: { after: (fn: () => void) => void }): void {
+  const previous = process.env.KAGE_LEGACY_CAPTURE;
+  process.env.KAGE_LEGACY_CAPTURE = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.KAGE_LEGACY_CAPTURE;
+    else process.env.KAGE_LEGACY_CAPTURE = previous;
+  });
 }
 
 const gitIdentityEnv = {
@@ -2831,7 +2846,54 @@ test("distillation keeps ordinary prompts episodic and admits durable prompt lea
   assert.match(issue?.body ?? "", /Hypothesis/);
 });
 
-test("auto distill writes pending drafts that never pollute trusted recall", () => {
+test("auto distill writes nothing by default and reports that legacy capture is retired", () => {
+  const project = tempProject();
+  writeFileSync(join(project, "package.json"), JSON.stringify({ name: "demo", scripts: { test: "vitest" } }), "utf8");
+  // Exactly the observation the old pipeline WOULD have drafted from: causal prose, a real
+  // command, a clean exit. The point of the gate is that quality no longer decides — the
+  // Librarian owns capture, so this path does not write at all.
+  assert.equal(observe(project, {
+    type: "command_result",
+    session_id: "retired-session",
+    command: "npm test -- webhooks",
+    exit_code: 0,
+    summary: "Use this command after changing webhook signature verification.",
+  }).ok, true);
+  assert.equal(legacyCaptureEnabled(), false);
+
+  const distilled = distillSession(project, "retired-session", { auto: true });
+  // A stated no-op, not a failure: this call lives inside a Stop hook that runs on every
+  // session, so throwing would turn a retirement into a permanently failing hook.
+  assert.equal(distilled.ok, true);
+  assert.deepEqual(distilled.errors, []);
+  assert.equal(distilled.mode, "auto");
+  assert.equal(distilled.candidates.length, 0);
+  assert.equal(distilled.skipped_reason, "legacy_capture_disabled");
+  assert.match(distilled.skipped_note ?? "", /Librarian/);
+  assert.match(distilled.skipped_note ?? "", /kage cards/);
+  assert.match(distilled.skipped_note ?? "", /KAGE_LEGACY_CAPTURE=1/);
+  // The observation count stays honest: the session was not empty, the pipeline is off. Reporting
+  // 0 here would tell a different, false story about why nothing was written.
+  assert.equal(distilled.observations, 1);
+  assert.equal(loadPendingPackets(project).length, 0);
+  assert.equal(loadApprovedPackets(project).length, 0);
+
+  // Manual `kage distill --session <id>` is a deliberate act, like kage learn, so it is NOT gated.
+  const manual = distillSession(project, "retired-session");
+  assert.equal(manual.skipped_reason, undefined);
+  assert.equal(manual.candidates.length > 0, true);
+  assert.equal(manual.candidates[0]?.packet?.status, "pending");
+
+  // ...and a human filing a memory outright still writes, gate or no gate.
+  assert.equal(learn({
+    projectDir: project,
+    learning: "Webhook fixtures must be regenerated because CI replays recorded signatures.",
+  }).ok, true);
+  assert.equal(loadApprovedPackets(project).length, 1);
+});
+
+test("auto distill writes pending drafts that never pollute trusted recall", (t) => {
+  useLegacyCapture(t);
   const project = tempProject();
   writeFileSync(join(project, "package.json"), JSON.stringify({ name: "demo", scripts: { test: "vitest" } }), "utf8");
   assert.equal(observe(project, {
@@ -2872,7 +2934,8 @@ test("auto distill writes pending drafts that never pollute trusted recall", () 
   assert.equal(loadApprovedPackets(project).some((packet) => packet.id === candidate?.packet?.id), true);
 });
 
-test("auto distill quietly skips empty sessions and sessions where the agent already captured memory", () => {
+test("auto distill quietly skips empty sessions and sessions where the agent already captured memory", (t) => {
+  useLegacyCapture(t);
   const project = tempProject();
   const empty = distillSession(project, "no-such-session", { auto: true });
   assert.equal(empty.ok, true);
@@ -2955,7 +3018,8 @@ test("observation signal score hard-rejects machine noise and rewards genuine le
   assert.ok(observationSignalScore(genuine) <= 1);
 });
 
-test("auto distill skips low-signal observations and counts them instead of drafting junk", () => {
+test("auto distill skips low-signal observations and counts them instead of drafting junk", (t) => {
+  useLegacyCapture(t);
   const project = tempProject();
   // The three real junk shapes that previously became packets: each would clear the
   // legacy keyword filters (they contain words like "issue", "test", "workflow"),
@@ -3010,7 +3074,10 @@ test("auto distill skips low-signal observations and counts them instead of draf
   assert.equal(real.candidates[0]?.packet?.status, "pending");
 });
 
-test("resume surfaces open threads, not a session replay, and stays silent without it", () => {
+// Resume's "pending drafts awaiting review" line is fed by auto-distilled packets, so this test
+// needs the legacy pipeline enabled to have any draft to report on.
+test("resume surfaces open threads, not a session replay, and stays silent without it", (t) => {
+  useLegacyCapture(t);
   const project = tempProject();
   const empty = kageResume(project);
   assert.equal(empty.has_content, false);

@@ -73,8 +73,9 @@ design working, not failing.
 
 ## The card
 
-The unit of memory: one claim, at most 120 words, in one of three kinds — `decision` (what we chose
-and why), `runbook` (a verified procedure), `caution` (a failure, its cause, its fix).
+The unit of memory: one claim, written to about 120 words and hard-capped at 160, in one of three
+kinds — `decision` (what we chose and why), `runbook` (a verified procedure), `caution` (a failure,
+its cause, its fix).
 
 ```
 [caution] tenantLimit comparison is exclusive on purpose
@@ -99,8 +100,25 @@ worse than no memory.
 Nobody wants hundreds of generated files in their tree, and no first-party vendor puts them there.
 
 The store is a **separate git repo** at `~/.kage/store/<id>` — one file per card, one commit per
-change, so history, blame and revert are native git. Your project repo gets exactly one thing: a
-≤200-line fenced block in the `AGENTS.md` or `CLAUDE.md` you already have.
+change, so history, blame and revert are native git.
+
+**No memory file is ever written into your project.** What an install does add is a ≤200-line
+fenced block in your `AGENTS.md`/`CLAUDE.md`, the agent policy that tells your agents to use Kage
+at all, and a `.gitignore` entry — four files, once, and none of them memory. `npm run
+verify:package` asserts this by staging everything after a clean install and failing if a single
+`.agent_memory/` path would be committed.
+
+Each card file is a conformant [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+concept document — `type`, `title`, `description`, the claim as the body, and Kage's trust
+metadata in `x-kage-*` fields that any other OKF consumer ignores. That division is exact: OKF
+standardizes the store and explicitly leaves freshness and verification out of scope, which is
+the part Kage does.
+
+> **OKF says what the concept is. Kage says whether it is still true.**
+
+The practical consequence is the one that matters to you: there is no database and nothing to
+export. Uninstall Kage and your team's knowledge is still markdown, in a format nobody here
+invented.
 
 |                               | before                 | after                       |
 |-------------------------------|------------------------|-----------------------------|
