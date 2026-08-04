@@ -1146,7 +1146,25 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
+  // A port that is already taken is the single most likely way starting a daemon fails, and it is
+  // almost always a daemon the user already has running. Without this, node emits an unhandled
+  // 'error' event and the user gets a raw EADDRINUSE stack trace with a v8 version at the bottom —
+  // found by trying to start a second daemon while dogfooding. Say the thing they need to do.
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") {
+        console.error(
+          `Port ${restPort} is already in use — most likely a Kage daemon you already started.\n` +
+            `  Check it:  kage status --project ${projectDir}\n` +
+            `  Stop it:   kage down --project ${projectDir}\n` +
+            `  Or run this one somewhere else:  kage daemon start --port <other> --project ${projectDir}`,
+        );
+        process.exit(1);
+      }
+      reject(error);
+    });
+    server.listen(restPort, host, resolve);
+  });
   const vnextRuntime = await startOptionalVnextRuntime(projectDir, options.vnext === true);
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
   console.log(`Project: ${projectDir}`);
