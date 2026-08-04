@@ -6,11 +6,18 @@
 // extract-tier call — the user asked for mining explicitly, so there is nothing to triage —
 // and runs every proposal through the same deterministic checks as session capture. Reviewing
 // the batch doubles as an architecture tour (DIRECTION.md).
+//
+// Mining is the path where re-proposal is STRUCTURAL: a session digest is distilled once and is
+// then gone, but the history is mined again every time the user asks, over a range that mostly
+// overlaps the last one. Without the shared reconciler that meant a second run proposing ten
+// fresh cards and reporting "0 already known" — the junk-inbox failure mode that killed Cursor's
+// Memories. So the reconciler runs here too, and what it recognises is counted, not re-proposed.
 
 import { execFileSync } from "node:child_process";
 import { validateProposal, type CardProblem } from "./card.js";
+import { reconcileProposal } from "./librarian.js";
 import { scanForSecrets } from "./secretscan.js";
-import type { Card, CardKind, CardProposal, Citation, LibrarianProvider } from "./types.js";
+import type { Card, CardKind, CardProposal, Citation, LibrarianProvider, ReconcileAction } from "./types.js";
 
 export interface HistoryDigest {
   text: string;
@@ -128,8 +135,11 @@ export function miningPrompt(digest: HistoryDigest, existingTitles: string[]): s
 
 /**
  * Mine the repo's history: ONE extract-tier call, then the deterministic half of the gate over
- * every proposal — validateProposal plus the secret scan — with refusals returned as data. The
- * human half (the Inbox) happens elsewhere; nothing here approves anything.
+ * every proposal — validateProposal plus the secret scan — then the reconciler, with refusals
+ * returned as data. The human half (the Inbox) happens elsewhere; nothing here approves anything.
+ *
+ * Gate first, reconciler second, in that order: a proposal that both leaks a key and duplicates a
+ * card must be reported as refused, because that is the louder fact about the run.
  */
 export async function mineHistory(
   provider: LibrarianProvider,
@@ -137,7 +147,16 @@ export async function mineHistory(
   existing: Card[],
   opts?: { maxCommits?: number },
 ): Promise<{
+  /** Survivors of the gate that the reconciler did NOT recognise, in the model's order. */
   proposals: CardProposal[];
+  /** actions[i] is the verdict for proposals[i] — "add" or "update", never "noop". Same length. */
+  actions: ReconcileAction[];
+  /**
+   * Proposals the store already holds, dropped rather than queued. Counted so the run can say
+   * "already known" honestly — a re-mine that found nothing new is the system working, and a
+   * silent drop would be indistinguishable from a model that returned less.
+   */
+  alreadyKnown: number;
   rejected: Array<{ proposal: CardProposal; problems: CardProblem[] }>;
   usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null };
   digest: HistoryDigest;
@@ -149,7 +168,9 @@ export async function mineHistory(
   });
 
   const proposals: CardProposal[] = [];
+  const actions: ReconcileAction[] = [];
   const rejected: Array<{ proposal: CardProposal; problems: CardProblem[] }> = [];
+  let alreadyKnown = 0;
   for (const raw of recoverJsonArray(reply.text).slice(0, PROPOSAL_CAP)) {
     const proposal = coerceProposal(raw);
     const problems = validateProposal(proposal);
@@ -157,12 +178,31 @@ export async function mineHistory(
     for (const name of scanForSecrets(`${proposal.title}\n${proposal.claim}\n${proposal.trigger}`)) {
       problems.push({ field: "claim", reason: `secret scan tripped: ${name}` });
     }
-    if (problems.length) rejected.push({ proposal, problems });
-    else proposals.push(proposal);
+    if (problems.length) {
+      rejected.push({ proposal, problems });
+      continue;
+    }
+
+    // librarian.ts's reconciler, imported rather than re-derived: two answers to "have we already
+    // got this?" would drift, and this path is the one that asks the question every single run.
+    // (The recovery and coercion helpers below stay local — ten lines of plumbing are not a law.)
+    const action = reconcileProposal(proposal, existing);
+    if (action.action === "noop") {
+      // DROPPED here, unlike the session path, which hands noops to the store and lets its
+      // content address decide. Mining re-reads the same history on every run, so a noop is not
+      // an interesting coincidence but the expected outcome — and a duplicate that reaches the
+      // Inbox costs a human the one thing this product is spending: attention.
+      alreadyKnown += 1;
+      continue;
+    }
+    proposals.push(proposal);
+    actions.push(action);
   }
 
   return {
     proposals,
+    actions,
+    alreadyKnown,
     rejected,
     usage: { inputTokens: reply.inputTokens, outputTokens: reply.outputTokens, costUsd: reply.costUsd },
     digest,

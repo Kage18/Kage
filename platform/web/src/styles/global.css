@@ -3286,3 +3286,271 @@ button.list-row {
   font-size: var(--font-size-sm);
 }
 .inbox-mine-result[data-confidence="measured"] { border-left-color: var(--confidence-measured); }
+
+/* ── Knowledge cards: the trust reading, carried three ways ──────────────────────────────────
+   Same row recipe as the Inbox (the two rooms hold the same object at different moments, and a
+   card that changed shape between them would read as a different thing). What differs is the
+   rail: in the Inbox it means "selected", here it means "how far can you trust this".
+
+   Colour is the LAST channel, never the carrier. The word is in the chip, the glyph differs in
+   silhouette, and the rail differs in BORDER STYLE — so the state survives with colour switched
+   off entirely, which matters because this palette's success green and critical red measure
+   ΔE 2.1 apart under deuteranopia. */
+.card-row {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  border-left: var(--rail-width) solid var(--confidence-unknown);
+}
+
+.card-row[data-verify="verified"] {
+  border-left-style: solid;
+  border-left-color: var(--confidence-measured);
+}
+.card-row[data-verify="unverified"] {
+  border-left-style: dashed;
+  border-left-color: var(--confidence-unknown);
+}
+/* A withheld card gets the loudest rail in the vocabulary: doubled and widened, so it is the first
+   thing found when scanning the column edge. Agents never see these; a human is the only fix. */
+.card-row[data-verify="stale"] {
+  border-left-style: double;
+  border-left-width: 4px;
+  border-left-color: var(--color-critical);
+}
+
+/* The kind tints match the Inbox exactly — same object, same colour, whichever room it is in. */
+.card-row[data-kind="caution"] .inbox-kind { color: var(--color-warning); }
+.card-row[data-kind="decision"] .inbox-kind { color: var(--lum-derived); }
+.card-row[data-kind="runbook"] .inbox-kind { color: var(--color-text-muted); }
+
+/* The trust chip rides `.status`, so it inherits the shared badge shape; only the tint is keyed
+   to the reading. `unverified` deliberately takes no tint at all: "nobody has re-checked this"
+   is a quiet fact, and dressing it in warning colour would make drift look like breakage. */
+.card-trust { margin-left: auto; }
+.card-trust[data-verify="verified"] {
+  background: var(--color-success-tint);
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 34%, transparent);
+}
+.card-trust[data-verify="stale"] {
+  background: var(--color-critical-tint);
+  color: var(--color-critical);
+  border-color: color-mix(in srgb, var(--color-critical) 34%, transparent);
+}
+
+/* Lifecycle, shown only when it is not the ordinary one. An "approved" label on every row would
+   be noise; "superseded" and "retired" are the states that change how a claim should be read. */
+.card-state { color: var(--lum-quiet); }
+
+/* Why it is withheld, and what would end it — the two sentences a person needs in order to act.
+   Given room rather than a chip: this is the one place on the screen with something to do. */
+.card-stale {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  max-width: 82ch;
+  background: var(--color-critical-tint);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+/* The supersede chain is prose with a link, not a badge — it is a sentence about history. */
+.card-chain {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.card-supersede {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+/* ── Receipts ────────────────────────────────────────────────────────────────────────────────
+   The same instrument grammar as Proof — one display figure, then rows — with one addition this
+   page needs: an unmeasured figure carries an ACTION, not just a dash. Every number here is a
+   counted event, so the only way to make one appear is to do the thing that counts it, and a
+   dash with nothing beside it tells the reader they have nothing without telling them why. */
+
+.receipts-lead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-2);
+}
+
+.receipts-lead-figure {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-display);
+  line-height: 1;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipts-lead-caption {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  letter-spacing: var(--tracking-sans);
+  line-height: 1.4;
+}
+
+.receipts-lead-note {
+  margin: 0 0 var(--space-6);
+  color: var(--lum-quiet);
+}
+
+/* The lead with no reading yet. Dashed rail, quiet, and carrying the action — it occupies the
+   headline slot without ever looking like a headline number. */
+.receipts-unlock-band {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  border-left: var(--rail-width) dashed var(--confidence-unknown);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+.receipts-unlock-band-label { color: var(--color-text); }
+
+/* Three supporting counts across a row: secondary to the lead by a whole type size, so the page
+   still has exactly one display number. */
+.receipts-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-5);
+  list-style: none;
+  margin: 0 0 var(--space-6);
+  padding: 0;
+}
+
+.receipts-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Unmeasured figures are dashed above and quiet below — the boundary between "counted" and
+   "never observed" is visible before you read either the value or the label. */
+.receipts-figure[data-confidence="unknown"] { border-top-style: dashed; }
+
+.receipts-figure-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-3xl);
+  line-height: var(--line-height-tight);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipts-figure-value[data-confidence="measured"] { color: var(--color-accent); }
+.receipts-figure-value[data-confidence="unknown"] { color: var(--lum-quiet); }
+
+.receipts-figure-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--tracking-sans);
+}
+
+.receipts-figure-unlock {
+  color: var(--lum-quiet);
+  line-height: var(--line-height-base);
+}
+
+.receipts-rows {
+  list-style: none;
+  margin: 0 0 var(--space-6);
+  padding: 0;
+}
+
+.receipts-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.receipts-row[data-confidence="unknown"] { border-top-style: dashed; }
+
+.receipts-row-label {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+.receipts-row-value {
+  font-size: var(--font-size-lg);
+  min-width: 7rem;
+  text-align: right;
+}
+
+.receipts-row-value[data-confidence="measured"] { color: var(--color-accent); }
+/* "not measured" is prose in a number's seat, and must never be mistaken for one. */
+.receipts-row-value[data-confidence="unknown"] { color: var(--lum-quiet); }
+
+.receipts-row-note {
+  width: 18rem;
+  text-align: right;
+  color: var(--lum-quiet);
+}
+
+.receipts-xp {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.receipts-xp-figure {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-3xl);
+  line-height: var(--line-height-tight);
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipts-xp-note {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-base);
+}
+
+.receipts-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.receipts-event {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.receipts-event-type { color: var(--color-text); min-width: 12rem; }
+
+.receipts-event-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-sans);
+}
+
+.receipts-event-usage { color: var(--lum-quiet); }
+.receipts-event-at { color: var(--lum-quiet); min-width: 6rem; text-align: right; }

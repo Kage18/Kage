@@ -152,6 +152,69 @@ test("mining ingests the Librarian's proposals and reports measured usage", asyn
   assert.ok(readReceipts(store.dir).some((event) => event.type === "mining_run"));
 });
 
+// Measured on this repository: a second `kage cards mine` proposed 10 fresh cards and reported
+// "0 already known". The store's content address only catches what reaches proposeCard, and the
+// miner's reconciler now recognises a re-mine before that — so the count has to span both, or
+// the CLI's "already known" column reads zero while the Inbox fills up.
+test("a second mining run reports what it already knew instead of refilling the Inbox", async () => {
+  const { projectDir, storeRoot } = scratch();
+  const store = storeFor(projectDir, storeRoot);
+  const mined = JSON.stringify([
+    {
+      kind: "caution",
+      title: "the limit comparison was reverted twice",
+      claim: "Two commits flipped withinLimit to <= and both were reverted.",
+      citations: [{ path: "src/limits.ts" }],
+      trigger: "changing the limit comparison",
+    },
+  ]);
+
+  const first = await mineRepository(fakeProvider([mined]), store, projectDir);
+  assert.equal(first.proposed, 1);
+  assert.equal(first.deduped, 0);
+
+  const second = await mineRepository(fakeProvider([mined]), store, projectDir);
+  assert.equal(second.ok, true);
+  assert.equal(second.proposed, 0, "nothing new was queued for review");
+  assert.equal(second.deduped, 1, "the run says it already knew this");
+  assert.equal(second.rejected, 0, "already known is not the gate refusing anything");
+  assert.equal(listCards(store).length, 1, "and the store did not grow a near-sibling");
+});
+
+test("a genuinely new card still reaches the Inbox on a re-mine", async () => {
+  const { projectDir, storeRoot } = scratch();
+  const store = storeFor(projectDir, storeRoot);
+  const first = {
+    kind: "caution",
+    title: "the limit comparison was reverted twice",
+    claim: "Two commits flipped withinLimit to <= and both were reverted.",
+    citations: [{ path: "src/limits.ts" }],
+    trigger: "changing the limit comparison",
+  };
+  const second = {
+    kind: "decision",
+    title: "the tenant cap is a constant, not configuration",
+    claim: "tenantLimit is a source constant so a change is reviewed like code rather than set at runtime.",
+    citations: [{ path: "src/limits.ts" }],
+    trigger: "making a limit configurable",
+  };
+
+  await mineRepository(fakeProvider([JSON.stringify([first])]), store, projectDir);
+  // The same batch again plus one new finding, and one the gate must refuse: the three outcomes
+  // have to stay three numbers, because each one degrades for a different reason.
+  const summary = await mineRepository(
+    fakeProvider([JSON.stringify([first, second, { ...first, title: "no citations", citations: [] }])]),
+    store,
+    projectDir,
+  );
+
+  assert.equal(summary.proposed, 1);
+  assert.equal(summary.deduped, 1);
+  assert.equal(summary.rejected, 1);
+  assert.match(summary.problems[0], /cites nothing/);
+  assert.equal(listCards(store).length, 2);
+});
+
 // The user pressed a button; they deserve to be told what happened to it.
 test("a failing provider makes mining a report, never a crash", async () => {
   const { projectDir, storeRoot } = scratch();

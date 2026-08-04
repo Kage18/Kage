@@ -6,7 +6,9 @@
 // here, and what is it — and every consequence of the answers is computed: what is admissible
 // (validateProposal + the secret scan), what it collides with (content address, then title
 // overlap), and what it cost (measured usage, or null). A reconcile pass that asked the model
-// "is this the same as that?" would be unreplayable, so the reconciler is arithmetic instead.
+// "is this the same as that?" would be unreplayable, so the reconciler is arithmetic instead —
+// and it is exported, because miner.ts must answer "have we already got this?" the same way this
+// file does or the Inbox fills with near-siblings from whichever path decided on its own.
 //
 // Two invariants hold this file to the ground:
 //
@@ -120,7 +122,7 @@ export async function distillSession(
       continue;
     }
     proposals.push(proposal);
-    actions.push(reconcile(proposal, input.existing));
+    actions.push(reconcileProposal(proposal, input.existing));
   }
 
   return { triage, proposals, actions, rejected, usage };
@@ -162,8 +164,14 @@ function firstLine(text: string): string {
  * that the old knowledge is now WRONG, and that judgment belongs to the human at the gate, who
  * can see both cards. An update the reviewer decides is a replacement can still be approved as
  * one; a supersede the machine guessed cannot be un-guessed.
+ *
+ * EXPORTED because it is a law, not a helper. Session capture and history mining both produce
+ * proposals against the same store, and the day the two paths answer "have we already got this?"
+ * differently is the day the Inbox fills with near-siblings from whichever path forgot — which
+ * is measurably what happened: mining ran without it and re-proposed ten cards as brand new.
+ * One implementation, two callers, no second opinion.
  */
-function reconcile(proposal: CardProposal, existing: Card[]): ReconcileAction {
+export function reconcileProposal(proposal: CardProposal, existing: readonly Card[]): ReconcileAction {
   const id = cardId(proposal);
   const duplicate = existing.find((card) => card.id === id);
   if (duplicate) return { action: "noop", reason: `duplicate of ${duplicate.id}` };

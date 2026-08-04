@@ -15,7 +15,6 @@ import { calculateCohort } from "../gateway/cohort-metrics.js";
 import type { TeamMetricsReport } from "../workspace/metrics.js";
 import type {
   AttentionDto,
-  BillingPanelDto,
   ClaimDto,
   DecisionDetailDto,
   EntityCardDto,
@@ -541,56 +540,6 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
     metrics,
     suppression_reason: report.suppression_reason,
     caveats: [...report.caveats],
-  };
-}
-
-// ---------------------------------------------------------------------------------------------
-// billing projection
-// ---------------------------------------------------------------------------------------------
-
-/** What the workspace answered for the billing surface. The projection adds no arithmetic to it. */
-export interface BillingPanelInput {
-  plan_id: BillingPanelDto["plan_id"];
-  state: BillingPanelDto["state"];
-  entitlements: BillingPanelDto["entitlements"];
-  current_period_end: string | null;
-  active_developers: number;
-  usd_per_active_developer_month: number | null;
-  /** The recorded pilot credit, or null when the guarantee has not been calculated for this workspace. */
-  credit: { credit_usd: number; reason: string; measured_overhead_usd: number | null } | null;
-}
-
-/**
- * Project the workspace's billing state onto the portal DTO. It carries values through verbatim and
- * attaches the CAVEATS that make the page honest:
- *   - local runtime and export never depend on the subscription (so an expired plan is not a hostage);
- *   - a pilot credit exists only where receipts measured both sides — an uncalculated credit is null,
- *     never a confident $0.00;
- *   - the listed price is a launch hypothesis and enterprise is quoted, not listed.
- */
-export function billingPanel(input: BillingPanelInput): BillingPanelDto {
-  const caveats = [
-    "Local context and workspace export stay available on every plan, including an expired or cancelled one.",
-    "The no-overhead credit is computed only from receipts that measured BOTH input cost and Kage processing cost; partial or unavailable receipts never create or reduce it.",
-    "The credit is capped at the platform fee on your first invoice, so it can waive that fee but never becomes a cash payment.",
-  ];
-  if (input.usd_per_active_developer_month === null) {
-    caveats.push("This tier is quoted rather than listed, so no per-developer price is shown.");
-  }
-  if (input.credit === null) {
-    caveats.push("No pilot credit has been calculated for this workspace yet.");
-  }
-  return {
-    plan_id: input.plan_id,
-    state: input.state,
-    entitlements: input.entitlements,
-    current_period_end: input.current_period_end,
-    active_developers: input.active_developers,
-    usd_per_active_developer_month: input.usd_per_active_developer_month,
-    credit_usd: input.credit?.credit_usd ?? null,
-    credit_reason: input.credit?.reason ?? null,
-    measured_overhead_usd: input.credit?.measured_overhead_usd ?? null,
-    caveats,
   };
 }
 

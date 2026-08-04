@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { cardId } from "./card.js";
-import { distillSession, recoverJsonArray, tokenJaccard } from "./librarian.js";
+import { distillSession, reconcileProposal, recoverJsonArray, tokenJaccard } from "./librarian.js";
 import { extractPrompt, triagePrompt } from "./prompts.js";
 import { fakeProvider } from "./provider.js";
-import type { Card, CardKind, CardState, LibrarianProvider, ProviderReply } from "./types.js";
+import type { Card, CardKind, CardProposal, CardState, LibrarianProvider, ProviderReply } from "./types.js";
 
 // The pipeline is exercised entirely through the scripted provider seam: the two model calls are
 // the only nondeterminism in the module, so scripting them makes every other behavior — the
@@ -35,6 +35,18 @@ function proposalJson(overrides: Record<string, unknown> = {}): Record<string, u
 /** What a well-behaved extract pass returns: the JSON array alone. */
 function extractReply(...proposals: Array<Record<string, unknown>>): string {
   return JSON.stringify(proposals);
+}
+
+/** The same card as a typed value — the exported reconciler takes proposals, not model JSON. */
+function proposalValue(overrides: Partial<CardProposal> = {}): CardProposal {
+  return {
+    kind: "caution",
+    title: TITLE,
+    claim: CLAIM,
+    citations: [{ path: "src/limits.ts", symbol: "withinLimit" }],
+    trigger: "editing src/limits.ts or changing a rate limit comparison",
+    ...overrides,
+  };
 }
 
 function storedCard(fields: { kind?: CardKind; title: string; claim: string; state?: CardState }): Card {
@@ -194,6 +206,86 @@ test("a superseded card is never echoed — only live knowledge can be updated",
   const outcome = await distill(fakeProvider(["YES: a re-check", extractReply(echo)]), [dead]);
 
   assert.deepEqual(outcome.actions, [{ action: "add" }]);
+});
+
+// ── The reconciler as an exported law ────────────────────────────────────────────────────────
+//
+// distillSession is not its only caller: mineHistory asks the same question of the same store,
+// and it asks on every single run. These tests pin the verdicts directly, because "the miner
+// dedupes" now means precisely "the miner gets these answers".
+
+test("the exported reconciler is the one distillSession runs — same input, same verdict", async () => {
+  const existing = storedCard({ title: TITLE, claim: CLAIM });
+  const outcome = await distill(fakeProvider(["YES: the same thing again", extractReply(proposalJson())]), [existing]);
+
+  assert.deepEqual(outcome.actions, [reconcileProposal(proposalValue(), [existing])]);
+});
+
+test("an identical claim is a noop naming the card it duplicates", () => {
+  const existing = storedCard({ title: TITLE, claim: CLAIM });
+  assert.deepEqual(reconcileProposal(proposalValue(), [existing]), {
+    action: "noop",
+    reason: `duplicate of ${existing.id}`,
+  });
+});
+
+test("an empty store has nothing to collide with, so everything is an add", () => {
+  assert.deepEqual(reconcileProposal(proposalValue(), []), { action: "add" });
+});
+
+// The reason a card was retired stays on record so the same junk is not re-proposed and
+// re-reviewed forever — which only works if the reconciler still recognises it.
+test("a card the team already rejected is still known — a noop, not a fresh proposal", () => {
+  const retired = storedCard({ title: TITLE, claim: CLAIM, state: "retired" });
+  assert.deepEqual(reconcileProposal(proposalValue(), [retired]), {
+    action: "noop",
+    reason: `duplicate of ${retired.id}`,
+  });
+});
+
+// The content address covers kind, so a different kind is a different card — and the near-
+// duplicate branch is kind-scoped too. A runbook and a caution about the same subject are two
+// different pieces of knowledge, not two drafts of one.
+test("the same words under a different kind are a different card", () => {
+  const existing = storedCard({ kind: "runbook", title: TITLE, claim: CLAIM });
+  assert.deepEqual(reconcileProposal(proposalValue({ kind: "caution" }), [existing]), { action: "add" });
+});
+
+// The boundary is a `>`, not a `>=`, and the difference decides whether a rephrasing becomes a
+// second card in the Inbox or an update to the first. Three shared tokens of five distinct is
+// exactly 0.6 — the last title that is still its own subject.
+test("title overlap must EXCEED the threshold: 0.6 is a new card, 0.75 is an update", () => {
+  const boundary = storedCard({ title: "alpha beta gamma delta", claim: "the older claim." });
+  assert.equal(tokenJaccard("alpha beta gamma epsilon", boundary.title), 0.6);
+  assert.deepEqual(
+    reconcileProposal(proposalValue({ title: "alpha beta gamma epsilon", claim: "a newer claim." }), [boundary]),
+    { action: "add" },
+  );
+
+  assert.equal(tokenJaccard("alpha beta gamma", boundary.title), 0.75);
+  assert.deepEqual(
+    reconcileProposal(proposalValue({ title: "alpha beta gamma", claim: "a newer claim." }), [boundary]),
+    { action: "update", id: boundary.id },
+  );
+});
+
+// Order-independence is the whole reason the tie-break exists: the store lists cards by
+// updatedAt, so a verdict that depended on listing order would change when an unrelated card
+// was verified.
+test("the strongest overlap wins, and the id breaks ties whatever order the store listed in", () => {
+  const proposal = proposalValue({ title: "alpha beta gamma delta", claim: "a newer claim." });
+  const strong = storedCard({ title: "alpha beta gamma delta", claim: "the closer claim." }); // 1.0
+  const weak = storedCard({ title: "alpha beta gamma delta epsilon", claim: "the looser claim." }); // 0.8
+
+  assert.deepEqual(reconcileProposal(proposal, [weak, strong]), { action: "update", id: strong.id });
+  assert.deepEqual(reconcileProposal(proposal, [strong, weak]), { action: "update", id: strong.id });
+
+  // A true tie: both titles share four tokens with the proposal and carry five of their own.
+  const tieA = storedCard({ title: "alpha beta gamma delta epsilon", claim: "one claim." });
+  const tieB = storedCard({ title: "alpha beta gamma delta zeta", claim: "another claim." });
+  const winner = [tieA.id, tieB.id].sort()[0];
+  assert.deepEqual(reconcileProposal(proposal, [tieA, tieB]), { action: "update", id: winner });
+  assert.deepEqual(reconcileProposal(proposal, [tieB, tieA]), { action: "update", id: winner });
 });
 
 // ── A bad model day ──────────────────────────────────────────────────────────────────────────

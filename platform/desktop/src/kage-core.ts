@@ -163,6 +163,27 @@ export interface MineSummary {
   error?: string;
 }
 
+/** One tick of the capture loop: what the Librarian read, and what survived the gate. */
+export interface DistillSummary {
+  distilled: number;
+  skipped: number;
+  proposed: number;
+  deduped: number;
+  rejected: number;
+}
+
+/** What the shell remembers about the capture loop, per repository. Plain data, held in main. */
+export interface TickState {
+  lastRunMs: number | null;
+  consecutiveFailures: number;
+}
+
+/** Every decision the schedule makes carries a sentence, including the ones that say yes. */
+export interface TickDecision {
+  run: boolean;
+  reason: string;
+}
+
 /** The LLM seam. The app hands it the user's own agent — Kage pays for no inference, ever. */
 export interface LibrarianProvider {
   complete(input: { prompt: string; tier: "triage" | "extract" }): Promise<{
@@ -248,6 +269,24 @@ export interface KageCore {
     projectDir: string,
     opts?: { maxCommits?: number },
   ): Promise<MineSummary>;
+  /**
+   * One pass over the sessions that have gone quiet: digest, triage, extract, ingest.
+   *
+   * The verb the desktop timer exists to call. Everything expensive about it — which sessions are
+   * quiet, which were already paid for, what a failed session costs — is decided in `watcher.ts`,
+   * so the shell contributes only a provider and a clock.
+   */
+  distillIdleSessions(
+    provider: LibrarianProvider,
+    store: CardStore,
+    projectDir: string,
+    opts?: { idleMs?: number; limit?: number; now?: number },
+  ): Promise<DistillSummary>;
+  // When the loop may run, and when it must stop trying. Pure policy, tested in `schedule.ts`,
+  // because the timer that drives it lives in Electron where nothing can be unit-tested.
+  emptyTickState(): TickState;
+  shouldRunTick(state: TickState, opts: { nowMs: number; minIntervalMs?: number; maxFailures?: number }): TickDecision;
+  recordTick(state: TickState, outcome: { ok: boolean; nowMs: number }): TickState;
   /** The real provider: the user's own `claude`, headless. `command` is resolved by the caller. */
   claudeProvider(opts?: {
     command?: string;
@@ -276,6 +315,10 @@ export function loadKageCore(resourcesPath: string): KageCore {
   const librarian = require(join(dir, "vnext", "librarian", "operations.js"));
   const cardStore = require(join(dir, "vnext", "librarian", "store.js"));
   const librarianProvider = require(join(dir, "vnext", "librarian", "provider.js"));
+  // The capture loop: the watcher reads quiet sessions, the schedule decides whether it may.
+  // Both are builtin-only for the same packaging reason as everything above them.
+  const watcher = require(join(dir, "vnext", "librarian", "watcher.js"));
+  const schedule = require(join(dir, "vnext", "librarian", "schedule.js"));
   /* eslint-enable @typescript-eslint/no-var-requires */
 
   return {
@@ -305,6 +348,10 @@ export function loadKageCore(resourcesPath: string): KageCore {
     approveCard: librarian.approve,
     rejectCard: librarian.reject,
     mineRepository: librarian.mineRepository,
+    distillIdleSessions: watcher.distillIdleSessions,
+    emptyTickState: schedule.emptyTickState,
+    shouldRunTick: schedule.shouldRunTick,
+    recordTick: schedule.recordTick,
     claudeProvider: librarianProvider.claudeProvider,
   };
 }

@@ -649,6 +649,39 @@ function cardsChanged(): void {
   refreshTray();
 }
 
+// ── The capture loop ─────────────────────────────────────────────────────────────────────────
+//
+// The whole difference between a demo and a habit. `distillIdleSessions` was built and tested and
+// nothing called it, so an agent could work all day and the Librarian never woke: cards only ever
+// appeared when someone typed a command. This timer is that missing wire, and it is deliberately
+// the dumbest part of the loop — it reads the clock and asks. Whether a run may happen (the floor
+// between runs, the backoff after repeated failure) is policy, and policy lives in the core's
+// `schedule.ts`, where it can be unit-tested; nothing in this file can be.
+//
+// A minute is faster than the policy's five-minute floor on purpose. The timer's only job is to
+// offer the schedule an opportunity often enough that its own floor, rather than this interval,
+// is what decides when the Librarian wakes.
+const DISTILL_TICK_MS = 60_000;
+
+async function distillTick(): Promise<void> {
+  // The ACTIVE repository only. A tick spawns headless agents on the user's own subscription, and
+  // spending that on every watched repository at once — including ones untouched for weeks — is
+  // not a background loop, it is a bill. The repository in front of the user is the one whose
+  // sessions just ended.
+  const active = core.activeRepo(state);
+  if (!active) return;
+
+  const outcome = await librarian.tickIfDue(active.path);
+  // The reason is a sentence for a person; until a surface shows it, the debug log is where it
+  // goes. A loop that appears to do nothing is indistinguishable from a broken one without it.
+  if (DEBUG) console.log(`[librarian] ${active.name}: ${outcome.reason}`);
+
+  // Only new proposals are worth interrupting anything for. A tick that read four sessions and
+  // found nothing durable changes no count on screen — triage refusing most sessions is the
+  // design, not an event — and announcing it would make the Inbox flicker for nothing.
+  if ((outcome.result?.proposed ?? 0) > 0) cardsChanged();
+}
+
 // ── Alerts ───────────────────────────────────────────────────────────────────────────────────
 
 const POLL_MS = 30_000;
@@ -874,6 +907,12 @@ app.whenReady().then(async () => {
   }
   void pollAll();
   setInterval(() => void pollAll(), POLL_MS);
+
+  // No immediate first tick, unlike the attention poll above. That one reads a daemon; this one
+  // may spawn headless agents, and the first minute after launch belongs to painting a window and
+  // starting daemons. Nothing here is urgent either — an idle session is, by definition, already
+  // ten minutes old.
+  setInterval(() => void distillTick(), DISTILL_TICK_MS);
 
   app.on("activate", () => showWindow());
 });

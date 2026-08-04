@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
-import type { CardStore, KageCore, LibrarianCard } from "./kage-core.js";
+import type { CardStore, KageCore, LibrarianCard, TickState } from "./kage-core.js";
 
 /** A card over the IPC bridge. Mirrors `DesktopCard` in platform/web/src/desktop.ts exactly. */
 export interface DesktopCard {
@@ -56,12 +56,37 @@ export interface CardVerdict {
   error?: string;
 }
 
+/**
+ * What one pass over the quiet sessions did.
+ *
+ * `skipped` being the largest number is the system working, not failing: triage refuses roughly
+ * nine sessions in ten by design. `error` is set only when the run itself could not happen — a
+ * session the Librarian read and got nothing from is a skip, not a failure.
+ */
+export interface DistillOutcome {
+  distilled: number;
+  skipped: number;
+  proposed: number;
+  error?: string;
+}
+
+export interface TickOutcome {
+  ran: boolean;
+  /** The schedule's own sentence, whether it ran or not. Shown to a person as written. */
+  reason: string;
+  result?: DistillOutcome;
+}
+
 export interface LibrarianHost {
   listCards(repo: string, filter?: { state?: DesktopCard["state"] }): DesktopCard[];
   approve(repo: string, id: string): CardVerdict;
   reject(repo: string, id: string, reason: string): CardVerdict;
   /** Minutes long. Two runs in one repository are refused rather than raced — see `mine` below. */
   mine(repo: string): Promise<MineOutcome>;
+  /** Read this repository's quiet sessions now, whatever the schedule would have said. */
+  distillNow(repo: string): Promise<DistillOutcome>;
+  /** The scheduled path: asks the policy first, and says why in words when the answer is no. */
+  tickIfDue(repo: string): Promise<TickOutcome>;
   /** Proposals waiting on a human here, or null when the store could not be read at all. */
   proposedCount(repo: string): number | null;
 }
@@ -84,6 +109,18 @@ export function mineFailed(error: string): MineOutcome {
     costUsd: null,
     error,
   };
+}
+
+/**
+ * A capture pass that never happened, carrying the reason.
+ *
+ * Same shape as a real outcome with zeroes in it, and that is fine here in a way it would not be
+ * for a measurement: these counts describe what THIS call did, and it did nothing. The `error` is
+ * what distinguishes "read the sessions and found nothing durable" from "could not run at all",
+ * and only the second one is allowed to count against the schedule's failure budget.
+ */
+function distillFailed(error: string): DistillOutcome {
+  return { distilled: 0, skipped: 0, proposed: 0, error };
 }
 
 /**
@@ -177,6 +214,15 @@ export function createLibrarianHost(core: KageCore): LibrarianHost {
   // same history and race the first one's commits into the same store, so it is refused with a
   // sentence rather than started.
   const mining = new Set<string>();
+  // The same, for capture. Mining and distilling are refused against EACH OTHER as well as
+  // against themselves: they propose into one store, which commits per mutation, and two runs
+  // interleaving their commits is a race with a corrupted index at the end of it.
+  const distilling = new Set<string>();
+  // What the schedule knows, per repository. In memory on purpose — a failure latch that
+  // survived a restart would mean a user who fixed the cause (installed `claude`, signed back in)
+  // and relaunched the app still had a Librarian that refused to run, with nothing on screen
+  // explaining why. Quitting the app is a reasonable thing to do about a stuck background loop.
+  const ticks = new Map<string, TickState>();
 
   function storeFor(repo: string): CardStore {
     const cached = stores.get(repo);
@@ -195,6 +241,51 @@ export function createLibrarianHost(core: KageCore): LibrarianHost {
     const reviewer = resolveReviewer(repo);
     reviewers.set(repo, reviewer);
     return reviewer;
+  }
+
+  /**
+   * One pass over this repository's quiet sessions, right now.
+   *
+   * Named rather than only a method, because the scheduled path below has to call it and then
+   * record what happened — a run and its bookkeeping are one act, and splitting them across two
+   * entry points is how a loop ends up spending tokens it never accounted for.
+   *
+   * The provider keeps the core's own three-minute per-call bound rather than the ten minutes
+   * `mine` grants itself. Nobody is watching this one: it was not asked for, each call covers a
+   * single session's digest rather than two hundred commits of history, and a runner that hangs
+   * on a background tick should be reaped while the user is still at the machine.
+   */
+  async function distillNow(repo: string): Promise<DistillOutcome> {
+    if (distilling.has(repo)) return distillFailed("the Librarian is already reading this repository's sessions");
+    if (mining.has(repo)) return distillFailed("a mining run is going in this repository, and both write the same store");
+
+    const command = resolveClaudeCommand();
+    if (!command) {
+      return distillFailed(
+        "Kage could not find the `claude` command. The Librarian runs on your own Claude subscription — " +
+          "install Claude Code, or point KAGE_CLAUDE at the binary.",
+      );
+    }
+
+    distilling.add(repo);
+    try {
+      const summary = await core.distillIdleSessions(
+        core.claudeProvider({ command, cwd: repo }),
+        storeFor(repo),
+        repo,
+      );
+      // Deduped and rejected counts stay in the receipts ledger rather than travelling up here:
+      // the shell's only questions are whether anything now waits on a human, and whether the
+      // run happened at all.
+      return { distilled: summary.distilled, skipped: summary.skipped, proposed: summary.proposed };
+    } catch (error) {
+      // `distillIdleSessions` handles a per-session failure itself (records it, marks the session
+      // seen, moves on), so reaching here means the run as a whole could not proceed — an
+      // unopenable store, a core that failed to load. That is what the failure budget counts.
+      return distillFailed(error instanceof Error ? error.message : String(error));
+    } finally {
+      distilling.delete(repo);
+    }
   }
 
   return {
@@ -223,6 +314,11 @@ export function createLibrarianHost(core: KageCore): LibrarianHost {
      */
     async mine(repo) {
       if (mining.has(repo)) return mineFailed("a mining run is already going in this repository");
+      // The capture loop can start on a timer at any moment, including this one, and it writes
+      // the same store. The button loses to the run already in flight rather than racing it.
+      if (distilling.has(repo)) {
+        return mineFailed("the Librarian is reading this repository's sessions; try again in a moment");
+      }
       const command = resolveClaudeCommand();
       if (!command) {
         return mineFailed(
@@ -262,6 +358,35 @@ export function createLibrarianHost(core: KageCore): LibrarianHost {
       } finally {
         mining.delete(repo);
       }
+    },
+
+    distillNow,
+
+    /**
+     * The scheduled capture pass — the wire that makes the Librarian a habit rather than a demo.
+     *
+     * The policy is asked first and answers in a sentence either way, because a background loop
+     * that appears to do nothing is indistinguishable from a broken one without one. Only two
+     * things happen here beyond that: a concurrency refusal is kept OFF the failure budget (the
+     * other run is the Librarian working, not failing), and the clock is read again after the
+     * pass rather than before it — a distillation can take minutes, and stamping the start would
+     * let a long run be followed immediately by another.
+     */
+    async tickIfDue(repo) {
+      if (mining.has(repo) || distilling.has(repo)) {
+        return { ran: false, reason: "a Librarian run is already going in this repository" };
+      }
+
+      const before = ticks.get(repo) ?? core.emptyTickState();
+      const decision = core.shouldRunTick(before, { nowMs: Date.now() });
+      if (!decision.run) return { ran: false, reason: decision.reason };
+
+      const result = await distillNow(repo);
+      // A run that read sessions and found nothing durable is a SUCCESS — triage refusing nine
+      // sessions in ten is the design. Only a run that could not happen at all counts against
+      // the budget, which is why `error` and not `proposed` is what is being asked about here.
+      ticks.set(repo, core.recordTick(before, { ok: result.error === undefined, nowMs: Date.now() }));
+      return { ran: true, reason: decision.reason, result };
     },
 
     proposedCount(repo) {

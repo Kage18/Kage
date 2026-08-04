@@ -36,6 +36,24 @@ const KIND_MAP: Record<string, CardKind> = {
  */
 export const UNMAPPED_TYPES = ["repo_map", "reference", "session_summary", "change_memory"] as const;
 
+/**
+ * Bookkeeping the legacy writers generated about their own runs, recognised by SHAPE rather than
+ * by type — which is the only way to catch it, because these were filed under ordinary types
+ * (`workflow`, `decision`) and so slip past the type map.
+ *
+ * Found by dogfooding the import: half the cards it first admitted were `Change memory: <branch>`
+ * packets whose body is a diff summary, and one of them was served to an agent by the pre-edit
+ * hook. A changelog is not a claim — nothing in it can be true or false about the code — so it
+ * fails the store's first rule even though it carries a citation.
+ */
+function isBookkeeping(packet: LegacyPacket): boolean {
+  if (/^(change memory|diff proposal|session summary|pr summary)\b/i.test(packet.title.trim())) return true;
+  // A body that is mostly a fenced dump or a file list is a record of a run, not a claim about
+  // the system. The legacy `Diff summary:` header is the reliable marker.
+  if (/diff summary:/i.test(packet.body)) return true;
+  return false;
+}
+
 export interface LegacyPacket {
   file: string;
   id: string;
@@ -200,6 +218,10 @@ export function planImport(
     }
     if (["deprecated", "stale", "superseded"].includes(packet.verified)) {
       skipped.push({ packet, reason: `already ${packet.verified} in the legacy store` });
+      continue;
+    }
+    if (isBookkeeping(packet)) {
+      skipped.push({ packet, reason: "generated bookkeeping about a run, not a claim about the code" });
       continue;
     }
     const kind = KIND_MAP[packet.type];

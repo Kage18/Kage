@@ -5,12 +5,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { cardId } from "./card.js";
 import { buildHistoryDigest, mineHistory, miningPrompt } from "./miner.js";
 
 /** The same pinned identity the rest of this file uses, so machine git config is never assumed. */
 const GIT_ID = ["-c", "user.email=t@t.dev", "-c", "user.name=T"];
 import { fakeProvider } from "./provider.js";
-import type { Card, CardProposal } from "./types.js";
+import type { Card, CardProposal, CardState } from "./types.js";
 
 // The miner is the answer to "a fresh install has no memory". Every test runs against a REAL
 // scratch repo: the digest is git's output reshaped, so a faked git log would test our fixture
@@ -61,6 +62,28 @@ function proposal(overrides: Partial<CardProposal> = {}): CardProposal {
     citations: [{ ref: "commit:abc1234" }],
     trigger: "changing retry or backoff behavior",
     ...overrides,
+  };
+}
+
+/**
+ * A card the store already holds, content-addressed exactly as proposeCard would have written
+ * it — which is what makes the reconciler's verdict on a re-mine a real assertion rather than a
+ * fixture agreeing with itself.
+ */
+function known(proposal: CardProposal, state: CardState = "proposed"): Card {
+  return {
+    id: cardId(proposal),
+    kind: proposal.kind,
+    state,
+    verify: "unverified",
+    title: proposal.title,
+    claim: proposal.claim,
+    citations: proposal.citations,
+    trigger: proposal.trigger,
+    provenance: { source: "mining", ref: "history:3", at: "2026-08-04T00:00:00.000Z" },
+    tags: [],
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
   };
 }
 
@@ -208,6 +231,9 @@ test("a good reply becomes proposals, in one extract-tier call, with usage repor
   assert.deepEqual(result.rejected, []);
   assert.equal(result.proposals[0].kind, "caution");
   assert.deepEqual(result.proposals[1].tags, ["retry"], "tags survive the coercion");
+  // An empty store can collide with nothing, so every card is an add and nothing was known.
+  assert.deepEqual(result.actions, [{ action: "add" }, { action: "add" }]);
+  assert.equal(result.alreadyKnown, 0);
 
   // ONE call, at extract tier: the user asked for mining explicitly, so there is nothing to triage.
   assert.equal(provider.calls.length, 1);
@@ -241,6 +267,7 @@ test("the cap holds however many the model returns", async () => {
   const result = await mineHistory(fakeProvider([JSON.stringify(many)]), repo, []);
 
   assert.equal(result.proposals.length, 10);
+  assert.equal(result.actions.length, 10, "every survivor carries exactly one verdict");
   assert.deepEqual(result.rejected, [], "the overflow is dropped, not rejected — it was never judged");
   assert.equal(result.proposals[0].title, "finding number 0", "the cap takes the first ten, in order");
 });
@@ -326,6 +353,115 @@ test("a reply with no recoverable array yields an empty batch without throwing",
     assert.deepEqual(result.rejected, [], JSON.stringify(reply));
     assert.equal(result.digest.commits, 3, "the digest is still returned — the run happened");
   }
+});
+
+// ── Re-mining — the reconciler, not a second Inbox ───────────────────────────────────────────
+//
+// Measured on this repository before the reconciler was wired in: a second `kage cards mine`
+// proposed 10 fresh cards and reported "0 already known", because the store's content address
+// was the only dedupe and the model had rephrased everything. Mining re-reads history the run
+// before it already read, so this is not an edge case — it is what the second run always is.
+
+test("a second run over the same history proposes nothing and counts what it already knew", async () => {
+  const repo = scratchRepo();
+  const sha = shortSha(repo);
+  const found = [
+    proposal({ citations: [{ ref: `commit:${sha}` }] }),
+    proposal({
+      kind: "decision",
+      title: "retry policy lives in retry.ts",
+      claim: "Retry behavior is centralized in retry.ts rather than at each call site.",
+      citations: [{ path: "retry.ts" }],
+      trigger: "adding a retry anywhere",
+    }),
+  ];
+  const reply = JSON.stringify(found);
+
+  const first = await mineHistory(fakeProvider([reply]), repo, []);
+  assert.equal(first.proposals.length, 2);
+  assert.equal(first.alreadyKnown, 0);
+
+  // What the store holds afterwards, reviewed or not: a proposed card is knowledge the Inbox is
+  // already carrying, so re-proposing it costs a human the same glance twice.
+  const second = await mineHistory(fakeProvider([reply]), repo, first.proposals.map((p) => known(p)));
+
+  assert.deepEqual(second.proposals, [], "nothing new to review");
+  assert.deepEqual(second.actions, []);
+  assert.equal(second.alreadyKnown, 2, "the run says what it recognised rather than dropping it silently");
+  assert.deepEqual(second.rejected, [], "a card we already have was never refused — that is a different fact");
+  assert.equal(second.digest.commits, 3, "the run still happened and still reports its range");
+});
+
+test("a genuinely new fact still gets through a re-mine", async () => {
+  const repo = scratchRepo();
+  const sha = shortSha(repo);
+  const stored = proposal({ citations: [{ ref: `commit:${sha}` }] });
+  const fresh = proposal({
+    kind: "decision",
+    title: "config defaults live in config.ts",
+    claim: "The retry count default is set in config.ts so the loader owns it, not each caller.",
+    citations: [{ path: "config.ts" }],
+    trigger: "changing a default",
+  });
+
+  const result = await mineHistory(fakeProvider([JSON.stringify([stored, fresh])]), repo, [known(stored)]);
+
+  assert.deepEqual(result.proposals.map((p) => p.title), [fresh.title]);
+  assert.deepEqual(result.actions, [{ action: "add" }]);
+  assert.equal(result.alreadyKnown, 1);
+});
+
+// An update is NOT dropped: a refinement of a card the store holds is knowledge, and whether it
+// replaces the original is the human's call at the gate. The reconciler only says which card it
+// is about, so the reviewer never sees two rival half-truths with no signal which is current.
+test("a rephrasing of a known card arrives as an update against it, not as a rival card", async () => {
+  const repo = scratchRepo();
+  const sha = shortSha(repo);
+  const stored = proposal({ citations: [{ ref: `commit:${sha}` }] });
+  const rephrased = proposal({
+    title: `${stored.title}, re-checked`,
+    claim: "The backoff revert still stands on main; the doubling was never reintroduced.",
+    citations: [{ ref: `commit:${sha}` }],
+  });
+
+  const result = await mineHistory(fakeProvider([JSON.stringify([rephrased])]), repo, [known(stored)]);
+
+  assert.equal(result.proposals.length, 1);
+  assert.deepEqual(result.actions, [{ action: "update", id: cardId(stored) }]);
+  assert.equal(result.alreadyKnown, 0, "an update is new knowledge to review, not something we already had");
+});
+
+// The reason a rejection is recorded rather than deleted is so the same junk is not mined back
+// in next week.
+test("a card the team already rejected is not mined back into the Inbox", async () => {
+  const repo = scratchRepo();
+  const sha = shortSha(repo);
+  const junk = proposal({ citations: [{ ref: `commit:${sha}` }] });
+
+  const result = await mineHistory(fakeProvider([JSON.stringify([junk])]), repo, [known(junk, "retired")]);
+
+  assert.deepEqual(result.proposals, []);
+  assert.equal(result.alreadyKnown, 1);
+});
+
+// Gate first, reconciler second. A proposal that is both a duplicate and inadmissible is
+// reported as REFUSED, because that is the louder fact about the extractor's quality.
+test("a duplicate that also fails the gate is refused, never counted as already known", async () => {
+  const repo = scratchRepo();
+  const sha = shortSha(repo);
+  // The same fact the store holds, re-proposed with its evidence dropped — the content address
+  // ignores citations, so this collides AND is inadmissible.
+  const stored = proposal({ citations: [{ ref: `commit:${sha}` }] });
+  const uncited: CardProposal = { ...stored, citations: [] };
+
+  const result = await mineHistory(fakeProvider([JSON.stringify([uncited])]), repo, [known(stored)]);
+
+  assert.deepEqual(result.proposals, []);
+  assert.equal(result.alreadyKnown, 0);
+  assert.equal(result.rejected.length, 1);
+  assert.deepEqual(result.rejected[0].problems, [
+    { field: "citations", reason: "a card that cites nothing cannot exist" },
+  ]);
 });
 
 // Found by dogfooding, which is the only way this class of bug ever surfaces: the miner used

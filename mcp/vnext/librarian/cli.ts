@@ -16,7 +16,7 @@
 // usage that was never measured prints as "not measured", never as 0 — the old product died
 // of a fabricated headline number.
 
-import { approve, mineRepository, refreshBrief, reject, storeFor, verifySweep } from "./operations.js";
+import { approve, ingestProposals, mineRepository, refreshBrief, reject, storeFor, verifySweep } from "./operations.js";
 import { claudeProvider } from "./provider.js";
 import { recallCards } from "./recall.js";
 import { readReceipts, receiptCounts } from "./receipts.js";
@@ -47,6 +47,7 @@ const USAGE = [
   "  kage cards approve <id> [--note <text>]                       make it team knowledge (re-pins, verifies, refreshes the BRIEF)",
   "  kage cards reject <id> --reason <text>                        retire it with the reason on record",
   "  kage cards mine [--max-commits <n>] [--json]                  propose cards from this repo's own history",
+  "  kage cards import [--all] [--dry-run] [--json]                 migrate the legacy packet store through the gate",
   "  kage cards verify [--json]                                    re-check every approved card against the tree as it stands",
   "  kage cards brief [--json]                                     regenerate the fenced block in AGENTS.md/CLAUDE.md",
   '  kage cards recall "<query>" [--files a,b] [--json]            what an agent would be served for this action',
@@ -56,6 +57,7 @@ const USAGE = [
 ].join("\n");
 
 const SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "import",
   "list",
   "show",
   "approve",
@@ -352,6 +354,54 @@ export async function runCardsCommand(
     }
     for (const problem of summary.problems) lines.push(`  refused: ${problem}`);
     if (summary.proposed > 0) lines.push("Review them: kage cards list --state proposed");
+    return ok(lines.join("\n"));
+  }
+
+  if (sub === "import") {
+    const { existsSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const { readPackets, planImport, summarizeSkips } = await import("./import.js");
+
+    const packets = readPackets(projectDir);
+    if (packets.length === 0) {
+      return ok("No legacy packets found — nothing to migrate.");
+    }
+
+    const { candidates, skipped } = planImport(packets, {
+      // Verified-only unless asked otherwise: on this repository the difference is 25 cards
+      // against 217, and an inbox of 217 is one nobody clears.
+      requireVerified: !has(argv, "--all"),
+      pathExists: (path) => existsSync(joinPath(projectDir, path)),
+    });
+
+    const reasons = summarizeSkips(skipped);
+    if (has(argv, "--dry-run")) {
+      const body = [
+        `${plural(candidates.length, "packet")} of ${packets.length} would become cards.`,
+        ...reasons.map((entry) => `  ${String(entry.count).padStart(4)}  refused: ${entry.reason}`),
+        "",
+        "Run without --dry-run to propose them; nothing is approved by importing.",
+      ];
+      return ok(wantsJson ? json({ would_import: candidates.length, packets: packets.length, refused: reasons }) : body.join("\n"));
+    }
+
+    const summary = ingestProposals(
+      store,
+      candidates.map((candidate) => candidate.proposal),
+      { source: "human", ref: "legacy-import", at: now.toISOString() },
+    );
+
+    if (wantsJson) return ok(json({ ...summary, packets: packets.length, refused: reasons }));
+    const lines = [
+      `Imported ${plural(summary.proposed, "card")} from ${packets.length} legacy packets.`,
+      summary.deduped > 0 ? `  ${summary.deduped} already known.` : null,
+      summary.rejected > 0 ? `  ${summary.rejected} refused by the gate.` : null,
+      ...reasons.map((entry) => `  ${String(entry.count).padStart(4)}  skipped: ${entry.reason}`),
+      "",
+      // Importing proposes; it never approves. The whole point of the new store is that a human
+      // decides what becomes team knowledge, and a migration is not an exception to that.
+      "They are PROPOSED, not approved — review them: kage cards list --state proposed",
+    ].filter((line): line is string => line !== null);
     return ok(lines.join("\n"));
   }
 

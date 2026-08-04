@@ -171,6 +171,11 @@ export async function mineRepository(
     at: new Date().toISOString(),
   };
   const ingested = ingestProposals(store, result.proposals, provenance);
+  // "Already known" is ONE fact and must be one number, wherever it was noticed. The miner's
+  // reconciler recognises a re-mined card before proposeCard's content address ever sees it, so
+  // without this line those hits vanish from the summary entirely — which is exactly how a second
+  // mining run came to report ten proposals and zero already known.
+  ingested.deduped += result.alreadyKnown;
   ingested.rejected += result.rejected.length;
   for (const entry of result.rejected) {
     ingested.problems.push(`${entry.proposal.title}: ${entry.problems.map((p) => p.reason).join("; ")}`);

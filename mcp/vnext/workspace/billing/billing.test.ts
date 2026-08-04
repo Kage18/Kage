@@ -59,7 +59,6 @@ import type { TeamTaskOutcomeRecord } from "../metrics.js";
 import { startWorkspaceServer, type WorkspaceServer } from "../server.js";
 import { createSession, type SessionCredentials } from "../auth/session.js";
 import type { WorkspaceRole } from "../auth/types.js";
-import { billingPanel } from "../../api/read-models.js";
 
 const WEBHOOK_SECRET = "whsec_test_do_not_use_in_production";
 
@@ -601,23 +600,3 @@ test("a pilot credit is recorded once per pilot and is tenant-scoped", async () 
   assert.equal(rows[0].count, "1", "re-running the calculation must never double-credit an account");
 });
 
-// ---------------------------------------------------------------------------------------------
-// the portal projection
-// ---------------------------------------------------------------------------------------------
-
-test("the billing panel states the plan, the entitlements, and an unmeasured credit as unknown", () => {
-  const panel = billingPanel({
-    plan_id: "team",
-    state: "active",
-    entitlements: resolveEntitlements(subscription({ plan_id: "team" })),
-    current_period_end: "2026-08-20T00:00:00.000Z",
-    active_developers: 4,
-    usd_per_active_developer_month: LAUNCH_PLANS.team.usd_per_active_developer_month,
-    credit: null,
-  });
-  assert.equal(panel.plan_id, "team");
-  assert.equal(panel.entitlements.team_sync, true);
-  assert.equal(panel.credit_usd, null);
-  assert.equal(panel.credit_reason, null);
-  assert.ok(panel.caveats.some((c) => /measured/i.test(c)));
-});

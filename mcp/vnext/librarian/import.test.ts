@@ -203,3 +203,28 @@ test("path-resolution skips collapse to one summary line rather than one per fil
   assert.equal(summary.length, 1);
   assert.equal(summary[0].count, 3);
 });
+
+// Found by dogfooding the import itself: half the cards it first admitted were `Change memory:
+// <branch>` packets whose body is a diff summary, and one was served to an agent by the pre-edit
+// hook before anyone noticed. A changelog is not a claim — nothing in it can be true or false
+// about the code — so it must fail even though it carries a citation and a real type.
+test("generated bookkeeping is refused by SHAPE, since it was filed under ordinary types", () => {
+  const cases: Array<Partial<LegacyPacket>> = [
+    { title: "Change memory: release/v2.0.0", type: "workflow" },
+    { title: "Diff proposal: fix the thing", type: "decision" },
+    { title: "PR summary: branch/x", type: "decision" },
+    { title: "A genuine decision", body: "What changed: - a.ts Diff summary: ```text ...```", type: "decision" },
+  ];
+  for (const overrides of cases) {
+    const { candidates, skipped } = planImport([packet(overrides)]);
+    assert.equal(candidates.length, 0, JSON.stringify(overrides.title));
+    assert.match(skipped[0].reason, /bookkeeping/);
+  }
+});
+
+test("a real claim that merely mentions a diff is still admitted", () => {
+  const { candidates } = planImport([
+    packet({ body: "The merge driver diffs packets by content rather than by extension, so raw-JSON packets auto-merge." }),
+  ]);
+  assert.equal(candidates.length, 1);
+});

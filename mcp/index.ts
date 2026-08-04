@@ -7,6 +7,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { join } from "node:path";
 import { retrieveFromProject } from "./vnext/api/retrieve.js";
 import {
   SETUP_AGENTS,
@@ -57,6 +58,7 @@ import {
   kageTeammateBrief,
   learn,
   memoryInbox,
+  kageHomeDir,
   kageWorkspace,
   kageWorkspaceRecall,
   observe,
@@ -99,6 +101,51 @@ import {
 } from "./kernel.js";
 import { driftCheck, formatCheckReport } from "./check.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
+import { LIBRARIAN_TOOL_DEFINITIONS, callLibrarianTool } from "./vnext/librarian/mcp-tools.js";
+
+// ── The card tools (DIRECTION.md's trigger-scoped recall tier) ────────────────────────────────
+//
+// vnext/librarian/mcp-tools.ts owns the three definitions and the whole dispatcher; this file owns
+// only the registration, so the agent-facing surface is described in exactly one place.
+//
+// One rename happens here and nowhere else. The librarian calls its recall `kage_recall` — the name
+// it should end up with once the packet pipeline is retired — but the legacy packet recall still
+// holds that name in this registry today, and two tools cannot share one name (tool-coverage's
+// "full registry covers every tool exactly once" is right to forbid it, and a duplicate would make
+// the card recall unreachable behind the older handler). So the card recall registers as
+// `kage_cards_recall` until the packet tool goes away, at which point this map empties and the name
+// collapses back. The rename is applied to the descriptions too: an agent-facing description that
+// names a tool resolving to something else is worse than a clumsy name.
+const LIBRARIAN_TOOL_ALIASES: Record<string, string> = { kage_recall: "kage_cards_recall" };
+
+function librarianAlias(name: string): string {
+  return LIBRARIAN_TOOL_ALIASES[name] ?? name;
+}
+
+/** Registered name -> the name vnext/librarian/mcp-tools.ts dispatches on. */
+const LIBRARIAN_TOOLS_BY_REGISTERED_NAME = new Map(
+  LIBRARIAN_TOOL_DEFINITIONS.map((tool) => [librarianAlias(tool.name), tool.name]),
+);
+
+function librarianToolDefinitions() {
+  return LIBRARIAN_TOOL_DEFINITIONS.map((tool) => {
+    let description = tool.description;
+    for (const [original, alias] of Object.entries(LIBRARIAN_TOOL_ALIASES)) {
+      description = description.split(original).join(alias);
+    }
+    return { name: librarianAlias(tool.name), description, inputSchema: tool.inputSchema };
+  });
+}
+
+/**
+ * Where card stores live for this process. Identical to the librarian's own default
+ * (`~/.kage/store`) whenever KAGE_HOME is unset, but routed through the kernel's KAGE_HOME
+ * resolution so a test — or anyone pointing Kage at a scratch home — does not have MCP tool calls
+ * writing shadow repos into the real home directory.
+ */
+function librarianStoreRoot(): string {
+  return join(kageHomeDir(), "store");
+}
 
 function arrayArg(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String);
@@ -1240,6 +1287,7 @@ function allTools() {
         required: ["project_dir"],
       },
     },
+    ...librarianToolDefinitions(),
   ];
 }
 
@@ -1280,6 +1328,15 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     };
   }
   await ensureTreeSitterLanguages();
+
+  // The card tools own their entire dispatch, argument reading and error prose in
+  // vnext/librarian/mcp-tools.ts — that dispatcher never throws, so this delegation needs no
+  // guard of its own. Placed first so a card tool cannot be shadowed by a later branch.
+  const librarianTool = LIBRARIAN_TOOLS_BY_REGISTERED_NAME.get(name);
+  if (librarianTool) {
+    return callLibrarianTool(librarianTool, args ?? {}, { storeRoot: librarianStoreRoot() });
+  }
+
   if (name === "kage_list_domains") {
     return { content: [{ type: "text", text: await kageListPublicDomains() }] };
   }

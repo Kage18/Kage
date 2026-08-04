@@ -2462,9 +2462,20 @@ test("setup generates all-agent MCP configuration and writes Codex config idempo
   assert.match(readContextHook, /kage file-context --project "\$CWD" --path "\$FILE_PATH"/);
   assert.match(readContextHook, /hookSpecificOutput/);
   assert.match(readContextHook, /additionalContext/);
-  // Three legacy entries plus the vNext adapter, which is appended last and never displaces them.
-  assert.equal(claudeSettings.hooks.PreToolUse.length, 4);
-  assert.match(claudeSettings.hooks.PreToolUse[3].hooks[0].command, /kage-vnext-adapter\.sh/);
+  // Four memory entries plus the vNext adapter, which is appended last and never displaces them.
+  // The adapter is asserted by POSITION-FROM-THE-END, not a fixed index: "last" is the invariant
+  // that matters, and pinning it to [3] only made this assertion go stale the moment a fourth
+  // memory hook (the Librarian's cards) was added ahead of it.
+  assert.equal(claudeSettings.hooks.PreToolUse.length, 5);
+  const preToolUseLast = claudeSettings.hooks.PreToolUse[claudeSettings.hooks.PreToolUse.length - 1];
+  assert.match(preToolUseLast.hooks[0].command, /kage-vnext-adapter\.sh/);
+  // ...and no OTHER entry is the adapter, so "appended last" cannot be satisfied by an adapter
+  // that also sits in front of the memory hooks it must never displace.
+  assert.equal(
+    claudeSettings.hooks.PreToolUse.filter((entry: { hooks: Array<{ command: string }> }) =>
+      entry.hooks.some((hook) => /kage-vnext-adapter\.sh/.test(hook.command))).length,
+    1,
+  );
   assert.equal(claudeSettings.hooks.PreToolUse[1].matcher, "Read");
   assert.match(claudeSettings.hooks.PreToolUse[1].hooks[0].command, /kage-read-context\.sh/);
   // Enforcement: recall before an edit. Dedicated script + an Edit|Write|MultiEdit matcher.
@@ -2475,6 +2486,12 @@ test("setup generates all-agent MCP configuration and writes Codex config idempo
   assert.match(editContextHook, /tmp\/kage-edit-context/);
   assert.equal(claudeSettings.hooks.PreToolUse[2].matcher, "Edit|Write|MultiEdit");
   assert.match(claudeSettings.hooks.PreToolUse[2].hooks[0].command, /kage-edit-context\.sh/);
+  // The Librarian's cards at the same moment, on its own entry so it neither replaces the packet
+  // edit hook nor inherits its matcher — it covers NotebookEdit too.
+  const cardsContextHookPath = join(home, ".claude", "kage", "hooks", "kage-cards-context.sh");
+  execFileSync("bash", ["-n", cardsContextHookPath]);
+  assert.equal(claudeSettings.hooks.PreToolUse[3].matcher, "Edit|Write|MultiEdit|NotebookEdit");
+  assert.match(claudeSettings.hooks.PreToolUse[3].hooks[0].command, /kage-cards-context\.sh/);
   // The vendored plugin copy stays in sync with the generated script's behavior.
   const pluginReadContext = readFileSync(join(__dirname, "..", "..", "plugin", "hooks", "kage-read-context.sh"), "utf8");
   assert.match(pluginReadContext, /kage file-context --project "\$CWD" --path "\$FILE_PATH"/);
