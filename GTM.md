@@ -90,11 +90,49 @@ being rent on a flag.
    count of recalls served in the gap. The conversion engine, and an honest free feature.
 2. **SSH-key approval signing**, free. Closes the poisoning hole; makes approver identity a key
    rather than `process.env.USER`.
-3. **Drift triage, measured before it is sold.** Take drifted cards, have a model judge
-   invalidated-or-not, and **measure the precision against human labels.** If a model cannot beat a
-   coin flip here, Watch is noise and the model dies at this step, cheaply. This is now the real
-   kill criterion, and it replaces the citation one.
+3. ~~Drift triage, measured before it is sold.~~ **RUN — see §3b. Passed.**
 4. Only then the GitHub App.
+
+## 3b. The real kill criterion, run: can a judge triage drift?
+
+`mcp/benchmarks/drift-triage.mjs`. Ground truth by construction rather than by my labels: real
+comparison sites from execa/axios/got/express, two mutations each with known semantics —
+**invalidating** (flip the operator the claim is about, so the claim becomes false) and **cosmetic**
+(comments and blank lines elsewhere, so it still holds). The judge sees only the claim and the
+resulting code, never which mutation it got.
+
+| prompt framing | false alarms on cosmetic | recall on invalidating |
+|---|---:|---:|
+| precision-biased, verdict-first | 0% (0/9) | 33% (3/9) |
+| neutral, verdict-first | 40% (4/10) | 90% (9/10) |
+| **neutral, reasoning-before-verdict** | **0% (0/9)** | **80% (8/10)** |
+
+**Verdict: SUPPORTED.** A judge can forward the changes that matter without burying anyone in the
+ones that do not. That is the capability Watch sells, and it is now measured rather than assumed.
+
+**Three harness bugs had to be fixed first, and every one would have produced a wrong business
+decision.** They are recorded because the lesson generalises: *an eval that has not been debugged
+is measuring the instrument.*
+
+1. **Syntactic claims.** The first claim template said "compares with `>`, not `>=`" — a statement
+   about tokens. It measured character-diffing, not comprehension, and reported 0% recall. Real
+   cards state what code *does*, so the claim became "when these two are exactly equal the
+   condition does not pass."
+2. **Wrong attribution.** Claims named the nearest declaration above the line, which was often a
+   function not containing the comparison. The judge correctly answered that the claim did not
+   describe the code, and the harness scored that as a false alarm. Claims now identify the
+   comparison by its operands and need no parser.
+3. **Verdict before reasoning.** With `{"invalidated": …, "reason": …}` the boolean was committed
+   before the thinking. Three of four "false alarms" in the neutral run were the model reasoning
+   to the *right* answer and emitting the opposite flag — one literally read *"wait, that means
+   it's NOT invalidated"* next to `invalidated: true`. Reordering to reason-then-verdict moved that
+   run from 40% false alarms to 0% with recall still at 80%.
+
+**What this does NOT establish.** N=19 usable trials; one mutation family (boundary flips);
+synthetic mutations rather than real diffs; and the judge sees only the after-state, where real
+Watch could show the diff and would likely do better. This is a green light to build the next
+increment, not proof the product works. The honest reading: **the capability is not the blocker.**
+Distribution and whether anyone wants this at all remain the real risks — see §6.
 
 ## 5. What not to build
 
