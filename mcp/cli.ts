@@ -226,6 +226,7 @@ Is it working:
   kage status --project <dir>                 memory + runtime health, and which numbers are measured
   kage doctor --project <dir>                 health check, with the fix for each failure
   kage team --project <dir>                   contributors, pending review, stale-withheld, contradictions
+  kage license                                solo is free forever; what a team licence adds, and how to install one
 
 Everything else — the legacy packet store, the code graph, benchmarks, daemons, maintenance —
 is a grouped reference rather than a menu:
@@ -409,6 +410,12 @@ MAINTENANCE — keeping the install and the derived artifacts current.
   kage upgrade [--dry-run]
   kage model export-fixture --project <dir> --out <path> [--repository <id>]   deterministic repository-model v1 fixture (sorted by id; no timestamps/paths) for cross-phase compatibility tests
   kage gen-plugin-hooks [--plugin-dir <dir>] [--json]   regenerate plugin/hooks/* from the claude-code setup templates so the plugin and npm install paths ship identical hooks
+
+LICENCE — verified offline on this machine; no account, nothing called home.
+  kage license                         what is installed and what it entitles
+  kage license activate <key>          install a key (verified before it is saved; a bad key is refused, not stored)
+  kage license deactivate              remove it — cards are never touched
+  kage license path                    where the key file lives (~/.kage, never in your repo)
 
 TEAM — who knows what. These read the legacy packet store, not the card store.
   kage team --project <dir> [--json]   team memory health: contributors, pending review, stale-withheld, contradictions
@@ -1643,6 +1650,14 @@ async function main(): Promise<void> {
     const { runCardsCommand } = await import("./vnext/librarian/cli.js");
     // `args` still carries the command itself; the dispatcher wants only what follows it.
     const result = await runCardsCommand(args.slice(1), projectArg(args), { storeRoot: storeRootFromEnv() });
+    if (result.out) console.log(result.out);
+    if (result.exitCode !== 0) process.exit(result.exitCode);
+    return;
+  }
+
+  if (command === "license") {
+    const { runLicenseCommand } = await import("./vnext/license/storage.js");
+    const result = runLicenseCommand(args.slice(1));
     if (result.out) console.log(result.out);
     if (result.exitCode !== 0) process.exit(result.exitCode);
     return;
