@@ -228,3 +228,38 @@ test("a real claim that merely mentions a diff is still admitted", () => {
   ]);
   assert.equal(candidates.length, 1);
 });
+
+// Found in the packaged app: an imported card reached the Inbox with the OKF round-trip payload
+// in its claim — `{"schema_version":2,"id":"repo:memory:decision:...`. That fenced block is the
+// packet re-serialized inside its own file (the "lossless" format DIRECTION.md records as having
+// doubled every packet). Serialized state is not a claim about anything.
+test("the OKF kage-state payload never reaches a claim", () => {
+  const withState = `---
+title: "A real decision"
+x-kage-id: "repo:x:decision:real"
+x-kage-type: "decision"
+x-kage-status: "approved"
+x-kage-verified: "verified"
+x-kage-paths: ["docs/BENCHMARKS.md"]
+---
+
+# A real decision
+
+> generated summary
+
+A score is only valid relative to its harness, so never compare across harnesses.
+
+\`\`\`json kage-state
+{"schema_version":2,"id":"repo:memory:decision:real","title":"A real decision"}
+\`\`\`
+`;
+  const parsed = parsePacket("x.md", withState);
+  assert.ok(parsed);
+  assert.ok(!parsed.body.includes("schema_version"), "serialized state must not survive parsing");
+  assert.ok(!parsed.body.includes("```"));
+  assert.match(parsed.body, /^A score is only valid/);
+
+  const { candidates } = planImport([parsed]);
+  assert.equal(candidates.length, 1);
+  assert.ok(!candidates[0].proposal.claim.includes("schema_version"));
+});

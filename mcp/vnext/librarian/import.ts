@@ -100,9 +100,16 @@ export function parsePacket(file: string, content: string): LegacyPacket | null 
   const type = frontmatterValue(front, "x-kage-type");
   if (!title || !id || !type) return null;
 
-  // The body: drop the repeated `# title` heading and the `>` summary line the legacy writer
-  // prepended, keeping the prose a human actually wrote.
-  const body = rest
+  // The body: strip everything the legacy writer generated ABOUT the packet, keeping only the
+  // prose a human actually wrote.
+  //
+  // The fenced ```json kage-state block is the OKF "lossless round-trip" payload — the whole
+  // packet re-serialized inside its own file, which is why DIRECTION.md records that the format
+  // doubled every packet. Left in, it flows straight into the claim: dogfooding showed a card
+  // reaching the Inbox whose text was `{"schema_version":2,"id":"repo:memory:decision:...`.
+  // Serialized state is not a claim about anything.
+  const withoutState = rest.replace(/```[a-z-]*\s*kage-state[\s\S]*?```/gi, "").replace(/```[\s\S]*?```/g, "");
+  const body = withoutState
     .split("\n")
     .filter((line) => !line.startsWith("# ") && !line.startsWith("> "))
     .join("\n")
