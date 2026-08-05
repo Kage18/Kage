@@ -158,6 +158,13 @@ enforcement. Telemetry collection, SIEM export, SOC 2 packs, retention policy. D
 
 Publishing to npm, posting publicly, and anything involving payment credentials are not mine to
 do — the first two are irreversible and carry Kushal's name, and I am not permitted to handle
-payment details. **No revenue has been earned and none can be by me.** Everything up to that point
-is built: `scripts/issue-license.mjs` mints a signed key offline, and `kage license activate`
-verifies it with no server. The remaining step is a person deciding to charge someone.
+payment details. **No revenue has been earned and none can be by me.** The remaining step is a
+person deciding to charge someone.
+
+**And there is deliberately no billing machinery waiting for them.** An offline Ed25519 licence
+layer was built during this work and then deleted, because §1 and §2 rule out the model it served:
+a paid feature implemented as `if (licensed)` in an MIT client is one deleted line from free. Kage
+Watch charges for a hosted service that does work on Kage's machines, and entitlement for that
+lives server-side with the GitHub App installation — no key file, no client check, nothing to
+forge. Building the licence layer first was the wrong order, and keeping it "just in case" is how
+the codebase got heavy in the first place.

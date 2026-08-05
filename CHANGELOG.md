@@ -30,10 +30,16 @@ converge without a migration step. The point is not standards-compliance: the
 product promises memory you can read without our binary, and a bespoke format made
 that false.
 
-**`kage license`** — offline, fail-open entitlement. Ed25519, no server, no
-phone-home. Expired, corrupt, forged, or absent all degrade to the free tier and
-never throw, and the expiry message says so explicitly: *every card you have is
-untouched and still recalled*. A lapsed licence keeps working 14 more days.
+**Two products became one, and ~17,000 lines went.** `vnext/workspace/` — a Postgres
+server, auth, billing, entitlements, enterprise export, GitHub webhooks, 9,197 lines
+across 32 files — was reachable from exactly one place: its own gate test. Live code
+imported three symbols out of all of it. Deleted, keeping only the pure metrics
+contract as `vnext/sync/team-metrics.ts`. The legacy `mcp/viewer/` dashboard went
+too: there is one UI now, and `/` plus every old `/viewer/...` path redirects to it
+rather than 404ing. An offline licence layer built earlier in the same cycle was
+deleted as well — a paid feature behind `if (licensed)` in an MIT client is one
+deleted line from free, so it was answering a question the business model does not
+ask (see `GTM.md`).
 
 **The install no longer commits your memory.** The `.gitignore` it writes used to
 un-ignore `.agent_memory/packets/`, so a fresh install staged a generated repo-map
