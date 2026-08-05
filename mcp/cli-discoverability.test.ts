@@ -6,7 +6,8 @@ import { join } from "node:path";
 
 // A command that runs but appears in no help output is a command nobody can find.
 //
-// `kage okf` was exactly that for an unknown stretch: four working subcommands, referenced by this
+// `kage okf` was exactly that for an unknown stretch: four working subcommands (since deleted),
+// referenced by this
 // repo's own CLAUDE.md, absent from `kage help --all`. `audit-log`, `memory-handoff`, and a dozen
 // other aliases were the same. You could only learn they existed by reading cli.ts.
 //
@@ -63,11 +64,9 @@ test("every dispatched command is discoverable in help or the legacy map", () =>
   );
 });
 
-test("kage okf stays discoverable — the command that motivated this test", () => {
-  // Named explicitly so a future refactor that drops it from help fails with an obvious reason,
-  // not just a long diff in the test above.
-  assert.match(run("help", "--all"), /kage okf/);
-});
+// The `kage okf` command tree was deleted (DIRECTION.md kill list: no third-party consumer ever
+// read a bundle, and the "lossless" round trip doubled every packet). Its named canary went with
+// it; the general guard above still covers every command that IS dispatched.
 
 // The three tests below guard the OTHER direction, which only became a failure mode when the
 // short help stopped being a near-complete list.
@@ -109,7 +108,7 @@ test("the short help stays a core, not a second copy of the reference", () => {
   // A sample of the long tail, one per section of `help --all`. These are not forbidden forever —
   // they are the canaries: if any of them is back on the front page, the grouping has been
   // re-flattened and the reference and the core have merged again.
-  for (const buried of ["kage okf", "kage benchmark", "kage graph-insights", "kage slots", "kage workspace"]) {
+  for (const buried of ["kage benchmark", "kage graph-insights", "kage slots", "kage workspace"]) {
     assert.ok(!short.includes(buried), `${buried} belongs in \`kage help --all\`, not in the short help`);
   }
   // A ceiling on ceremony rather than a measurement: the point of the front page is that it can

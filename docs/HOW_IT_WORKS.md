@@ -214,9 +214,13 @@ Everything is under `.agent_memory/`:
 | `daemon/` | proxy + runtime state, logs | local only |
 
 A packet is a self-describing OKF concept file: Markdown with YAML frontmatter, Kage's verification
-metadata in OKF-legal `x-kage-*` fields. Any OKF consumer can read it, including Google's visualizer.
-`kage export --format okf` renders the store as a bundle; `kage okf import` reads foreign ones. The
-round-trip is lossless.
+metadata in OKF-legal `x-kage-*` fields. Any OKF consumer can read it.
+
+The bundle round-trip that used to be described here — `kage okf migrate|lint|import` — has been
+removed. It existed so the store could be exported as a browsable OKF bundle and read back, and in
+two months no third-party consumer ever read one, while the "lossless" guarantee was paid for by a
+fenced JSON block that doubled every packet. **The format is what mattered and the format stays:**
+each file is still a conformant concept document you can read with anything, including without Kage.
 
 **You can always read your memory without Kage.** They are Markdown files in your repo.
 

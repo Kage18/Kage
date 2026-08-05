@@ -173,7 +173,6 @@ import {
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { checkReportMarkdown, driftCheck, formatCheckReport, kageCheckWorkflowYaml, writeCheckBaseline } from "./check.js";
-import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
 import { probeAssistStorage, startProxy } from "./proxy.js";
 import {
   isLegacyCommand,
@@ -351,10 +350,6 @@ Several of these are deprecated on top of that; \`kage legacy --help\` prints th
   kage migrate plan --project <dir> [--pending] [--out <path>] [--json]   dry-run import of legacy packets into the repository model (non-destructive; per-disposition counts)
   kage migrate apply --project <dir> --plan <path> [--json]   apply a migration plan; imports only packets whose fingerprint still matches (nothing becomes injectable)
   kage export --project <dir> --format okf --out <dir>   export the repository model as an OKF concept bundle (identifiers round-trip through foreign OKF consumers)
-  kage okf view [--project <dir>] [--pending]   view your memory as a self-contained OKF page (no server)
-  kage okf migrate [--project <dir>] [--pending]   packets → OKF bundle under .agent_memory/okf
-  kage okf lint [<dir|file>] [--project <dir>]   check OKF conformance (defaults to this repo's bundle)
-  kage okf import [<dir>] [--project <dir>] [--json]   read an OKF bundle back into packets
  Community graph and public bundles (advisory, untrusted; nothing publishes automatically):
   kage community-domains                                list community knowledge-graph domains (untrusted, advisory)
   kage community-search "<query>" [--domain <name>]      search the community knowledge graph (untrusted, advisory)
@@ -938,64 +933,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command === "okf") {
-    // OKF (Open Knowledge Format) is Kage's standard on-disk memory format.
-    const sub = args[1] && !args[1].startsWith("--") ? args[1] : "";
-    const project = resolve(projectArg(args));
-
-    if (sub === "migrate" || sub === "export") {
-      const result = migratePacketsToOkf(project, { includePending: args.includes("--pending") });
-      console.log(`Kage memory → OKF: wrote ${result.written} concept(s) to ${result.root}`);
-      for (const [type, count] of Object.entries(result.byType).sort((a, b) => b[1] - a[1])) {
-        console.log(`  ${type}: ${count}`);
-      }
-      console.log("\nConformant OKF bundle: index.md (progressive disclosure), log.md (history), concept docs.");
-      console.log("Trust metadata rides in x-kage-* frontmatter, so any OKF consumer (incl. Google's visualizer) reads it unchanged.");
-      return;
-    }
-
-    if (sub === "lint") {
-      const target = args[2] && !args[2].startsWith("--") ? resolve(args[2]) : okfBundleDir(project);
-      const { files, failures } = lintOkfBundle(target);
-      if (failures.length === 0) {
-        console.log(`OKF lint: ${files} concept(s) in ${target} — all conformant.`);
-        return;
-      }
-      console.log(`OKF lint: ${failures.length}/${files} concept(s) non-conformant in ${target}:`);
-      for (const failure of failures) console.log(`  ${failure.path}: ${failure.errors.join("; ")}`);
-      process.exit(1);
-    }
-
-    if (sub === "import") {
-      const dir = args[2] && !args[2].startsWith("--") ? resolve(args[2]) : okfBundleDir(project);
-      const packets = loadOkfConcepts(dir, { projectDir: project });
-      if (args.includes("--json")) {
-        console.log(JSON.stringify(packets, null, 2));
-        return;
-      }
-      console.log(`Read ${packets.length} concept(s) from OKF bundle ${dir}`);
-      for (const packet of packets.slice(0, 20)) console.log(`  [${packet.type}] ${packet.title}`);
-      if (packets.length > 20) console.log(`  … and ${packets.length - 20} more`);
-      return;
-    }
-
-    if (sub === "view") {
-      migratePacketsToOkf(project, { includePending: args.includes("--pending") });
-      const concepts = loadOkfConcepts(okfBundleDir(project), { projectDir: project });
-      const out = join(okfBundleDir(project), "viewer.html");
-      writeFileSync(out, okfViewerHtml(concepts, { title: basename(project) }), "utf8");
-      console.log(`OKF viewer: ${concepts.length} concept(s) — a self-contained page, no server, no giant URL.`);
-      console.log(`Open it:  open ${out}`);
-      return;
-    }
-
-    console.log("kage okf — Open Knowledge Format is Kage's standard memory format.");
-    console.log("  kage okf view [--project <dir>]                   view your memory as a clean OKF bundle (self-contained page)");
-    console.log("  kage okf migrate [--project <dir>] [--pending]   packets → OKF bundle (.agent_memory/okf)");
-    console.log("  kage okf lint [<dir|file>] [--project <dir>]      check OKF conformance");
-    console.log("  kage okf import [<dir>] [--project <dir>] [--json]  read an OKF bundle back into packets");
-    return;
-  }
 
   if (command === "migrate") {
     // Import the legacy .agent_memory packet store into the Phase B repository model. Non-destructive:

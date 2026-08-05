@@ -4,8 +4,6 @@ import { test } from "node:test";
 import type { MemoryPacket } from "./kernel.js";
 import {
   kageType,
-  lintOkfConcept,
-  okfConceptFileName,
   okfConceptToPacket,
   okfType,
   packetToOkfConcept,
@@ -25,7 +23,7 @@ function samplePacket(): MemoryPacket {
     status: "approved",
     confidence: 0.7,
     tags: ["okf", "standard", "memory"],
-    paths: ["mcp/okf.ts", "OKF_STANDARD.md"],
+    paths: ["mcp/okf.ts", "mcp/kernel.ts"],
     stack: ["typescript", "okf"],
     source_refs: [{ kind: "explicit_capture", captured_at: "2026-06-29T00:00:00.000Z" }],
     context: {
@@ -61,8 +59,6 @@ test("rendered concept is OKF-conformant (frontmatter + non-empty type)", () => 
   assert.match(concept, /\nresource: "mcp\/okf\.ts"\n/, "first path becomes the OKF resource anchor");
   assert.match(concept, /\nx-kage-status: "approved"\n/, "carries trust extension fields");
   assert.match(concept, /# Citations/, "renders citations section");
-  const lint = lintOkfConcept(concept);
-  assert.ok(lint.ok, `conformant: ${lint.errors.join("; ")}`);
 });
 
 test("type vocabulary maps both directions", () => {
@@ -105,7 +101,5 @@ test("foreign OKF concept (no kage-state block) imports best-effort", () => {
   assert.equal(packet!.source_refs[0].kind, "okf_import");
 });
 
-test("concept filename is a stable .md slug", () => {
-  const name = okfConceptFileName(samplePacket());
-  assert.match(name, /^adopt-okf-as-the-standard-its-format-not-platform-[0-9a-f]{8}\.md$/);
-});
+// "concept filename is a stable .md slug" was deleted with okfConceptFileName: that slug only
+// named files inside an exported OKF bundle, and bundles are no longer produced.

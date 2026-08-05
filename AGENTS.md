@@ -2,10 +2,12 @@
 # Kage Memory Harness
 
 This repo uses Kage as an automatic memory harness for coding agents. Memory is
-stored and exchanged in Open Knowledge Format (OKF) — markdown concept files under
-`.agent_memory/packets/`, with Kage's verification metadata in OKF-legal `x-kage-*`
-frontmatter, readable by any OKF consumer. Use `kage okf migrate|lint|import` to
-work with OKF bundles.
+stored as markdown concept files with Kage's verification metadata in OKF-legal
+`x-kage-*` frontmatter, readable by any Open Knowledge Format consumer — packets
+under `.agent_memory/packets/`, cards in the shadow store outside this repo. The OKF
+BUNDLE tooling (`kage okf migrate|lint|import`) was removed: no third-party consumer
+ever read a bundle, and the lossless round trip doubled every packet. The format
+stays; the export/reimport machinery does not.
 
 ## Automatic Recall
 
