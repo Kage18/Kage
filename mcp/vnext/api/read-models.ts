@@ -12,7 +12,7 @@ import { isInjectableTrustState } from "../repo-model/types.js";
 import type { ClaimRecord, EntityKind, EntityRecord, ReviewItemRecord } from "../repo-model/types.js";
 import type { TransformationReceipt } from "../protocol/index.js";
 import { calculateCohort } from "../gateway/cohort-metrics.js";
-import type { TeamMetricsReport } from "../workspace/metrics.js";
+import type { TeamMetricsReport } from "../sync/team-metrics.js";
 import type {
   AttentionDto,
   ClaimDto,
@@ -457,7 +457,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       exactness: exactCost === null ? "unavailable" : "exact",
       formula:
         "Σ(net_input_cost_delta_usd) over tasks whose measurement_quality is exact; partial/unavailable tasks contribute nothing",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: null,
     },
@@ -468,7 +468,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       unit: "percent",
       exactness: report.measurement_quality.coverage === null ? "unavailable" : "structural",
       formula: "exactly_measured_tasks ÷ total_tasks × 100",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: null,
     },
@@ -479,7 +479,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       unit: "milliseconds",
       exactness: report.latency.p95_ms === null ? "unavailable" : "exact",
       formula: "p95(latency_ms) over tasks that measured latency",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: null,
     },
@@ -490,7 +490,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       unit: "milliseconds",
       exactness: timeTrend === null ? "unavailable" : "cohort",
       formula: "p50(verified_at − started_at) over the team cohort; withheld below the privacy minimum",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: withheld(timeTrend),
     },
@@ -502,7 +502,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       exactness: report.verified_reuse.rate === null ? "unavailable" : "cohort",
       formula:
         "tasks_reusing_verified_knowledge ÷ tasks_whose_install_measures_reuse × 100; a task that does not measure reuse is excluded, never counted as zero reuse",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: withheld(report.verified_reuse.rate),
     },
@@ -514,7 +514,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       exactness: report.review_burden.decisions_per_task === null ? "unavailable" : "cohort",
       formula:
         "review_decisions ÷ tasks_whose_install_attributes_decisions; an unattributed task is excluded, never counted as zero burden",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: withheld(report.review_burden.decisions_per_task),
     },
@@ -525,7 +525,7 @@ export function teamMetricsPanel(report: TeamMetricsReport): TeamMetricsPanelDto
       unit: "percent",
       exactness: report.failed_open.rate === null ? "unavailable" : "cohort",
       formula: "tasks_delivered_failed_open ÷ total_tasks × 100",
-      source_path: "mcp/vnext/workspace/metrics.ts",
+      source_path: "mcp/vnext/sync/team-metrics.ts",
       trend: null,
       suppression_reason: withheld(report.failed_open.rate),
     },

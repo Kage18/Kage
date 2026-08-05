@@ -7,12 +7,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { teamMetricsPanel } from "./read-models.js";
-import { MINIMUM_COHORT, buildTeamMetrics } from "../workspace/metrics.js";
+import { MINIMUM_COHORT, buildTeamMetrics } from "../sync/team-metrics.js";
 import {
   exactReceipt,
   fixtureTaskOutcome,
   partialReceipt,
-} from "../workspace/test-support/metrics-fixtures.js";
+} from "../sync/team-metrics-fixtures.js";
 
 function metric(panel: ReturnType<typeof teamMetricsPanel>, id: string) {
   const found = panel.metrics.find((candidate) => candidate.id === id);

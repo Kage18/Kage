@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { isInjectableTrustState } from "../repo-model/types.js";
 // The metrics allow-list lives with the workspace's task-outcome type so exactly one definition of
 // "what a task outcome may contain" governs both the local outbox and the workspace ingest.
-import { validateTaskOutcome } from "../workspace/metrics.js";
+import { validateTaskOutcome } from "../sync/team-metrics.js";
 import type {
   AggregatedMeasurementRecord,
   EvidenceRecord,

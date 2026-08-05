@@ -1,4 +1,15 @@
-// Privacy-safe team metrics for the Kage workspace.
+// Privacy-safe team metrics — the CONTRACT and the pure computation, nothing that talks to a database.
+//
+// This was `vnext/workspace/metrics.ts`, the one file in a 9,197-line workspace-server directory that
+// live code actually imported. The rest of that directory — a Postgres server, auth, billing,
+// enterprise export, GitHub webhooks — was reachable from exactly one place: its own gate test. It was
+// deleted rather than maintained (see GTM.md: seats cannot be enforced without the server the free tier
+// forbids, so the model that needed all this is dead).
+//
+// What survives here is the part with no server in it: what a task outcome is ALLOWED to contain, the
+// validator that enforces it, and buildTeamMetrics, which turns records into a report. The storage
+// half (storeTaskOutcomes / loadTaskOutcomes / loadTeamMetrics) went with the database.
+//
 //
 // WHAT A TEAM METRIC IS ALLOWED TO BE. A task outcome record carries identifiers (task/repository/
 // agent ids), classes (mode, measurement quality, delivery status, verification outcome), counts, and
@@ -27,9 +38,6 @@
 //
 // TENANCY. Every query in this module filters by the SERVER-resolved `principal.workspace_id` and the
 // principal's repository allow-list. There is no code path that accepts a client-supplied tenant.
-import type { Db } from "./db.js";
-import type { Principal } from "./auth/types.js";
-import { scopeAllows } from "./auth/authorize.js";
 import { interpolatedPercentile } from "../gateway/cohort-metrics.js";
 
 /**
@@ -528,143 +536,4 @@ function rowToRecord(row: TaskOutcomeRow): TeamTaskOutcomeRecord {
     ended_at: isoOrNull(row.ended_at),
     verified_at: isoOrNull(row.verified_at),
   };
-}
-
-/**
- * Land aggregated task outcomes for ONE tenant + repository. Idempotent by (workspace, repository,
- * task): a replayed sync re-states the same row rather than duplicating it, which is what keeps a
- * retried batch from inflating a team's task count. The tenant is always the caller's server-resolved
- * workspace id — this function never reads a workspace id out of a record.
- */
-export async function storeTaskOutcomes(
-  db: Db,
-  workspaceId: string,
-  repositoryId: string,
-  records: readonly TeamTaskOutcomeRecord[],
-): Promise<number> {
-  let written = 0;
-  for (const record of records) {
-    // Full structural validation, not just the key allow-list: an out-of-vocabulary class or a
-    // free-text "identifier" is refused HERE, so it can never become a Postgres error at the HTTP layer.
-    validateTaskOutcome(record);
-    await db.query(
-      `INSERT INTO workspace_task_outcomes(
-         workspace_id, repository_id, task_id, actor_id, agent_surface, mode, measurement_quality,
-         net_input_cost_delta_usd, kage_processing_cost_usd, latency_ms, delivery_status,
-         verification_outcome, knowledge_ids_reused, review_decisions, started_at, ended_at, verified_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-       ON CONFLICT (workspace_id, repository_id, task_id) DO UPDATE SET
-         actor_id = EXCLUDED.actor_id,
-         agent_surface = EXCLUDED.agent_surface,
-         mode = EXCLUDED.mode,
-         measurement_quality = EXCLUDED.measurement_quality,
-         net_input_cost_delta_usd = EXCLUDED.net_input_cost_delta_usd,
-         kage_processing_cost_usd = EXCLUDED.kage_processing_cost_usd,
-         latency_ms = EXCLUDED.latency_ms,
-         delivery_status = EXCLUDED.delivery_status,
-         verification_outcome = EXCLUDED.verification_outcome,
-         knowledge_ids_reused = EXCLUDED.knowledge_ids_reused,
-         review_decisions = EXCLUDED.review_decisions,
-         started_at = EXCLUDED.started_at,
-         ended_at = EXCLUDED.ended_at,
-         verified_at = EXCLUDED.verified_at`,
-      [
-        workspaceId,
-        repositoryId,
-        record.task_id,
-        record.actor_id,
-        record.agent_surface,
-        record.mode,
-        record.measurement_quality,
-        record.net_input_cost_delta_usd,
-        record.kage_processing_cost_usd,
-        record.latency_ms,
-        record.delivery_status,
-        record.verification_outcome,
-        record.knowledge_ids_reused,
-        record.review_decisions,
-        record.started_at,
-        record.ended_at,
-        record.verified_at,
-      ],
-    );
-    written += 1;
-  }
-  return written;
-}
-
-export interface MetricsWindow {
-  repository_id?: string;
-  since?: string;
-  until?: string;
-}
-
-/** A window bound that is not an ISO-8601 instant. The HTTP layer maps this to 400, never 500. */
-export class MetricsWindowError extends Error {
-  constructor(public readonly field: "since" | "until") {
-    super(`metrics window "${field}" must be an ISO-8601 instant`);
-    this.name = "MetricsWindowError";
-  }
-}
-
-function assertWindowBound(field: "since" | "until", value: string | undefined): void {
-  if (value === undefined) return;
-  if (!TIMESTAMP_PATTERN.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw new MetricsWindowError(field);
-  }
-}
-
-/**
- * Read the task outcomes a principal is permitted to see. The workspace filter is ALWAYS the
- * server-resolved `principal.workspace_id`, and the repository filter is ALWAYS the principal's
- * allow-list — a cross-tenant, cross-repository or out-of-scope read returns zero rows from the QUERY,
- * not from a caller's discipline.
- */
-export async function loadTaskOutcomes(
-  db: Db,
-  principal: Principal,
-  window: MetricsWindow = {},
-): Promise<TeamTaskOutcomeRecord[]> {
-  if (window.repository_id && !scopeAllows(principal, window.repository_id)) return [];
-  // A window bound the caller supplied is validated HERE. Passing an unparseable string to Postgres
-  // raises "invalid input syntax for type timestamp with time zone", which the HTTP layer can only turn
-  // into a 500 — an authenticated principal must not be able to fault the service with a query string.
-  assertWindowBound("since", window.since);
-  assertWindowBound("until", window.until);
-  const params: unknown[] = [principal.workspace_id];
-  let sql = `SELECT task_id, repository_id, actor_id, agent_surface, mode, measurement_quality,
-                    net_input_cost_delta_usd, kage_processing_cost_usd, latency_ms, delivery_status,
-                    verification_outcome, knowledge_ids_reused, review_decisions,
-                    started_at, ended_at, verified_at
-               FROM workspace_task_outcomes
-              WHERE workspace_id = $1`;
-  if (principal.repository_ids !== "all") {
-    if (principal.repository_ids.length === 0) return [];
-    params.push(principal.repository_ids);
-    sql += ` AND repository_id = ANY($${params.length})`;
-  }
-  if (window.repository_id) {
-    params.push(window.repository_id);
-    sql += ` AND repository_id = $${params.length}`;
-  }
-  if (window.since) {
-    params.push(window.since);
-    sql += ` AND started_at >= $${params.length}`;
-  }
-  if (window.until) {
-    params.push(window.until);
-    sql += ` AND started_at < $${params.length}`;
-  }
-  sql += " ORDER BY started_at, task_id";
-  const { rows } = await db.query<TaskOutcomeRow>(sql, params);
-  return rows.map(rowToRecord);
-}
-
-/** Load the permitted task outcomes and roll them into a team report. */
-export async function loadTeamMetrics(
-  db: Db,
-  principal: Principal,
-  window: MetricsWindow = {},
-): Promise<TeamMetricsReport> {
-  return buildTeamMetrics(await loadTaskOutcomes(db, principal, window));
 }

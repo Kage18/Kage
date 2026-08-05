@@ -14,7 +14,7 @@ import { Outbox, buildSyncBatch } from "./outbox.js";
 import { drainOutbox, type DrainSummary, type SyncTransport } from "./client.js";
 import { teamMetricsPanel } from "../api/read-models.js";
 import type { TeamMetricsPanelDto } from "../api/types.js";
-import type { TeamMetricsReport } from "../workspace/metrics.js";
+import type { TeamMetricsReport } from "../sync/team-metrics.js";
 import type { LocalModelSnapshot } from "./types.js";
 
 /** How long a fetched team panel may be presented as current. */

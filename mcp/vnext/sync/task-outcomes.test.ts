@@ -20,7 +20,7 @@ import { openVnextDatabase } from "../storage/database.js";
 import { migrateLocalDatabase } from "../storage/migrations.js";
 import { DeliveryStore, type StoredContextDelivery } from "../storage/delivery-store.js";
 import { ReceiptStore } from "../storage/receipt-store.js";
-import { validateTaskOutcome } from "../workspace/metrics.js";
+import { validateTaskOutcome } from "../sync/team-metrics.js";
 import { collectTaskOutcomes } from "./task-outcomes.js";
 
 const T0 = "2026-07-20T00:00:00.000Z";

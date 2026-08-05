@@ -13,7 +13,7 @@ import type {
   RelationRecord,
 } from "../repo-model/types.js";
 // Type-only: erased at build time, so the local outbox never pulls the workspace's Postgres modules in.
-import type { TeamTaskOutcomeRecord } from "../workspace/metrics.js";
+import type { TeamTaskOutcomeRecord } from "../sync/team-metrics.js";
 
 export type {
   ClaimRecord,
@@ -57,7 +57,7 @@ export interface AggregatedMeasurementRecord {
  * type has no field that could hold a prompt, tool payload, model response, or claim body, and
  * `assertNoRawPayload` rejects any extra key at the wire boundary.
  */
-export type { TeamTaskOutcomeRecord } from "../workspace/metrics.js";
+export type { TeamTaskOutcomeRecord } from "../sync/team-metrics.js";
 
 export interface SyncBatch {
   protocol_version: 1;

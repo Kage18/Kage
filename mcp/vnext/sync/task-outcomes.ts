@@ -21,13 +21,13 @@ import type { TransformationReceipt } from "../protocol/index.js";
 import type { LocalDatabase } from "../storage/database.js";
 import type { StoredContextDelivery } from "../storage/delivery-store.js";
 import { calculateCohort } from "../gateway/cohort-metrics.js";
-import { validateTaskOutcome } from "../workspace/metrics.js";
+import { validateTaskOutcome } from "../sync/team-metrics.js";
 import type {
   MeasurementQualityClass,
   TaskDeliveryStatus,
   TaskMode,
   TeamTaskOutcomeRecord,
-} from "../workspace/metrics.js";
+} from "../sync/team-metrics.js";
 
 /** The stores a collection reads. Narrow interfaces so a caller can pass its live stores directly. */
 export interface TaskOutcomeSources {

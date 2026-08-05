@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { httpTransport } from "./client.js";
 import { createWorkspaceLink, type WorkspaceLink } from "./workspace-link.js";
-import type { TeamMetricsReport } from "../workspace/metrics.js";
+import type { TeamMetricsReport } from "../sync/team-metrics.js";
 
 export interface WorkspaceConnection {
   base_url: string;

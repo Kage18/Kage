@@ -1,7 +1,7 @@
 // A NUL byte in a source file makes that file read as BINARY to grep, ripgrep, git diff and
 // every code-review tool — they return nothing for any search over it, silently.
 //
-// This was not hypothetical. `mcp/vnext/workspace/server.ts` carried one literal NUL for
+// This was not hypothetical. `mcp/vnext/workspace/server.ts` (since deleted) carried one literal NUL for
 // months as the fallback in the workspace-deletion confirmation gate. While investigating an
 // unrelated question I searched that file repeatedly, got zero hits for terms I could see with
 // my own eyes in the editor, and concluded the code did not exist. The instruments that would

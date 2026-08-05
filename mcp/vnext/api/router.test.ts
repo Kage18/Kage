@@ -9,8 +9,8 @@ import type { ClaimRecord, EvidenceRecord } from "../repo-model/types.js";
 import { startLocalRuntime, type LocalRuntimeHandle } from "../runtime/server.js";
 import { teamMetricsPanel } from "./read-models.js";
 import type { TeamMetricsPanelDto } from "./types.js";
-import { buildTeamMetrics } from "../workspace/metrics.js";
-import { fixtureTaskOutcome } from "../workspace/test-support/metrics-fixtures.js";
+import { buildTeamMetrics } from "../sync/team-metrics.js";
+import { fixtureTaskOutcome } from "../sync/team-metrics-fixtures.js";
 import { Outbox } from "../sync/outbox.js";
 
 const NOW = "2026-07-13T00:00:00.000Z";
