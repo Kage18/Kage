@@ -35,6 +35,7 @@
     "test:phase-e": "npm run build && node --test dist/vnext/phase-e-gate.test.js",
     "test:dogfood": "node --test ../evals/agent-trajectory/replay.test.mjs",
     "legacy:scan": "npm run build && node dist/cli.js legacy scan",
+    "bench:staleness": "node ../benchmarks/staleness-kage.mjs",
     "bench:injection": "node ../benchmarks/injection-relevance-kage.mjs",
     "bench:capture": "node ../benchmarks/capture-quality-kage.mjs",
     "bench:reuse": "node ../benchmarks/reuse-value-kage.mjs",

@@ -1,15 +1,21 @@
-# Kage External Benchmarks
+# Kage Benchmarks
 
-> Not to be confused with [`benchmark/`](../benchmark/README.md) (singular) —
-> this directory (plural) is the JS **retrieval/scale/staleness** suite
-> (LongMemEval, MemoryArena, LoCoMo, synthetic scale). `benchmark/` is the
-> Python **task-performance ablation** on real SWE-bench Verified tasks
-> (memory on vs. off). Different substrate, different question.
+> Not to be confused with [`benchmark/`](../benchmark/README.md) (singular) — the Python
+> task-performance ablation on real SWE-bench Verified tasks. Different substrate,
+> different question. (Two directories one letter apart is a naming mistake worth fixing.)
 
-This directory contains reproducible external benchmark harnesses for Kage.
+Reproducible harnesses. Kage should not claim a memory win unless a benchmark proves it, and
+these are explicit about what is measured and what is not.
 
-Kage should not claim a generic memory win unless the benchmark proves it. These
-scripts are intentionally explicit about what is measured and what is not.
+**Start here — `npm run bench:staleness`.** *Memory Correctness Under Change* is the one that
+measures this product's actual claim. Every other memory tool measures recall: can you find what
+you stored. This measures what happens **after the code moves** — it seeds memories citing real
+files, mutates the repo, and reports the **stale-served rate**. On a 12-memory run with 8 made
+stale, Kage served 0 of them and suppressed all 8; a store with no code-grounding has no mechanism
+to notice and serves 100%. No API key, no external dataset.
+
+It sat here for months wired to no script and cited by no document, which is a fair summary of how
+this repo accumulated weight: the strongest evidence was the hardest to find.
 
 ## LongMemEval-S Retrieval
 
@@ -91,61 +97,6 @@ Metrics reported:
 - NDCG@5, NDCG@10, NDCG@20
 - median and p95 retrieval latency
 - per-question-type breakdown
-
-## Synthetic Memory Scale
-
-`scale-kage-memory.mjs` measures how Kage behaves as repo-memory packets grow.
-It generates approved repo-local memory packets, runs `kage refresh` through the
-kernel, and measures index time, top-k hit rate, recall latency, and context
-reduction versus loading all memory text.
-
-```sh
-node benchmarks/scale-kage-memory.mjs \
-  --sizes 240,1000,5000 \
-  --top-k 10 \
-  --out /tmp/kage-scale-memory.json
-```
-
-This is a scale sanity check, not an academic benchmark. Use it to verify that
-Kage keeps cross-session recall useful as shared repo memory grows.
-
-Current local run on 2026-05-17:
-
-| Packets | Refresh/index | Hit rate @10 | Median recall | p95 recall | Context reduction |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 240 | 372 ms | 100.00% | 13 ms | 17 ms | 95.79% |
-| 1,000 | 1,041 ms | 100.00% | 55 ms | 61 ms | 98.99% |
-| 5,000 | 7,804 ms | 100.00% | 334 ms | 361 ms | 99.80% |
-
-## Coding Memory Quality
-
-`coding-memory-quality.mjs` is a Kage-native coding-memory quality
-benchmark for repo learnings. It creates a labeled 240-packet corpus with
-durable runbooks, decisions, bug causes, code explanations, and hard-negative
-adjacent notes, then measures whether Kage retrieves the labeled packets for 20
-coding-agent queries.
-
-```sh
-node benchmarks/coding-memory-quality.mjs \
-  --out /tmp/kage-coding-memory-quality.json
-```
-
-The same benchmark ships in the Kage package:
-
-```sh
-kage benchmark --memory-quality --json
-```
-
-The packaged benchmark also includes a source-diversity probe: one noisy
-observed session competes with one independent observed session. Passing means
-Kage includes the independent source in the top 4 instead of letting one
-session occupy every result.
-
-Current local run on 2026-05-18:
-
-| Packets | Queries | Refresh/index | R@5 | R@10 | NDCG@10 | MRR | Median recall | Context reduction | Source diversity |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 240 | 20 | 530 ms | 100.00% | 100.00% | 1.0000 | 1.0000 | 21 ms | 95.36% | pass, 2 sources in top 4 |
 
 ## Injection Relevance
 
@@ -420,36 +371,6 @@ why `kage up` keeps **audit** as the default and `lossy_compression` defaults fa
 the compression path is real and safe, but its value is payload-dependent and is
 measured, never estimated. This benchmark is NOT part of `npm test`.
 
-## Memory Scale
-
-`scale-kage-memory.mjs` measures whether Kage can search a growing repo-memory
-corpus without loading every packet into context.
-
-```sh
-node benchmarks/scale-kage-memory.mjs \
-  --sizes 240,1000,5000 \
-  --out /tmp/kage-scale-memory.json
-```
-
-The same benchmark ships in the Kage package:
-
-```sh
-kage benchmark --scale --sizes 240,1000,5000 --json
-```
-
-It reports per-size refresh time, top-k hit rate, median/p95 recall latency,
-all-memory tokens, returned context tokens, and context reduction.
-
-This is not a replacement for LongMemEval-S. Use it as a regression harness for
-coding-agent memory behavior: exact repo lore, bug causes, runbooks, decisions,
-and hard-negative adjacent context.
-
-When launched with `kage viewer --project .`, Kage writes
-`.agent_memory/reports/benchmark.json` with a proof ledger for the dashboard.
-Each ledger item includes the measured metric, pass threshold, exact command,
-and next action so benchmark claims stay reproducible instead of becoming README
-copy.
-
 ## Dense Embedding Slice
 
 The LongMemEval-S harness can run optional dense local embeddings. A 50-question
@@ -462,146 +383,18 @@ slice on 2026-05-18 matched strict recall quality but was slower:
 
 Treat dense embeddings as an opt-in semantic layer, not the default headline.
 
-## SWE-bench Context Retrieval
+## Removed harnesses
 
-`swebench-kage-context.mjs` is a context-retrieval harness, not an official
-SWE-bench patch evaluation. It checks whether Kage retrieves files touched by
-gold patches for SWE-bench instances.
+`locomo-kage-retrieval`, `memoryarena-kage-answer`, `memoryarena-kage-context`,
+`swebench-kage-context`, `code-graph-headtohead`, `coding-memory-quality` and
+`scale-kage-memory` were deleted. They measured conversational-retrieval quality against
+external datasets that are not in this repo, needed API keys or quota, and were wired to no npm
+script and cited by no document.
 
-## MemoryArena Context Recall
+Their FINDINGS are not lost: the results — including the negative ones, like LOCOMO exposing that
+recall could serve contradictions, and the MemoryArena run blocked on API quota — are recorded as
+packets in `.agent_memory/`, and the harnesses themselves remain in git history. What was deleted
+is the scaffolding, not the evidence.
 
-`memoryarena-kage-context.mjs` is the first MemoryArena adapter for Kage. It is
-not the official MemoryArena task-solving score. The harness imports prior
-subtask answers as repo-local Kage memory, asks the next subtask as a recall
-query, and measures whether Kage retrieves those earlier task memories. This
-tests Kage's cross-session context handoff behavior without using an answer
-model.
-
-Download a MemoryArena split from Hugging Face:
-
-```sh
-mkdir -p /tmp/kage-memoryarena
-curl -L \
-  https://huggingface.co/datasets/ZexueHe/memoryarena/resolve/main/progressive_search/data.jsonl \
-  -o /tmp/kage-memoryarena/progressive_search.jsonl
-```
-
-Run the Kage context-recall harness:
-
-```sh
-node benchmarks/memoryarena-kage-context.mjs \
-  --dataset /tmp/kage-memoryarena/progressive_search.jsonl \
-  --suite progressive_search \
-  --limit 25 \
-  --top-k 10 \
-  --out /tmp/kage-memoryarena-progressive-search.json
-```
-
-Report this as "MemoryArena context recall", not MemoryArena answer accuracy.
-Official MemoryArena scoring needs an agent/LLM to use the recalled context and
-produce answers in the environment loop.
-
-Run the official-style answer-accuracy harness when an LLM key is available:
-
-```sh
-OPENAI_API_KEY=... node benchmarks/memoryarena-kage-answer.mjs \
-  --dataset /tmp/kage-memoryarena/progressive_search.jsonl \
-  --suite progressive_search \
-  --limit 221 \
-  --top-k 10 \
-  --provider openai \
-  --model gpt-4.1-mini \
-  --out /tmp/kage-memoryarena-progressive-search-answer.json
-```
-
-The answer harness runs Kage recall, asks the model to answer each subtask, then
-compares the model output to the gold answer. After each subtask it saves the
-gold answer as memory to model environment feedback available to later
-sessions. `--provider gold` exists only to smoke-test the scorer and must never
-be reported as model accuracy.
-
-Current full context-recall run on 2026-05-18:
-
-| Split | Tasks | Average dependency coverage | Final-step dependency coverage | Median recall |
-| --- | ---: | ---: | ---: | ---: |
-| bundled_shopping | 150 | 100.00% | 100.00% | 1 ms |
-| progressive_search | 221 | 98.75% | 98.96% | 1 ms |
-| group_travel_planner | 270 | 100.00% | 100.00% | 2 ms |
-| formal_reasoning_math | 40 | 94.99% | 85.28% | 3 ms |
-| formal_reasoning_phys | 20 | 95.43% | 98.38% | 1 ms |
-| **Total / weighted** | **701** | **99.19%** | **98.79%** | - |
-
-The weakest split is `formal_reasoning_math`, where several final subtasks need
-more symbolic/rationale-aware recall than lexical prior-answer retrieval gives
-today.
-
-Official SWE-bench resolved-rate evaluation still requires generated patches and
-the official SWE-bench Docker/cloud harness.
-
-```sh
-node benchmarks/swebench-kage-context.mjs \
-  --dataset /path/to/swebench_lite.jsonl \
-  --repo-cache /path/to/repo/checkouts \
-  --limit 20 \
-  --top-k 10 \
-  --out /tmp/kage-swebench-context.json
-```
-
-## Code-graph head-to-head (`code-graph-headtohead.mjs`)
-
-Kage's code graph against any other code knowledge graph, on the SAME repository. Written
-because "our graph is better than theirs" was asserted repeatedly in this project and never
-measured once.
-
-```bash
-node benchmarks/code-graph-headtohead.mjs            # this repo
-node benchmarks/code-graph-headtohead.mjs --json     # machine-readable
-```
-
-The metrics are deliberately chosen to be able to make Kage look bad:
-
-| Metric | Why this one |
-|---|---|
-| `parse_coverage` | Fraction of source files parsed by a REAL parser rather than the metadata fallback. A metadata-only file is a filename in a list, not a node in a graph — counting it is how an index gets to call itself a graph. |
-| `edge_resolution` | Fraction of call edges whose **both** ends resolve to a known symbol. An edge with a dangling end cannot be traversed, so it cannot answer "what calls this". Reported separately from raw edge count, because raw counts reward emitting junk. |
-| `symbols_per_file` | Extraction density on files that actually parsed. |
-| `build_seconds` | Cold build wall clock. |
-
-**A competitor's numbers are never estimated or read off its documentation.** If the tool is
-not installed, its column reads `not measured` and names the command that would produce it —
-the same rule the product's own Proof page follows.
-
-### Result, run 2026-07-28 against Graphify 0.9.29
-
-Both tools cold, on an identical copy of this repo (400 source files, no `node_modules`,
-no `.git`, no build output). Graphify indexed via `graphify update . --no-cluster` — its
-deterministic AST path, no LLM, which is the like-for-like comparison against Kage's code graph.
-
-| | Kage | Graphify 0.9.29 |
-|---|---|---|
-| build (cold) | **1.3s** | 9.0s |
-| symbols / nodes | **14,176** | 6,079 |
-| files covered | 386 | **400** |
-| coverage | 96.5% | **100.0%** |
-| all edges | 14,706 | **16,012** |
-| **edge resolution** | **97.2%** | 93.9% |
-| relation kinds | 2 (calls, imports) | **14** |
-
-**Where Kage wins:** 7× faster cold, 2.3× the symbols, and a higher share of edges that can
-actually be traversed.
-
-**Where Graphify wins, and it genuinely does:** full file coverage where Kage misses 14 files,
-and a far richer relation vocabulary — `contains`, `imports_from`, `method`, `indirect_call`,
-`re_exports` and more, against Kage's two. A graph that only knows "calls" and "imports" cannot
-answer questions those other edges answer.
-
-**A caveat that cuts against us.** Graphify's resolution rate moves with which relation kinds
-you count: 93.9% over all edges, but 97.7% over a narrow calls/imports/references subset —
-slightly ABOVE Kage's 97.2%. The all-edges figure is reported as the headline because it is
-definition-free and cannot be tuned by choosing a flattering subset.
-
-**Two measurement bugs found and fixed while producing this**, both of which would have
-flattered Kage: the first run compared Kage WARM (0.4s) against Graphify cold (9.0s), and the
-first parser guessed `edges`/`from`/`to` for Graphify's schema — it is `links`/`source`/`target`
-— silently reporting ZERO for a tool that had just logged 6,079 nodes. A zero from a wrong key
-name is indistinguishable from a zero from a bad tool.
+The benchmarks that stayed are the ones that measure THIS product's claim: correctness under
+change, not retrieval on a synthetic corpus.

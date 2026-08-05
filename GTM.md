@@ -110,6 +110,22 @@ resulting code, never which mutation it got.
 **Verdict: SUPPORTED.** A judge can forward the changes that matter without burying anyone in the
 ones that do not. That is the capability Watch sells, and it is now measured rather than assumed.
 
+### The third measurement, which was already in the repo and wired to nothing
+
+`benchmarks/staleness-kage.mjs` — *"Memory Correctness Under Change: the benchmark the agent-memory
+field is missing"* — seeds memories citing real files, mutates the repo, and measures the
+**stale-served rate**. It is reproducible and needs no API key. It existed for months, referenced by
+no npm script and no document, which is its own comment on how this codebase got heavy.
+
+    seeded 12 · deleted 4 · changed 4 · 8 now stale
+    Kage:      served 4, stale-served 0  →  0% stale-served, 8 suppressed
+    baseline: 100% stale-served
+
+It is now `npm run bench:staleness`. This is the most direct evidence for the product's central
+claim — that the distinguishing act is REFUSAL, not retrieval — and it should be the first number in
+any launch thread. Note the baseline is architectural reasoning, not a measurement of competitors: a
+store with no code-grounding has no mechanism to notice a cited file changed. State it that way.
+
 **Three harness bugs had to be fixed first, and every one would have produced a wrong business
 decision.** They are recorded because the lesson generalises: *an eval that has not been debugged
 is measuring the instrument.*
