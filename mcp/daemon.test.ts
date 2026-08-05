@@ -52,11 +52,17 @@ test("index passes are both debounced and rate-floored", () => {
   assert.ok(MIN_INDEX_INTERVAL_MS > INDEX_DEBOUNCE_MS, "a floor below the debounce bounds nothing");
 });
 
-test("viewer bare routes redirect to index while preserving query params", () => {
-  assert.equal(viewerRedirectLocation("/", "", "?graph=/repo/.agent_memory/graph/graph.json"), "/viewer/index.html?graph=/repo/.agent_memory/graph/graph.json");
-  assert.equal(viewerRedirectLocation("/viewer", "", "?graph=/repo/.agent_memory/graph/graph.json"), "/viewer/index.html?graph=/repo/.agent_memory/graph/graph.json");
-  assert.equal(viewerRedirectLocation("/viewer/", "?graph=/repo/.agent_memory/graph/graph.json", "?fallback=true"), "/viewer/index.html?graph=/repo/.agent_memory/graph/graph.json");
-  assert.equal(viewerRedirectLocation("/viewer/graph.html", "?graph=/repo/.agent_memory/graph/graph.json", "?fallback=true"), null);
+// The legacy dashboard bundle is gone; there is one UI now. These assert that removing it did not
+// 404 anyone: the origin and every old /viewer/ path land on the portal, query string intact.
+test("the origin and retired viewer paths redirect to the portal, preserving query params", () => {
+  assert.equal(viewerRedirectLocation("/", "", "?graph=/repo/.agent_memory/graph/graph.json"), "/app/?graph=/repo/.agent_memory/graph/graph.json");
+  assert.equal(viewerRedirectLocation("/viewer", "", "?graph=/repo/.agent_memory/graph/graph.json"), "/app/?graph=/repo/.agent_memory/graph/graph.json");
+  assert.equal(viewerRedirectLocation("/viewer/", "?graph=/repo/.agent_memory/graph/graph.json", "?fallback=true"), "/app/?graph=/repo/.agent_memory/graph/graph.json");
+  // A deep legacy link must redirect too, not 404 — the bundle it pointed at no longer exists.
+  assert.equal(viewerRedirectLocation("/viewer/graph.html", "?g=1", "?fallback=true"), "/app/?g=1");
+  // Anything that was never the viewer is still not a redirect target.
+  assert.equal(viewerRedirectLocation("/v2/cards", "", ""), null);
+  assert.equal(viewerRedirectLocation("/app/", "", ""), null);
 });
 
 test("viewer static responses include browser security headers", () => {
@@ -99,60 +105,23 @@ test("bare /app redirects to /app/ so relative asset URLs resolve", () => {
   assert.equal(appRedirectLocation("/viewer"), null);
 });
 
-test("viewer url serves every report param including the value ledger", () => {
+test("the report paths are still computed, and the viewer URL is just the portal", () => {
   const reports = viewerReportPaths("/repo");
   assert.equal(reports.value, "/repo/.agent_memory/reports/value.json");
   assert.equal(reports.trust, "/repo/.agent_memory/reports/trust.json");
   assert.equal(reports.metrics, "/repo/.agent_memory/metrics.json");
-  // kage cloud link surfaces via this report; absent link.json means the sidebar Team
-  // link just stays hidden, so this MUST be in the same report set as everything else.
   assert.equal(reports.teamLink, "/repo/.agent_memory/reports/team-link.json");
 
-  const url = viewerUrl("127.0.0.1", 3113, "/repo");
-  assert.match(url, /^http:\/\/127\.0\.0\.1:3113\/viewer\/index\.html\?/);
-  assert.match(url, /graph=%2Frepo%2F\.agent_memory%2Fgraph%2Fgraph\.json/);
-  assert.match(url, /value=%2Frepo%2F\.agent_memory%2Freports%2Fvalue\.json/);
-  assert.match(url, /teamLink=%2Frepo%2F\.agent_memory%2Freports%2Fteam-link\.json/);
-  assert.match(url, /&view=code$/);
+  // The URL used to carry ~30 of these as query parameters, which meant printing thirty absolute
+  // paths from the operator's home directory into a link the portal never read. The portal gets
+  // its data from the daemon's routes; the address bar is not a data channel.
+  const url = viewerUrl("127.0.0.1", 3113);
+  assert.equal(url, "http://127.0.0.1:3113/app/");
+  assert.doesNotMatch(url, /agent_memory/, "no filesystem paths in the URL");
 });
 
-test("viewer dashboard is a CSP-safe multi-section page backed by external console.js", () => {
-  const indexHtml = readFileSync(join(process.cwd(), "viewer", "index.html"), "utf8");
-  const consoleJs = readFileSync(join(process.cwd(), "viewer", "console.js"), "utf8");
-  // CSP forbids inline scripts: the page must load console.js externally.
-  assert.match(indexHtml, /<script src="\.\/console\.js/);
-  assert.doesNotMatch(indexHtml, /<script>\s*\n\s*\(function/);
-  // Multi-section dashboard: sidebar nav drives separate Dashboard / Gains / Overview / Graph / Memory / Insights sections.
-  // Dashboard is the landing tab (overview first); Gains stays one click away.
-  assert.match(indexHtml, /data-section="dashboard" aria-current="true"/);
-  assert.match(indexHtml, /data-section="gains"/);
-  assert.match(indexHtml, /id="gainsHero"/);
-  assert.match(indexHtml, /id="gainsTimeline"/);
-  assert.match(indexHtml, /data-section="overview"/);
-  assert.match(indexHtml, /data-section="graph"/);
-  assert.match(indexHtml, /data-section="memory"/);
-  assert.match(indexHtml, /data-section="activity"/);
-  assert.match(indexHtml, /data-section="insights"/);
-  // Core surfaces: trust hero, stat tiles, the memory<->code graph canvas, the memory list, and insight charts.
-  assert.match(indexHtml, /id="hero"/);
-  assert.match(indexHtml, /id="tiles"/);
-  assert.match(indexHtml, /id="graph"/);
-  assert.match(indexHtml, /id="list"/);
-  assert.match(indexHtml, /id="donut"/);
-  // console.js reads the lifecycle/trust/suppressed/metrics reports and renders the graph + insights.
-  assert.match(consoleJs, /lifecycle/);
-  assert.match(consoleJs, /trust_score/);
-  assert.match(consoleJs, /suppressed/);
-  assert.match(consoleJs, /metrics/);
-  assert.match(consoleJs, /buildGraph/);
-  assert.match(consoleJs, /renderActivity/);
-  assert.match(indexHtml, /id="activityFeed"/);
-  // The Gains tab reads the value ledger and renders the savings receipt + timeline.
-  assert.match(consoleJs, /renderGains/);
-  assert.match(consoleJs, /value\.json/);
-  assert.match(consoleJs, /recall_served/);
-  assert.match(consoleJs, /stale_withheld/);
-});
+// The legacy dashboard bundle it asserted on (mcp/viewer/index.html + console.js) was deleted;
+// its test goes with it rather than being left asserting a page nobody serves.
 
 test("viewer benchmark report combines local gates with coding memory retrieval proof", () => {
   const project = mkdtempSync(join(tmpdir(), "kage-viewer-benchmark-"));

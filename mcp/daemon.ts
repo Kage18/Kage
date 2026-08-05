@@ -183,9 +183,20 @@ export function viewerStaticHeaders(filePath: string): Record<string, string> {
   };
 }
 
+/**
+ * The origin, and the retired `/viewer/` paths, all land on the portal.
+ *
+ * There used to be TWO dashboards here: the original `mcp/viewer/` bundle served at `/`, and the
+ * portal SPA at `/app/`. The comment below the route said the legacy one "stays alive during the
+ * compatibility release" — that release shipped, and keeping it meant a second bundle, a second
+ * visual language, and the word "viewer" naming both a command and a dead page. `kage viewer` is
+ * now unambiguously the command that serves the portal in a browser.
+ *
+ * Old `/viewer/...` links redirect rather than 404, so a bookmark or a printed URL still arrives.
+ */
 export function viewerRedirectLocation(pathname: string, search: string, fallbackSearch: string): string | null {
-  if (pathname !== "/" && pathname !== "/viewer" && pathname !== "/viewer/") return null;
-  return `/viewer/index.html${search || fallbackSearch}`;
+  if (pathname !== "/" && pathname !== "/viewer" && !pathname.startsWith("/viewer/")) return null;
+  return `/app/${search || fallbackSearch}`;
 }
 
 // Bare `/app` (no trailing slash) redirects to `/app/` so the SPA's relative asset URLs resolve against
@@ -589,11 +600,17 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
   return { handleRequest, broadcast, clientCount: () => clients.size, close };
 }
 
-export function viewerUrl(host: string, port: number, projectRoot: string): string {
-  const query = Object.entries(viewerReportPaths(projectRoot))
-    .map(([name, path]) => `${name}=${encodeURIComponent(path)}`)
-    .join("&");
-  return `http://${host}:${port}/viewer/index.html?${query}&view=code`;
+/**
+ * Where `kage viewer` tells you to point a browser.
+ *
+ * This used to append ~30 query parameters naming every report file on disk, because the legacy
+ * dashboard was a static page that fetched whatever paths the URL handed it. The portal reads its
+ * data from the daemon's own routes, so those parameters were thirty absolute paths of the
+ * operator's home directory pasted into a URL that ignored all of them. The report paths are still
+ * computed — the daemon serves those files — just not smuggled through the address bar.
+ */
+export function viewerUrl(host: string, port: number): string {
+  return `http://${host}:${port}/app/`;
 }
 
 export function viewerBenchmarkReport(projectDir: string): ViewerBenchmarkReport {
@@ -1237,7 +1254,6 @@ export function generateViewerReports(projectDir: string): void {
 export async function startViewer(projectDir: string, options: { host?: string; port?: number } = {}): Promise<ViewerStatus> {
   const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? DEFAULT_VIEWER_PORT;
-  const viewerDir = resolve(__dirname, "..", "viewer");
   const threeDir = resolve(__dirname, "..", "node_modules", "three");
   // The built knowledge portal (Phase C), bundled in the package at dist/app and falling back to the
   // monorepo build for a source checkout. Served under /app/ with the same CSP. See resolvePortalDir.
@@ -1247,7 +1263,7 @@ export async function startViewer(projectDir: string, options: { host?: string; 
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
 
 
-  const url = viewerUrl(host, port, projectRoot);
+  const url = viewerUrl(host, port);
   const liveFeed = startLiveFeed(projectRoot);
 
   const server = createServer((req, res) => {
@@ -1405,8 +1421,6 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       res.writeHead(302, { location: redirectLocation });
       res.end();
       return;
-    } else if (requestUrl.pathname.startsWith("/viewer/")) {
-      filePath = join(viewerDir, normalize(requestUrl.pathname.replace(/^\/viewer\//, "")));
     } else if (requestUrl.pathname.startsWith("/vendor/three/")) {
       filePath = join(threeDir, normalize(requestUrl.pathname.replace(/^\/vendor\/three\//, "")));
     } else {
@@ -1415,7 +1429,7 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       if (!isInside(projectRoot, filePath)) filePath = null;
     }
 
-    if (!filePath || (!isInside(viewerDir, filePath) && !isInside(projectRoot, filePath) && !isInside(threeDir, filePath)) || !existsSync(filePath)) {
+    if (!filePath || (!isInside(projectRoot, filePath) && !isInside(threeDir, filePath)) || !existsSync(filePath)) {
       json(res, 404, { ok: false, error: "not_found" });
       return;
     }
