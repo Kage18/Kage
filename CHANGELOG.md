@@ -1,5 +1,62 @@
 # Changelog
 
+## v4.1.0 — a daemon that stopped eating a core, and a business model that got measured
+
+**UPGRADE FIRST, THEN READ.** A daemon started before this version re-indexes in a
+loop. Installing the package does not stop one already running:
+
+```bash
+kage down && kage up
+```
+
+**The daemon was burning a full core.** Its file watcher excluded three
+`.agent_memory` subdirectories but not the two its own re-index writes to —
+`structural/` and `daemon/status.json`, whose `last_indexed_at` differs on every
+tick. Each write re-triggered the watcher that caused it, so a daemon on a
+repository nobody was touching re-indexed forever, spawning 8 worker isolates and
+rewriting ~41 MB per pass. Measured on the dev machine before the fix: **119 hours
+of CPU over 5 days elapsed, 91% of one core.** After: **0.01s of CPU across 75 idle
+seconds.** Present since 2026-05-02, so every user of the documented `kage up` had
+it. `shouldTriggerReindex` now excludes `.agent_memory` wholesale — a deny-list of
+individual output directories is what broke, because each new output directory
+silently re-arms the loop — plus a 30s floor so a future mistake is slow, not
+infinite.
+
+**Cards are conformant Open Knowledge Format again.** `type`, `title`,
+`description`, `resource`, `tags`, `timestamp`, the claim as the body, and every
+Kage field namespaced `x-kage-*`. No new dependency: JSON is a subset of YAML 1.2,
+verified against a real YAML parser. Pre-OKF card files still load, so stores
+converge without a migration step. The point is not standards-compliance: the
+product promises memory you can read without our binary, and a bespoke format made
+that false.
+
+**`kage license`** — offline, fail-open entitlement. Ed25519, no server, no
+phone-home. Expired, corrupt, forged, or absent all degrade to the free tier and
+never throw, and the expiry message says so explicitly: *every card you have is
+untouched and still recalled*. A lapsed licence keeps working 14 more days.
+
+**The install no longer commits your memory.** The `.gitignore` it writes used to
+un-ignore `.agent_memory/packets/`, so a fresh install staged a generated repo-map
+packet into your tree — falsifying the one promise the README leads with. The CLI
+also claimed "one fenced block and nothing else" while staging four files; it now
+states the true, stronger thing: *no memory is written into this repo*.
+
+**A port conflict prints a sentence, not a stack trace.**
+
+**Verification you can run.** `npm run verify:package` packs, installs into a
+directory with no repo present, and asserts the CLI, the Librarian modules, the
+store location, the fenced block, and that your real `~/.kage` was untouched — 14
+checks against the tarball a customer downloads. `scripts/prune-stale-dist.mjs`
+runs as `prebuild`, so a deleted source can no longer leave a compiled test behind.
+
+**Two benchmarks that answer business questions.** `citation-half-life.mjs` measures
+whether cited code actually rots (across execa/got/axios/express: hard staleness
+0–29% a year, but *drift* — the symbol still resolving under changed code — 54–100%).
+`drift-triage.mjs` measures whether a model can tell an invalidating change from a
+cosmetic one (0 false alarms in 9, 8 of 10 caught). Both are runnable, both state
+their sample size, and both were allowed to return an answer that killed a plan —
+one of them did. See `GTM.md`.
+
 ## v4.0.0 — the collaborative repository memory, measured end-to-end
 
 The five-phase vNext program plus the goal-expansion workstreams, every claim
