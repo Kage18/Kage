@@ -2,22 +2,14 @@
 
 <img src="docs/assets/kage-banner.svg" alt="Kage" width="150%">
 
-
-### Verified memory for coding agents — a Google OKF bundle, kept true to your code
-
-<img src="docs/assets/kage-viewer-walkthrough.gif" alt="kage viewer: a team's captured decisions, runbooks, and bug fixes mapped to the code they're grounded in, with trust and savings — a live walkthrough" width="760">
-
-<sub>`kage viewer`: your team's decisions, runbooks, and bug fixes (purple), kept in the repo and linked to the code they are about (blue).</sub>
-
-The decisions behind your codebase, the runbook for a tricky deploy, the root cause of a
-gnarly bug: this knowledge lives in people's heads and scrolls past in chat, then gets lost.
-**Kage** captures it as your coding agents work, keeps it as a
-[Google Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-bundle in your repo — plain Markdown concept files any OKF consumer can read — and shares it
-with your whole team through git. The next session, yours or a teammate's, starts already
-knowing it. Every memory is also checked against the actual code, so what gets shared stays
-true. **OKF standardizes the store; Kage is the verification layer Google left out.** No
-account, no database, no API key.
+In June 2026 Google shipped [**OKF (Open Knowledge Format)**](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf):
+a standard for keeping knowledge as plain Markdown concept files in your repo, vendor-neutral, no
+lock-in. It standardizes the store and stops there. Verification, freshness, and staleness are
+explicitly *out of scope* for v0.1. **Kage is the framework that maintains it.** It captures what
+your coding agents learn as a conformant OKF bundle in git, then keeps every concept honest against
+your real code: a memory whose cited code no longer exists is rejected at write time, and one that
+drifts when the code changes is flagged and withheld until it is re-verified. Deterministic, no LLM
+on the verdict path. No account, no database, no API key.
 
 ```bash
 npx -y @kage-core/kage-graph-mcp install
@@ -27,25 +19,19 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
   <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf"><img src="https://img.shields.io/badge/built%20on-Open%20Knowledge%20Format-41ff8f" alt="Built on Google Open Knowledge Format"></a>
 </p>
-
-<img src="docs/kage-stats.svg" alt="Kage in numbers: 96% R@5 recall, 0% stale served, 18% faster than grep, 0 dependencies, 340+ tests passing, 15 agents supported" width="820">
 
 <p>
   <a href="https://kage-core.com/">Website</a> ·
   <a href="https://kage-core.com/guide.html">Docs</a> ·
   <a href="https://kage-core.com/viewer/">Live viewer</a> ·
-  <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp">npm</a> ·
-  <a href="https://kage-core.com/demo.html"><b>Book a demo</b></a>
+  <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp">npm</a>
 </p>
 
 **Works with** Claude Code · Codex · Cursor · Windsurf · Gemini CLI · Cline · Goose ·
 Roo Code · Kilo Code · OpenCode · Aider · Claude Desktop · Copilot · OpenClaw · Hermes · any MCP client
-
-🌐 English · [简体中文](translations/README.zh-CN.md) · [日本語](translations/README.ja.md) · [한국어](translations/README.ko.md) · [Español](translations/README.es.md) · [Português (Brasil)](translations/README.pt-BR.md) · [Français](translations/README.fr.md) · [Deutsch](translations/README.de.md) · [हिन्दी](translations/README.hi.md)
 
 </div>
 
@@ -62,6 +48,53 @@ npx -y @kage-core/kage-graph-mcp install
 It creates `.agent_memory/`, builds the code graph, writes the `AGENTS.md` / `CLAUDE.md`
 policy that tells agents to use Kage, auto-detects and wires your agents, and configures
 `.gitignore` + the packet merge driver. Requires Node.js 18+. No account, no API key.
+
+**Ambient proxy — the zero-wiring path.** Two steps: install once, then `kage up` once. Every
+Anthropic-API agent (Claude Code, Codex CLI, aider, ...) flows through Kage with no per-agent
+config at all.
+
+```bash
+npx -y @kage-core/kage-graph-mcp install   # once per repo
+kage up                                    # audit-only config + runtime + background proxy (once)
+```
+
+Then, in **any** terminal:
+
+```bash
+kage run -- claude       # or: export ANTHROPIC_BASE_URL=http://localhost:8788
+kage down                # stop the background proxy + runtime when you are done
+```
+
+`kage up` starts the proxy **in the background**: it keeps serving after you close the terminal,
+so new terminals only ever need `kage run`. Re-running `kage up` verifies the recorded proxy is
+really alive (pid + port, never the state file alone), reuses it, and exits 0; a stale record —
+say after a crash — is cleaned up and started fresh. To be honest about the one gap: a machine
+reboot stops the proxy (there is no system service), so run `kage up` once afterwards. Prefer the
+old behavior? `kage up --foreground` keeps the proxy in your terminal, where Ctrl-C stops it.
+
+**Auto-attach — so you do not have to remember `kage run`.** `kage setup claude-code --project . --write`
+records `env.ANTHROPIC_BASE_URL` in that repo's `.claude/settings.local.json`, so an agent **launched
+from that directory** routes through Kage on its own. Your existing settings are preserved and any
+value you set yourself wins.
+
+Two honest limits, both of which `kage status` now reports instead of leaving you to guess:
+
+- It is **per-directory**. The agent reads the settings of the directory it was launched in, so
+  wiring a git worktree while running the agent from the parent repo attaches nothing.
+- Some hosts **resolve their own endpoint and never read project settings** — notably the Claude
+  **desktop app**, which sets `ANTHROPIC_BASE_URL` itself. No amount of restarting attaches it. For
+  proxy coverage there, launch the agent from a terminal (`claude`) or use `kage run -- <agent>`.
+  Memory still reaches the desktop app through the Claude hooks; it is the proxy's byte-level
+  measurement and injection you lose.
+
+```
+attach:  NOT attached in THIS session — settings are wired to http://localhost:8788, but the
+         running host (claude-desktop) resolved https://api.anthropic.com itself ...
+```
+
+`kage up` defaults to **audit mode**: measurement only — your bytes are forwarded unchanged and
+nothing is injected. When you want verified memory injected into prompts, run
+`kage up --mode assist`. See what it measured with `kage status --project .`.
 
 **Or just ask your agent to set it up.** Paste this into Claude Code, Cursor, or any coding agent:
 
@@ -126,15 +159,52 @@ conformant and opens in any OKF consumer, including Google's own visualizer.
 
 ## How it works
 
-Once installed, it's ambient. You don't run anything by hand:
+Once installed, it's ambient — hooks watch the session; you don't run anything by hand.
+Four paths make up the loop:
 
-1. **Recall before acting.** At the start of a task (and the moment the agent opens a file),
-   Kage surfaces the relevant verified memory for it. Stale or deleted memory is left out.
-2. **Capture as it works.** Durable learnings become packets. A memory that cites a file
-   which doesn't exist is rejected on the spot, so hallucinations never enter storage.
-3. **Stay honest as the code moves.** When a diff changes code that a memory cites, that
-   memory is flagged at commit/PR time (`kage pr check`) and withheld from recall until it's
-   re-verified or replaced, so knowledge can't quietly rot.
+```mermaid
+flowchart LR
+    A[session events<br/>prompts · edits · commands] -->|prose observations,<br/>signal-scored| B[distill on session end<br/>gate ≥0.4 · dedupe]
+    B -->|drafts born pending| C{grounded + fail→pass<br/>evidence?}
+    C -->|yes| D[approved packet<br/>OKF markdown in git]
+    C -->|no| E[pending inbox<br/>kage review]
+    D --> F[fingerprints:<br/>file hash + code-symbol anchors]
+    F -->|cited code changed| G[stale: withheld<br/>until evidence reverify]
+    D -->|ranked recall| H[injected context:<br/>session start · each prompt · each file open]
+    D -->|git push/pull| I[teammate's next session]
+```
+
+**Write path (capture).** Hooks turn the session into observations — your prompts, each
+edit as prose (the edit content is where fixes and conventions live), each command with its
+output. Every observation is signal-scored; machine noise hard-rejects to zero. On session
+end, `distill --auto` gates (≥0.4), dedupes, and writes drafts **born pending** — never
+approved by default. One thing lifts a draft to trusted recall automatically: it cites real
+files, duplicates nothing, contradicts nothing, and the session contains a **fail→pass
+command pair** — mechanical evidence a real fix happened. Explicit `kage_learn` writes are
+refused if the cited files don't exist; secrets are scanned out.
+
+**Trust path (verification).** Every packet fingerprints what it cites: a whole-file hash
+plus anchors on the code symbols the memory actually names (real identifiers only, never
+prose words). Cited code edited → soft-stale, withheld from recall until re-verified **with
+evidence** (`kage reverify --evidence` — a bare re-stamp on changed code is refused). Cited
+file deleted → hard-stale, withheld, garbage-collected after 30 days. "Verified" is earned
+by an actual check, never granted at birth.
+
+**Read path (recall).** Three injection moments: session start (policy + "previously…"
+digest), every prompt (top verified packets + graph facts for what you asked), and every
+file the agent opens or edits (packets citing that file). Ranking trusts evidence — lexical
+match first, a damped graph prior that can't outvote a title match, recency decay so aged
+change-logs sink, and code-graph identifier grounding so a query for `someFunction` finds
+the packet citing the file that defines it. Stale memory never appears; every serve
+increments a real usage counter.
+
+**Team path (git).** The store is plain OKF markdown committed in the repo — a teammate's
+clone *is* the memory transfer. A merge driver auto-resolves packet collisions (newest
+content wins), and `kage pr check` gates merges: if your diff breaks what a memory claims,
+you hear about it before the PR lands.
+
+One principle threads through all four: **every number Kage shows is a count of a
+reproducible check — never an estimate.**
 
 Watch it happen in the **local dashboard** (`kage viewer`): packets, the memory↔code graph,
 trust gates, and live events stream in as the agent works. Wrap anything in
@@ -160,7 +230,7 @@ repo and verifies it, so it stays your team's and stays true as the code changes
 
 ## Features
 
-- **Truth Report.** `kage scan` reads any repo in ~60s and surfaces its highest-risk
+- **Truth Report.** `kage scan` reads any repo in seconds and surfaces its highest-risk
   knowledge gaps: undocumented hot files, untested hot paths, complexity hotspots,
   unresolved code debt, and bus-factor-1 files, plus duplicate implementations, dead
   exports, and doc lies when they exist. Every finding cited to `file:line`. Zero setup,
@@ -179,28 +249,32 @@ repo and verifies it, so it stays your team's and stays true as the code changes
 
 ## Benchmarks
 
-- **18% faster than grep at equal correctness** on real code-navigation tasks (N=3 suite,
-  same agent/model; reproduce with `kage benchmark --project . --compare`).
 - **LongMemEval-S retrieval:** 96.17% R@5 / 98.72% R@10, zero dependencies.
 - **Memory Correctness Under Change:** 0% stale-served (memory whose code was deleted or
   changed is withheld), vs 100% for capture-everything stores.
-- **Trust benchmark:** 100/100, covering hallucination rejection, stale exclusion, and live
-  grounding (`kage benchmark --trust --project .`).
 
-Methodology, commands, and caveats: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Methodology, commands, and caveats: [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Every number
+above has a reproducible harness in this repo; claims without one don't ship.
 
 ## Daily commands
 
 ```bash
-kage recall "how do I run tests" --project .
+kage context "how do I run tests" --project .
 kage verify --project .        # check citations against current code
 kage pr check --project .      # stale-catch + graph freshness gate
-kage gains --project .         # what Kage saved you
+kage report team --project .   # the lead-facing "is this helping?" report
 kage viewer --project .        # local dashboard
 kage okf migrate --project .   # render memory as a Google OKF bundle
 ```
 
-Full CLI and MCP reference: [docs](https://kage-core.com/guide.html).
+**📖 [Using Kage](docs/USING_KAGE.md)** — the practical manual: setup, the proxy, daily use, team
+workflow, troubleshooting, and a command map by intent. Kage has ~136 commands; you need about six.
+
+**⚙️ [How it works](docs/HOW_IT_WORKS.md)** — the mechanism end to end: the two delivery channels,
+proxy modes and cache safety, what gets stored and what gets refused, the trust model, and how
+recall ranks.
+
+Full CLI reference: `kage help --all`. Web docs: [kage-core.com/guide.html](https://kage-core.com/guide.html).
 
 ## Storage
 

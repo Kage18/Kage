@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import {
@@ -42,14 +43,25 @@ import {
   qualityReport,
   benchmarkTrust,
   kageSuppressedMemory,
+  readTeamLink,
   queryGraph,
   recall,
   recordFeedback,
   setupDoctor,
   setContextSlot,
   validateProject,
+  readPacketFromDisk,
+  listWorkItems,
+  claimWorkItem,
+  transitionWorkStage,
   type ObservationEvent,
+  type WorkStage,
 } from "./kernel.js";
+import {
+  startLocalRuntime,
+  type LocalRuntimeHandle,
+  type LocalRuntimeOptions,
+} from "./vnext/runtime/server.js";
 
 export interface DaemonStatus {
   ok: boolean;
@@ -90,6 +102,23 @@ export interface ViewerStatus {
   host: string;
   port: number;
   url: string;
+}
+
+export type VnextRuntimeStarter = (options: LocalRuntimeOptions) => Promise<LocalRuntimeHandle>;
+
+export async function startOptionalVnextRuntime(
+  projectDir: string,
+  enabled: boolean,
+  starter: VnextRuntimeStarter = startLocalRuntime,
+  report: (message: string) => void = (message) => console.error(message),
+): Promise<LocalRuntimeHandle | null> {
+  if (!enabled) return null;
+  try {
+    return await starter({ projectDir, mode: "audit" });
+  } catch (error) {
+    report(`Kage vNext runtime failed to start; legacy daemon remains available: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 export type ViewerBenchmarkReport = BenchmarkReport & {
@@ -159,6 +188,164 @@ export function viewerRedirectLocation(pathname: string, search: string, fallbac
   return `/viewer/index.html${search || fallbackSearch}`;
 }
 
+// Bare `/app` (no trailing slash) redirects to `/app/` so the SPA's relative asset URLs resolve against
+// the right base. Every other path is not a redirect target here.
+export function appRedirectLocation(pathname: string): string | null {
+  return pathname === "/app" ? "/app/" : null;
+}
+
+// Where the built knowledge portal lives, resolved from the daemon's own directory (`__dirname`,
+// i.e. mcp/dist at runtime). It ships INSIDE the npm package at `dist/app` (bundled from
+// platform/web/dist at publish time); a source checkout has no such bundle and serves straight from
+// the monorepo build two levels up. Prefer whichever actually has an index.html; when neither does
+// (portal never built), return the bundled path so `/app/` yields a coherent portal_not_built 404
+// rather than pointing at a stray directory.
+//
+// This exists because 4.0.0 shipped only the monorepo path — which does not exist in an installed
+// package — so `/app/` 404'd for every npm user while working from source. Bundled-first fixes that.
+export function resolvePortalDir(baseDir: string): string {
+  const bundled = resolve(baseDir, "app");
+  const monorepo = resolve(baseDir, "..", "..", "platform", "web", "dist");
+  for (const candidate of [bundled, monorepo]) {
+    if (existsSync(join(candidate, "index.html"))) return candidate;
+  }
+  return bundled;
+}
+
+// Resolve an `/app/...` request to a file inside the built knowledge portal (`platform/web/dist`).
+// Returns null for non-`/app` paths (the caller handles those). Real built assets resolve to
+// themselves; the entry and any client-side deep link (a path with no matching file) fall back to
+// `index.html` so History-API routing works; path traversal outside the build dir is refused by
+// falling back to the entry rather than escaping. The daemon serves the result under the SAME strict
+// `viewerStaticHeaders` CSP as the legacy viewer — self-hosted assets only.
+export function resolveAppAsset(appDir: string, pathname: string): string | null {
+  if (pathname !== "/app" && pathname !== "/app/" && !pathname.startsWith("/app/")) return null;
+  const index = join(appDir, "index.html");
+  if (pathname === "/app" || pathname === "/app/") return index;
+  const candidate = join(appDir, normalize(pathname.replace(/^\/app\//, "")));
+  if (!isInside(appDir, candidate)) return index; // never escape the build dir
+  if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  return index; // SPA fallback for client-side routes
+}
+
+// Fill an overview response's repository branch/commit from the working tree's live git position when
+// the model left them null. Best-effort and silent: not a git repo, or git unavailable, leaves them
+// null (the header then shows "—") — never throws, never blocks the response.
+function patchGitIdentity(body: unknown, projectDir: string): void {
+  if (!body || typeof body !== "object") return;
+  const repo = (body as { repository?: { branch: string | null; commit: string | null } }).repository;
+  if (!repo) return;
+  const git = (args: string[]): string | null => {
+    try {
+      const out = execFileSync("git", args, {
+        cwd: projectDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return out || null;
+    } catch {
+      return null;
+    }
+  };
+  if (!repo.branch) repo.branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!repo.commit) repo.commit = git(["rev-parse", "--short", "HEAD"]);
+}
+
+// Serve one knowledge-portal read route (`/v2/...`) from the LOCAL repository model, same-origin with
+// the SPA. Fire-and-forget from the request handler: it ALWAYS ends `res` and never rejects, so a bad
+// route or a Node build without node:sqlite degrades to an honest JSON error instead of crashing the
+// viewer. The model is opened per request and closed immediately — it never takes the runtime's writer
+// lock (openRepositoryModel just opens + migrates), so these reads run alongside a live `kage up`
+// runtime under SQLite WAL without contending for it.
+// The write half of the portal API, mounted on the SAME server that serves the SPA — for exactly the
+// reason the read half is (a same-origin fetch reaches the origin it was served from, and nowhere
+// else). Symmetrical with servePortalApi: always ends `res`, never rejects, opens and closes the model
+// per request so it never holds the runtime's writer lock.
+export async function servePortalMutation(
+  projectDir: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const { handleReviewMutation, REVIEW_ACTIONS } = await import("./vnext/api/review.js");
+    type ReviewAction = Parameters<typeof handleReviewMutation>[2];
+    // POST /v2/review-items/:id/:action — the one authorized write surface.
+    const match = /^\/v2\/review-items\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    const reviewItemId = match ? decodeURIComponent(match[1]) : "";
+    const action = match ? match[2] : "";
+    if (!match || !reviewItemId || reviewItemId.includes("/") || !REVIEW_ACTIONS.has(action)) {
+      json(res, 404, { ok: false, error: "not_found" });
+      return;
+    }
+    const body = await readBody(req);
+    const { openRepositoryModel } = await import("./vnext/migration/model-store.js");
+    const opened = openRepositoryModel(projectDir);
+    try {
+      const result = handleReviewMutation(opened.model, reviewItemId, action as ReviewAction, body);
+      json(res, result.status, result.body);
+    } finally {
+      opened.close();
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error && /sqlite/i.test(error.message)
+        ? "the knowledge portal API needs a Node build with node:sqlite; memory, recall, and the legacy viewer still work"
+        : "the repository model could not be opened for writing";
+    json(res, 503, { ok: false, error: message });
+  }
+}
+
+export async function servePortalApi(projectDir: string, url: URL, res: ServerResponse): Promise<void> {
+  try {
+    const { matchPortalRoute, handlePortalRoute } = await import("./vnext/api/router.js");
+    const route = matchPortalRoute(url.pathname);
+    if (!route) {
+      // A `/v2/...` path the portal API does not define — an honest 404, not a stray file.
+      json(res, 404, { ok: false, error: "not_found" });
+      return;
+    }
+    const { openRepositoryModel } = await import("./vnext/migration/model-store.js");
+    const { ReceiptStore } = await import("./vnext/storage/receipt-store.js");
+    const opened = openRepositoryModel(projectDir);
+    try {
+      const receiptStore = new ReceiptStore(opened.model.database);
+      // teamReport is assembled ONLY for its own route (it reads the packet store + value ledger); every
+      // other route ignores it. team is null — a local viewer has no workspace panel, and the honesty
+      // contract renders that as "no workspace connected", never a zeroed panel.
+      let teamReport: unknown;
+      if (route.kind === "team_report") {
+        try {
+          const { teamValueReport } = await import("./kernel.js");
+          teamReport = teamValueReport(projectDir);
+        } catch {
+          teamReport = null;
+        }
+      }
+      const result = handlePortalRoute(
+        route,
+        { model: opened.model, receiptStore, team: null, teamReport },
+        url.searchParams,
+      );
+      // The repository model does not track the working-tree's live git position, so the overview
+      // header shows "unknown" for a local checkout. Fill branch/commit from git HERE (a daemon-level
+      // concern, kept out of the pure read-model) so the reader knows exactly what they are looking at.
+      if (route.kind === "overview") patchGitIdentity(result.body, projectDir);
+      json(res, result.status, result.body);
+    } finally {
+      opened.close();
+    }
+  } catch (error) {
+    // Most often a Node build without node:sqlite (the model store needs it). Say so plainly; the SPA
+    // renders this string under "Repository knowledge is unavailable", so it must read as a real cause.
+    const message =
+      error instanceof Error && /sqlite/i.test(error.message)
+        ? "the knowledge portal API needs a Node build with node:sqlite (Node 22.5+); memory, recall, and the legacy viewer still work"
+        : "the repository model could not be opened";
+    json(res, 503, { ok: false, error: "portal_api_unavailable", message });
+  }
+}
+
 // Every report file the dashboard reads, keyed by its query-string param name.
 // `value` points at the cumulative value ledger written by recall — it is read-only
 // here and must never be regenerated, or the all-time savings history is lost.
@@ -197,15 +384,22 @@ export function viewerReportPaths(projectRoot: string): Record<string, string> {
     trust: join(reportsDir, "trust.json"),
     suppressed: join(reportsDir, "suppressed.json"),
     value: join(reportsDir, "value.json"),
+    teamLink: join(reportsDir, "team-link.json"),
   };
 }
 
 export interface LiveFeedEvent {
-  type: "packet_written" | "packet_updated" | "value_event";
+  type: "packet_written" | "packet_updated" | "value_event" | "work_changed";
   title?: string;
   path?: string;
   event?: Record<string, unknown>;
   ts: string;
+  // Work-item enrichment (Phase 1): lets a poller watching this feed tell a
+  // claimable proposal apart from any other packet write without a second
+  // file read per event.
+  packet_type?: string;
+  stage?: WorkStage;
+  claimed_by?: string | null;
 }
 
 export interface LiveFeed {
@@ -218,13 +412,29 @@ export interface LiveFeed {
 const LIVE_FEED_HEARTBEAT_MS = 25_000;
 const LIVE_FEED_DEBOUNCE_MS = 100;
 
-function readPacketTitle(filePath: string): string | undefined {
+// Was a raw JSON.parse — silently failed on every packet once .md became the
+// primary packet store, falling back to the raw filename as a fake title. Now
+// format-aware (readPacketFromDisk dispatches .md OKF vs legacy .json), and
+// enriched with the work-item fields the SSE feed needs (see LiveFeedEvent).
+function readPacketSummary(filePath: string): { title?: string; packet_type?: string; stage?: WorkStage; claimed_by?: string | null } {
   try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as { title?: unknown };
-    return typeof parsed.title === "string" && parsed.title ? parsed.title : undefined;
+    const packet = readPacketFromDisk(filePath);
+    return { title: packet.title || undefined, packet_type: packet.type, stage: packet.stage, claimed_by: packet.claimed_by };
   } catch {
-    return undefined;
+    return {};
   }
+}
+
+// Extracts the packet id from a `/kage/work-items/<id><suffix>` path (e.g.
+// suffix "/claim" or "/transition"). Packet ids contain colons
+// (repo:...:proposal:...), so the caller must percent-encode them and this
+// must decode — exported for a direct unit test since it's the one genuinely
+// fiddly bit of the new work-item routes.
+export function extractWorkItemId(pathname: string, suffix: string): string | null {
+  const prefix = "/kage/work-items/";
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return null;
+  const id = pathname.slice(prefix.length, pathname.length - suffix.length);
+  return id ? decodeURIComponent(id) : null;
 }
 
 // Streams memory/value activity to viewer clients over SSE (GET /kage/events).
@@ -235,6 +445,8 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
   const debounceMs = options.debounceMs ?? LIVE_FEED_DEBOUNCE_MS;
   const packetsDir = join(projectRoot, ".agent_memory", "packets");
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
+  const workDir = join(projectRoot, ".agent_memory", "work");
+  const commandLogPath = join(workDir, "commands.jsonl");
   const valuePath = join(reportsDir, "value.json");
   const clients = new Set<ServerResponse>();
   const watchers: FSWatcher[] = [];
@@ -258,6 +470,18 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
   }
   let seenValueEvents = readValueEvents().length;
 
+  // Commands are the only decisions in the whole state machine, so they are the only thing
+  // that can change the board without a commit. Track how many we have already announced so a
+  // rewritten or appended log never replays events a client has seen.
+  function readCommandLines(): string[] {
+    try {
+      return readFileSync(commandLogPath, "utf8").split("\n").filter((line) => line.trim());
+    } catch {
+      return [];
+    }
+  }
+  let seenCommands = readCommandLines().length;
+
   function broadcast(event: LiveFeedEvent): void {
     const payload = `data: ${JSON.stringify(event)}\n\n`;
     for (const res of clients) res.write(payload);
@@ -271,12 +495,35 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }
     const isNew = !knownPackets.has(name);
     knownPackets.add(name);
+    const summary = readPacketSummary(filePath);
     broadcast({
       type: isNew ? "packet_written" : "packet_updated",
-      title: readPacketTitle(filePath) ?? name.replace(/\.json$/, ""),
+      title: summary.title ?? name.replace(/\.(md|json)$/, ""),
       path: join(".agent_memory", "packets", name),
       ts: new Date().toISOString(),
+      packet_type: summary.packet_type,
+      stage: summary.stage,
+      claimed_by: summary.claimed_by,
     });
+  }
+
+  function onCommandChange(): void {
+    const lines = readCommandLines();
+    if (lines.length < seenCommands) seenCommands = 0; // log rewritten
+    for (const line of lines.slice(seenCommands)) {
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      broadcast({
+        // The event names the decision rather than just saying "something changed", so a
+        // client can show WHO did WHAT without refetching the board to find out.
+        type: "work_changed",
+        title: typeof parsed.kind === "string" ? String(parsed.kind) : "work",
+        path: join(".agent_memory", "work", "commands.jsonl"),
+        event: parsed,
+        ts: typeof parsed.ts === "string" ? parsed.ts : new Date().toISOString(),
+      });
+    }
+    seenCommands = lines.length;
   }
 
   function onValueChange(): void {
@@ -317,6 +564,15 @@ export function startLiveFeed(projectRoot: string, options: { heartbeatMs?: numb
     }));
   } catch {
     // packets dir missing: no packet events
+  }
+  try {
+    mkdirSync(workDir, { recursive: true });
+    watchers.push(watch(workDir, (_event, filename) => {
+      if (String(filename ?? "") !== "commands.jsonl") return;
+      debounced("commands", onCommandChange);
+    }));
+  } catch {
+    // work dir missing: no work events
   }
   try {
     mkdirSync(reportsDir, { recursive: true });
@@ -603,6 +859,9 @@ export function daemonDoctor(projectDir: string): DaemonDoctor {
       `GET http://${DEFAULT_HOST}:${restPort}/kage/quality`,
       `GET http://${DEFAULT_HOST}:${restPort}/kage/inbox`,
       `GET http://${DEFAULT_HOST}:${restPort}/kage/benchmark`,
+      `GET http://${DEFAULT_HOST}:${restPort}/kage/work-items`,
+      `POST http://${DEFAULT_HOST}:${restPort}/kage/work-items/:id/claim`,
+      `POST http://${DEFAULT_HOST}:${restPort}/kage/work-items/:id/transition`,
     ],
     warnings,
   };
@@ -619,7 +878,7 @@ export function stopDaemon(projectDir: string): { ok: boolean; message: string; 
   }
 }
 
-export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number } = {}): Promise<void> {
+export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number; vnext?: boolean } = {}): Promise<void> {
   const host = options.host ?? DEFAULT_HOST;
   const restPort = options.restPort ?? DEFAULT_REST_PORT;
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
@@ -741,6 +1000,40 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
         json(res, 200, memoryInbox(projectDir));
         return;
       }
+      if (req.method === "GET" && url.pathname === "/kage/work-items") {
+        const stage = url.searchParams.get("stage") as WorkStage | null;
+        json(res, 200, listWorkItems(projectDir, { stage: stage ?? undefined }));
+        return;
+      }
+      const claimId = req.method === "POST" ? extractWorkItemId(url.pathname, "/claim") : null;
+      if (claimId) {
+        const body = await readBody(req);
+        const result = claimWorkItem(projectDir, claimId, String(body.actor ?? ""));
+        json(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      const transitionId = req.method === "POST" ? extractWorkItemId(url.pathname, "/transition") : null;
+      if (transitionId) {
+        const body = await readBody(req);
+        const toStage = String(body.to_stage ?? "");
+        // Same load-bearing restriction as kage_transition_work_item (MCP) and
+        // `kage stage` (CLI): the terminal in_review -> done transition is never
+        // reachable through a scriptable API, only kage gate review (TTY) or
+        // kage cloud approve (token-authenticated).
+        if (toStage === "done") {
+          json(res, 403, {
+            ok: false,
+            errors: ["The daemon REST API never performs the terminal in_review -> done transition. Use kage gate review or kage cloud approve."],
+          });
+          return;
+        }
+        const result = transitionWorkStage(projectDir, transitionId, toStage as WorkStage, {
+          actor: String(body.actor ?? ""),
+          evidence: body.evidence == null ? undefined : String(body.evidence),
+        });
+        json(res, result.ok ? 200 : 400, result);
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/kage/benchmark") {
         json(res, 200, url.searchParams.get("mode") === "memory_quality" ? benchmarkCodingMemoryQuality() : benchmarkProject(projectDir));
         return;
@@ -833,6 +1126,7 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   });
 
   await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
+  const vnextRuntime = await startOptionalVnextRuntime(projectDir, options.vnext === true);
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
   console.log(`Project: ${projectDir}`);
   console.log(`Status: ${status.status_path}`);
@@ -840,22 +1134,28 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   process.on("SIGTERM", () => {
     if (watcher) watcher.close();
     if (refreshTimer) clearTimeout(refreshTimer);
-    server.close(() => process.exit(0));
+    void (async () => {
+      try {
+        await vnextRuntime?.close();
+      } finally {
+        server.close(() => process.exit(0));
+      }
+    })();
   });
 }
 
-export async function startViewer(projectDir: string, options: { host?: string; port?: number } = {}): Promise<ViewerStatus> {
-  const host = options.host ?? DEFAULT_HOST;
-  const port = options.port ?? DEFAULT_VIEWER_PORT;
-  const viewerDir = resolve(__dirname, "..", "viewer");
-  const threeDir = resolve(__dirname, "..", "node_modules", "three");
+// Generate every viewer JSON report for a project. On a loaded repository this is MINUTES of
+// synchronous work (xray, capabilities, the benchmark retrieval proof, ...) — which is exactly why
+// startViewer runs it in a SEPARATE PROCESS after the port is bound: generating in-process, even
+// after listen(), blocks the event loop and leaves the bound socket accepting but never answering.
+// The viewer tolerates a not-yet-written report (404 -> empty state, filled on reload).
+// Note: reports.value (the cumulative value ledger written by recall) is served as-is and
+// intentionally never regenerated here.
+export function generateViewerReports(projectDir: string): void {
   const projectRoot = resolve(projectDir);
   const reports = viewerReportPaths(projectRoot);
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
 
-  // Pre-generate lightweight JSON reports so the viewer can load them directly.
-  // Note: reports.value (the cumulative value ledger written by recall) is served
-  // as-is and intentionally never regenerated here.
   try {
     mkdirSync(reportsDir, { recursive: true });
     const metrics = kageMetrics(projectDir);
@@ -886,9 +1186,27 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     writeFileSync(reports.setup, JSON.stringify(setupDoctor(projectDir), null, 2));
     writeFileSync(reports.trust, JSON.stringify(benchmarkTrust(projectDir), null, 2));
     writeFileSync(reports.suppressed, JSON.stringify(kageSuppressedMemory(projectDir), null, 2));
+    // `kage cloud link` (optional) — surface a Team sidebar link when this repo is linked
+    // to a Kage Cloud team; absent link.json means no team, and the frontend just hides it.
+    const teamLink = readTeamLink(projectDir);
+    writeFileSync(reports.teamLink, JSON.stringify(teamLink ?? {}, null, 2));
   } catch {
     // non-fatal: viewer will show 404 for reports if generation fails
   }
+  }
+
+export async function startViewer(projectDir: string, options: { host?: string; port?: number } = {}): Promise<ViewerStatus> {
+  const host = options.host ?? DEFAULT_HOST;
+  const port = options.port ?? DEFAULT_VIEWER_PORT;
+  const viewerDir = resolve(__dirname, "..", "viewer");
+  const threeDir = resolve(__dirname, "..", "node_modules", "three");
+  // The built knowledge portal (Phase C), bundled in the package at dist/app and falling back to the
+  // monorepo build for a source checkout. Served under /app/ with the same CSP. See resolvePortalDir.
+  const appDir = resolvePortalDir(__dirname);
+  const projectRoot = resolve(projectDir);
+  const reports = viewerReportPaths(projectRoot);
+  const reportsDir = join(projectRoot, ".agent_memory", "reports");
+
 
   const url = viewerUrl(host, port, projectRoot);
   const liveFeed = startLiveFeed(projectRoot);
@@ -899,7 +1217,146 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       liveFeed.handleRequest(req, res);
       return;
     }
+    // The knowledge portal's read API. The SPA served under /app/ fetches `/v2/...` SAME-ORIGIN
+    // (main.tsx: `new KageApi("", token)`), so the daemon that serves the portal must also answer its
+    // API — otherwise the shell loads and every panel shows "Kage API 404" (the 4.0.1 shell fix
+    // exposed exactly this). Reads only, localhost, no token: same trust boundary as /kage/* reports.
+    // The attention queue derives from packets + git + the command log (kernel side), not
+    // from the sqlite model — served directly so it works even where node:sqlite doesn't.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/attention") {
+      import("./vnext/orchestrator/attention.js")
+        .then(({ attentionQueue }) => json(res, 200, { items: attentionQueue(projectRoot) }))
+        .catch(() => json(res, 503, { ok: false, error: "attention derivation failed" }));
+      return;
+    }
+    // The Work board: derived stages + brief knowledge + estimates. Kernel-side like
+    // attention, so it works on any Node build.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/work") {
+      import("./vnext/orchestrator/board.js")
+        .then(({ buildWorkBoard }) => json(res, 200, buildWorkBoard(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `work board unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // Acting on an attention item. Only `reverify` is offered, and deliberately so: it is the
+    // one queue action that is a genuine single decision. `supersede` requires choosing a
+    // replacement packet, and `retire` has no kernel operation at all — offering buttons for
+    // either would be offering buttons that cannot work.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/attention/reverify") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const ref = String(body.ref ?? "").trim();
+          const actor = String(body.actor ?? "").trim();
+          if (!ref) { json(res, 400, { ok: false, error: "an attention item ref is required" }); return; }
+          const { reverifyMemory } = await import("./kernel.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          const result = reverifyMemory(projectRoot, ref, { verifiedBy: actor || "portal" });
+          // reverifyMemory refuses to rubber-stamp a packet whose cited code is all gone.
+          // That refusal is a RESULT, not a server error, and the caller must see the reason.
+          json(res, result.ok ? 200 : 409, {
+            ok: result.ok,
+            error: result.ok ? undefined : result.errors[0],
+            result,
+            attention: attentionQueue(projectRoot),
+          });
+        } catch (error) {
+          json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
+    // Proof: what Kage measurably did. Derived from the same stage log the board reads plus
+    // the value ledger, so it can never disagree with the board — and unmeasured metrics come
+    // back null with an unlock, never as a zero dressed up as a result.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/proof") {
+      import("./vnext/orchestrator/proof.js")
+        .then(({ buildProof }) => json(res, 200, buildProof(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `proof unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // Agents: wired vs actually working vs contributing knowledge.
+    if (req.method === "GET" && requestUrl.pathname === "/v2/agents") {
+      import("./vnext/orchestrator/agents.js")
+        .then(({ buildAgentsReport }) => json(res, 200, buildAgentsReport(projectRoot)))
+        .catch((error) => json(res, 503, { ok: false, error: `agents unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // One work item in full. Kept separate from the board because the board is a glance and
+    // this is an audit — it costs a brief and a risk pass that the board must not pay per card.
+    if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/work/")) {
+      const workId = decodeURIComponent(requestUrl.pathname.slice("/v2/work/".length));
+      import("./vnext/orchestrator/work-detail.js")
+        .then(({ buildWorkDetail }) => {
+          const detail = buildWorkDetail(projectRoot, workId);
+          // A missing item is a 404, never an empty item rendered as if it existed.
+          if (!detail) { json(res, 404, { ok: false, error: `no work item: ${workId}` }); return; }
+          json(res, 200, detail);
+        })
+        .catch((error) => json(res, 503, { ok: false, error: `work detail unavailable: ${error instanceof Error ? error.message : String(error)}` }));
+      return;
+    }
+    // The command loop (tech design §13): the app never mutates state directly. It issues a
+    // command, which is validated, appended to the log, and reduced — every surface then
+    // re-derives from the same events the CLI writes.
+    if (req.method === "POST" && requestUrl.pathname === "/v2/commands") {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const kind = String(body.kind ?? "");
+          const workId = String(body.work_id ?? "");
+          const actor = String(body.actor ?? "").trim();
+          const note = body.note === undefined ? undefined : String(body.note);
+          if (!actor) { json(res, 400, { ok: false, error: "an actor is required — a command is someone's decision" }); return; }
+          const { appendCommandEvent } = await import("./vnext/orchestrator/events.js");
+          const { buildWorkBoard } = await import("./vnext/orchestrator/board.js");
+          const { attentionQueue } = await import("./vnext/orchestrator/attention.js");
+          if (kind !== "task.claimed" && kind !== "task.released" && kind !== "gate.approved" && kind !== "gate.held") {
+            json(res, 400, { ok: false, error: `unknown command kind: ${kind}` });
+            return;
+          }
+          const event = appendCommandEvent(projectRoot, { kind, work_id: workId, actor, note });
+          // Answer with the re-derived state so the caller never guesses what the command did.
+          json(res, 200, { ok: true, event, work: buildWorkBoard(projectRoot), attention: attentionQueue(projectRoot) });
+        } catch (error) {
+          // Validation failures (self-approval, missing ids) are 409 — the command was
+          // understood and deliberately refused, which is not a server fault.
+          json(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      })();
+      return;
+    }
+    if (req.method === "GET" && requestUrl.pathname.startsWith("/v2/")) {
+      void servePortalApi(projectRoot, requestUrl, res);
+      return;
+    }
+    // The portal's ONE write surface. Without this the SPA loads, renders the queue, and every
+    // action 404s: the POST handler lived only on the vNext runtime server, which serves no static
+    // assets, so nothing that opened the portal could ever reach it. Same localhost trust boundary
+    // as the reads above; the acting identity, optimistic version and self-approval gates are all
+    // enforced inside handleReviewMutation.
+    if (req.method === "POST" && requestUrl.pathname.startsWith("/v2/")) {
+      void servePortalMutation(projectRoot, requestUrl, req, res);
+      return;
+    }
     let filePath: string | null = null;
+    // The Phase C knowledge portal, served under /app/ with the same strict CSP as the legacy viewer.
+    // `kage open` points here; the legacy /viewer/ stays alive during the compatibility release.
+    const appRedirect = appRedirectLocation(requestUrl.pathname);
+    if (appRedirect) {
+      res.writeHead(302, { location: appRedirect });
+      res.end();
+      return;
+    }
+    const appAsset = resolveAppAsset(appDir, requestUrl.pathname);
+    if (appAsset) {
+      if (!existsSync(appAsset)) {
+        json(res, 404, { ok: false, error: "portal_not_built" });
+        return;
+      }
+      res.writeHead(200, viewerStaticHeaders(appAsset));
+      res.end(readFileSync(appAsset));
+      return;
+    }
     const redirectLocation = viewerRedirectLocation(requestUrl.pathname, requestUrl.search, new URL(url).search);
     if (redirectLocation) {
       res.writeHead(302, { location: redirectLocation });
@@ -932,8 +1389,40 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     res.end(readFileSync(filePath));
   });
 
+  // Populate the portal's repository model from existing memory the first time it is opened, so a repo
+  // with packets but no compiled model never shows a blank dashboard. Gated on an empty model, so it
+  // is a one-time bootstrap; lazy import keeps node:sqlite off the daemon's module top level; failure
+  // is non-fatal (the portal serves its honest empty state). See bootstrapPortalModelIfEmpty.
+  try {
+    const { bootstrapPortalModelIfEmpty } = await import("./vnext/migration/bootstrap.js");
+    const boot = bootstrapPortalModelIfEmpty(projectRoot);
+    if (boot.bootstrapped) {
+      console.log(
+        `Kage portal: populated the repository model from ${boot.imported} memory packet(s) — review and refine in the portal's Review Queue.`,
+      );
+    }
+  } catch {
+    /* never block the viewer from starting */
+  }
+
   await new Promise<void>((resolveListen) => server.listen(port, host, resolveListen));
-  console.log(`Kage viewer → http://${host}:${port}/`);
+  // The knowledge portal is THE surface. The legacy dashboard stays reachable at / for now but is not
+  // advertised as a co-equal — one product face, not two.
+  console.log(`Kage knowledge portal → http://${host}:${port}/app/`);
+  console.log(`  (legacy dashboard still at http://${host}:${port}/ during the transition)`);
+  // Port is live — the minutes-long report grind runs in a CHILD PROCESS so this event loop stays
+  // free to answer requests. stdio ignored; the child exits when done; failure is non-fatal (the
+  // viewer shows empty states until a later run fills the reports).
+  try {
+    const child = spawn(process.execPath, [join(__dirname, "viewer-reports.js"), projectRoot], {
+      stdio: "ignore",
+      detached: false,
+    });
+    child.on("exit", (code) => {
+      if (code === 0) console.log("Viewer reports generated — reload the page for full data.");
+    });
+    child.on("error", () => { /* non-fatal */ });
+  } catch { /* non-fatal */ }
   process.on("SIGTERM", () => {
     liveFeed.close();
     server.close(() => process.exit(0));

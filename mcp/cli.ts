@@ -1,11 +1,32 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { daemonDoctor, readDaemonStatus, startDaemon, startViewer, stopDaemon } from "./daemon.js";
+import { appendCommandEvent } from "./vnext/orchestrator/events.js";
+import { deriveWorkState } from "./vnext/orchestrator/derive.js";
+import { cachedOpenPullRequestBranches } from "./vnext/orchestrator/pr-observer.js";
+import { attentionQueue } from "./vnext/orchestrator/attention.js";
+import { planIntent } from "./vnext/plan/plan.js";
+import {
+  connectProject,
+  downProject,
+  renderConnect,
+  renderDown,
+  renderReceipts,
+  renderStatus,
+  renderUp,
+  runtimeClientFor,
+  runtimeDownFrom,
+  runWithProxy,
+  startProxyDaemon,
+  upProject,
+  vnextReceipts,
+  vnextStatus,
+} from "./vnext/runtime/commands.js";
 import {
   SETUP_AGENTS,
   auditClaudeMemStore,
@@ -13,6 +34,10 @@ import {
   defaultClaudeMemStorePath,
   renderClaudeMemAuditReceipt,
   benchmarkTaskComparison,
+  benchmarkSavings,
+  teamMemoryReport,
+  writeTeamLink,
+  readTeamLink,
   benchmarkCodingMemoryQuality,
   benchmarkMemoryScale,
   benchmarkTrust,
@@ -37,6 +62,12 @@ import {
   installAgentPolicy,
   kageCleanupCandidates,
   kageCapabilityAudit,
+  kageContext,
+  kageFetchPublicGraphNode,
+  kageListPublicDomains,
+  kageSearchPublicGraph,
+  kageSessionLearningLedger,
+  KAGE_WORKFLOW_TEXT,
   kageContributors,
   kageContextSlots,
   kageDecisionIntelligence,
@@ -74,7 +105,9 @@ import {
   PACKET_MERGE_DRIVER_CONFIG,
   loadPendingPackets,
   MEMORY_TYPES,
+  WORK_STAGES,
   observe,
+  minimalChangeReport,
   prCheck,
   prSummarize,
   proposeFromDiff,
@@ -86,6 +119,9 @@ import {
   searchDocs,
   docsRecallSection,
   recordFeedback,
+  codeIndexerStatus,
+  workItemBrief,
+  reanchorUnchangedPackets,
   reverifyMemory,
   generateSkills,
   remediationFor,
@@ -100,12 +136,17 @@ import {
   registryRecommendations,
   setupAgent,
   generatePluginHooks,
-  VALUE_DOLLARS_PER_MILLION_TOKENS,
   setupDoctor,
   setContextSlot,
   staleCatch,
   formatStaleCatch,
   supersedeMemory,
+  transitionWorkStage,
+  claimWorkItem,
+  linkImplements,
+  listWorkItems,
+  loadApprovedPackets,
+  gitUserName,
   kageConflicts,
   syncPersonal,
   syncSetup,
@@ -115,7 +156,11 @@ import {
   truthScorecardMarkdown,
   validateProject,
   valueSummary,
+  bootstrapStarterMemory,
+  teamValueReport,
   formatTokenCount,
+  formatValueGains,
+  formatRecallValueReceipt,
   verifyAgentActivation,
   writeCodeIndex,
   type CaptureInput,
@@ -123,32 +168,51 @@ import {
   type MemoryType,
   type ObservationEvent,
   type SetupAgent,
+  type WorkStage,
+  type WorkStageTransitionResult,
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
+import { checkReportMarkdown, driftCheck, formatCheckReport, kageCheckWorkflowYaml, writeCheckBaseline } from "./check.js";
 import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
+import { probeAssistStorage, startProxy } from "./proxy.js";
+import { startCloudServer } from "./cloud-server.js";
+import { cloudCreateTeam, cloudInvite, cloudPush, cloudPull, cloudList, cloudReview } from "./cloud-client.js";
+import {
+  isLegacyCommand,
+  mapLegacyCommand,
+  formatDeprecationNotice,
+  recordLegacyUsage,
+  renderLegacyHelp,
+  scanLegacyCommandUsage,
+} from "./vnext/migration/legacy-command-map.js";
 
 const CORE_USAGE = `Kage — code-grounded memory for coding agents
 
-Core commands:
-  kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
-  kage scan --project <dir>                  60-second truth report on any repo (zero setup)
-  kage init --project <dir>                  create repo memory (.agent_memory only)
-  kage index --project <dir> [--full]        build/refresh code graph + indexes
-  kage recall "<query>" --project <dir>      grounded recall from repo memory
-  kage learn --project <dir> ...             capture a learning as a memory packet
-  kage gains --project <dir>                 what Kage saved you (tokens, cost, stale blocks)
-  kage verify --project <dir>                check memory citations against code
-  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+The v4 surface (portal + workspace):
+  kage connect --project <dir>               attach the vNext runtime + adapters in audit mode (no prompt is changed)
+  kage status --project <dir>                memory + runtime health and measurement coverage
+  kage open --project <dir>                  open the local dashboard (recall, review, receipts, team)
   kage doctor --project <dir>                health check
-  kage repair --project <dir>                fix what doctor finds (indexes, broken packets, wiring)
-  kage viewer --project <dir>                local dashboard
+  kage export --project <dir> --format okf --out <dir>   export the repository model as an OKF bundle
+  kage migrate plan --project <dir>          dry-run import of legacy packets into the repository model
 
-Run 'kage help --all' for the full command list (lifecycle, CI, benchmarks, daemon, workspace).`;
+Getting started:
+  kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
+  kage up [--project <dir>]                  bring the ambient stack up ONCE: audit config + runtime + background proxy
+  kage run -- <command>                      run any agent through the proxy (sets ANTHROPIC_BASE_URL for it)
+  kage down [--project <dir>]                stop the background proxy + runtime daemon that \`kage up\` started
+  kage context "<query>" --project <dir>     validate + recall + code graph + knowledge graph in one call
+  kage check [--project <dir>]               verify CLAUDE.md/AGENTS.md/docs claims against the code — counted, not estimated
+  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+
+Run 'kage help --all' for the full command list (lifecycle, CI, benchmarks, daemon, workspace).
+Pre-vNext commands are deprecated but still callable — run 'kage legacy --help' for the map.`;
 
 const FULL_USAGE = `Kage — full command reference
 
 Usage:
   kage index --project <dir>
+  kage check [--project <dir>] [--json | --md] [--base <ref>] [--write-baseline] [--init-ci [--force]]
   kage scan --project <dir> [--json] [--scorecard [--out <file>]]
   kage demo [--project <dir>]
   kage install [--project <dir>] [--agents a,b] [--no-agents] [--json]
@@ -171,16 +235,24 @@ Usage:
   kage refresh --project <dir> [--full] [--force] [--json]
   kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
   kage gc --project <dir> [--dry-run] [--force] [--json]
-  kage compact --project <dir> [--dry-run] [--json]
+  kage compact --project <dir> [--execute] [--json]     dry-run by default; --execute prunes/deprecates for real
   kage verify --project <dir> [--id <packet-id>] [--json]
   kage suppressed --project <dir> [--json]
   kage pr summarize --project <dir> [--json]
   kage pr check --project <dir> [--json]
+  kage minimal-change check --project <dir> [--base <ref>] [--json]
   kage staleguard --project <dir> [--json]
   kage upgrade [--dry-run]
   kage branch --project <dir> [--json]
-  kage metrics --project <dir> [--json]
+  kage metrics --project <dir> [--json]   raw counts: code graph size, memory graph size, harness readiness
   kage gains --project <dir> [--json]
+  kage savings --project <dir> [--queries <n>] [--json]   deterministic token-reduction receipt (no LLM on the measurement path)
+  kage team --project <dir> [--json]   team memory health: contributors, pending review, stale-withheld, contradictions
+  kage report team --project <dir> [--json]   the lead-facing "is this helping?" report: measured value, or unavailable — estimates keep an _estimated suffix and never masquerade as measured
+  kage proxy --project <dir> [--port 8788] [--upstream <url>] [--workspace <dir>] [--mode audit|assist|protect] [--count-tokens] [--no-receipts] [--no-inject] [--verbose]   drop-in proxy: inject memory outbound, capture exchanges inbound, record measured transformation receipts (--mode audit forwards your exact bytes and only measures; --mode protect forwards the original but measures a defensive transform; assist refuses to start on unhealthy reversible/receipt storage)
+  kage up [--project <dir>] [--port 8788] [--mode audit|assist] [--foreground] [--no-runtime] [--json]   one command: connect (audit-only config) + vNext runtime + BACKGROUND proxy on --port — detached, survives this terminal (a machine reboot stops it: run kage up once afterwards; no system service), stopped with kage down; --mode governs the proxy process alone and defaults to audit = measurement only (deliberately unlike bare \`kage proxy\`, which keeps assist as its back-compat default); re-running reuses a VERIFIED live proxy (pid + port checked, never the state file alone) and exits 0, cleaning a stale record first; --foreground keeps the proxy in this terminal with no daemon state (kage down does not manage it); --no-runtime skips the vNext runtime daemon
+  kage down [--project <dir>] [--json]   stop what kage up started: SIGTERM the verified background proxy (SIGKILL after a bounded grace), remove its state file, and stop the runtime daemon; per-component honest output (stopped / was not running / stale state cleaned); exits 0 when the end state is nothing-running; a foreground proxy is stopped with Ctrl-C instead
+  kage run [--project <dir>] [--port 8788] -- <command> [args...]   exec <command> with ANTHROPIC_BASE_URL=http://localhost:<port> in its env (and nothing else), inheriting your terminal; with no --port it uses the background proxy's verified recorded port, falling back to 8788; fails fast with a \`kage up\` hint when nothing listens — run never starts the proxy (up owns that lifecycle)
   kage memory-access --project <dir> [--json]
   kage activity --project <dir> [--json]
   kage memory-audit --project <dir> [--limit <n>] [--json]
@@ -190,7 +262,7 @@ Usage:
   kage handoff --project <dir> [--json]
   kage layers --project <dir> [--json]
   kage lifecycle --project <dir> [--json]
-  kage reverify --project <dir> --packet <id> [--json]
+  kage reverify --project <dir> --packet <id> [--evidence <text>] [--verified-by <text>] [--json]   re-ground a stale packet; changed code requires --evidence (a bare re-stamp is refused)
   kage reconcile --project <dir> [--session <id>] [--json]
   kage timeline --project <dir> [--days <n>] [--json]
   kage lineage --project <dir> [--json]
@@ -198,18 +270,18 @@ Usage:
   kage conflicts --project <dir> [--json]
   kage skills --project <dir> [--dir <path>] [--dry-run] [--json]
   kage contributors --project <dir> [--json]
-  kage profile --project <dir> [--json]
-  kage xray --project <dir> [--json]
-  kage capabilities --project <dir> [--json]
-  kage decisions --project <dir> [--json]
-  kage module-health --project <dir> [--json]
-  kage graph-insights --project <dir> [--json]
+  kage profile --project <dir> [--json]   repo concepts, key files, and memory focus in one summary
+  kage xray --project <dir> [--json]   first-use code structure map: layers, entry points, what to read first
+  kage capabilities --project <dir> [--json]   maps memory/benchmark/dashboard/viewer readiness to evidence
+  kage decisions --project <dir> [--json]   why-memory coverage: which decisions are captured, which are missing
+  kage module-health --project <dir> [--json]   rolls up graph, test, cleanup, and git signals per module
+  kage graph-insights --project <dir> [--json]   central files, cycles, communities, and entry flows in the code graph
   kage workspace --project <workspace-dir> [--json]
   kage workspace recall "<query>" --project <workspace-dir> [--json]
-  kage audit --project <dir> [--json]
-  kage audit-claude-mem [--store <path>] [--project <dir>] [--json]
+  kage audit --project <dir> [--json]   trust score plus concrete memory/code-graph recommendations
+  kage audit-claude-mem [--store <path>] [--project <dir>] [--json]   classifies a claude-mem store's memory against this repo
   kage inbox --project <dir> [--json]
-  kage quality --project <dir> [--json]
+  kage quality --project <dir> [--json]   useful-memory ratio, duplicate burden, evidence + path grounding coverage
   kage benchmark --project <dir> [--json]
   kage benchmark --trust --project <dir> [--json]
   kage benchmark --memory-quality [--json]
@@ -228,6 +300,12 @@ Usage:
   kage graph "<query>" --project <dir> [--json]
   kage graph-registry --project <dir> [--json]
   kage embeddings build --project <dir> [--model Xenova/all-MiniLM-L6-v2] [--json]
+  kage context "<query>" --project <dir> [--limit <n>] [--targets a,b] [--changed-files a,b] [--session <id>] [--json]   the kage_context MCP tool, reproducible outside an agent session
+  kage community-domains                                list community knowledge-graph domains (untrusted, advisory)
+  kage community-search "<query>" [--domain <name>]      search the community knowledge graph (untrusted, advisory)
+  kage community-fetch --domain <name> --node <id>       fetch one community graph node
+  kage ledger --project <dir> [--session <id>] [--limit <n>] [--json]   this session's learning candidates: save/ignore/needs-evidence
+  kage workflow                                          print the Kage memory workflow loop (no action taken)
   kage recall "<query>" --project <dir> [--json] [--explain] [--embeddings] [--docs] [--max-context-tokens <n>] [--structural-hops <n>]
   kage docs-search "<query>" --project <dir> [--limit <n>] [--json]   search this repo's own committed docs (README, docs/**, *.md)
   kage file-context --project <dir> --path <file> [--json]
@@ -241,6 +319,14 @@ Usage:
   kage sync setup --remote <git-url>            init ~/.kage/memory as a git repo wired to your private remote
   kage sync [--json]                            commit + pull --rebase + push personal memory (newest-wins conflicts)
   kage sync --status [--json]                   ahead/behind/dirty for the personal store (fetch only)
+  kage cloud serve [--port 8790] [--db <path>] [--verbose]   run a Kage Cloud server (self-host behind your own proxy/VPN)
+  kage cloud create-team --server <url> --name <name> [--json]   creates a team + owner token (shown once)
+  kage cloud invite --server <url> --team <id> --token <token> --label <name> [--json]   issue another teammate's token
+  kage cloud link --project <dir> --server <url> --team <id> --token <token> [--json]   remember this team so kage viewer shows a Team link
+  kage cloud push --project <dir> --server <url> --team <id> --token <token> [--json]   submit local approved packets (lands pending)
+  kage cloud pull --project <dir> --server <url> --team <id> --token <token> [--json]   pull team-approved packets (re-verified locally on recall)
+  kage cloud list --server <url> --team <id> --token <token> [--status pending|approved|rejected] [--json]
+  kage cloud approve|reject --server <url> --team <id> --token <token> --packet <id> [--json]   review gate: a submitter cannot approve their own packet
   kage feedback --project <dir> --packet <packet-id> --kind helpful|wrong|stale
   kage capture --project <dir> --title <title> --body <body> [--type <type>] [--summary <summary>] [--tags a,b] [--paths a,b] [--stack a,b] [--graph-nodes a,b] [--allow-missing-paths]
   kage propose --project <dir> --from-diff
@@ -250,7 +336,36 @@ Usage:
   kage registry --project <dir> [--json]
   kage changelog --project <dir> [--days <n>] [--json]
   kage review --project <dir>
+  kage plan --intent "<what should become true>" --project <dir> [--json]   intent -> grounded, estimated work items
+  kage work --project <dir> [--json]   derived board: stages from evidence + the attention queue
+  kage brief --packet <id> --project <dir> [--json]   what the team knows + blast radius for a work item
+  kage claim --packet <id> --project <dir> [--actor <name>] [--json]
+  kage implements --packet <output-id> --proposal <proposal-id> --evidence <text> --project <dir> [--json]
+  kage stage --packet <id> --to <proposed|claimed|in_review> --project <dir> [--actor <name>] [--evidence <text>] [--json]
+  kage gate list --project <dir> [--stage <stage>] [--json]
+  kage gate review --project <dir>
   kage validate --project <dir>
+  kage connect --project <dir> [--agents claude-code,proxy] [--no-start] [--json]   audit mode only; connect never enables prompt mutation
+  kage status --project <dir> [--json]   legacy memory health + vNext attachment and measurement coverage (exact/partial/unavailable)
+  kage open --project <dir> [--port <n>]   launch the local dashboard
+  kage receipts --project <dir> [--task <id>] [--limit <n>] [--json]   measured fields only; an unmeasured cost prints as unavailable, never as 0
+  kage migrate plan --project <dir> [--pending] [--out <path>] [--json]   dry-run import of legacy packets into the repository model (non-destructive; per-disposition counts)
+  kage migrate apply --project <dir> --plan <path> [--json]   apply a migration plan; imports only packets whose fingerprint still matches (nothing becomes injectable)
+  kage export --project <dir> --format okf --out <dir>   export the repository model as an OKF concept bundle (identifiers round-trip through foreign OKF consumers)
+  kage model export-fixture --project <dir> --out <path> [--repository <id>]   deterministic repository-model v1 fixture (sorted by id; no timestamps/paths) for cross-phase compatibility tests
+  kage okf view [--project <dir>] [--pending]   view your memory as a self-contained OKF page (no server)
+  kage okf migrate [--project <dir>] [--pending]   packets → OKF bundle under .agent_memory/okf
+  kage okf lint [<dir|file>] [--project <dir>]   check OKF conformance (defaults to this repo's bundle)
+  kage okf import [<dir>] [--project <dir>] [--json]   read an OKF bundle back into packets
+
+Maintainer tools:
+  kage gen-plugin-hooks [--plugin-dir <dir>] [--json]   regenerate plugin/hooks/* from the claude-code setup templates so the plugin and npm install paths ship identical hooks
+
+Back-compat aliases (identical behavior to the modern verb, kept for older scripts):
+  kage audit-log → memory-audit · kage capability-audit , kage readiness → capabilities
+  kage context-slots → slots · kage memory-handoff → handoff · kage memory-layers → layers
+  kage memory-lifecycle → lifecycle · kage memory-lineage → lineage · kage session-replay → replay
+  kage memory-reconcile , kage memory-reconciliation → reconcile · kage skills-build → skills
 
 Types:
   ${MEMORY_TYPES.join(", ")}`;
@@ -320,6 +435,7 @@ async function review(projectDir: string): Promise<void> {
       console.log(`Title: ${packet.title}`);
       console.log(`Type:  ${packet.type}`);
       console.log(`ID:    ${packet.id}`);
+      console.log(`By:    ${packet.author_name ?? "(unknown)"}${packet.author_branch ? ` on ${packet.author_branch}` : ""}`);
       console.log(`Tags:  ${packet.tags.join(", ") || "(none)"}`);
       console.log(`Paths: ${packet.paths.join(", ") || "(none)"}`);
       console.log("\n" + packet.body);
@@ -340,13 +456,90 @@ async function review(projectDir: string): Promise<void> {
   }
 }
 
+// The terminal in_review -> done transition is deliberately reachable ONLY here
+// (TTY-interactive) or via the cloud path's token-authenticated approve — never
+// as a scriptable, agent-callable command or MCP tool. `kage stage` (the generic
+// escape hatch below) explicitly refuses that one edge non-interactively for the
+// same reason. This local gate is a plain actor-string comparison — weaker than
+// the cloud path's cryptographic token-hash check; say so if a reviewer asks.
+async function gateReview(projectDir: string): Promise<void> {
+  const inReview = listWorkItems(projectDir, { stage: "in_review" });
+  if (inReview.length === 0) {
+    console.log("No work items in review.");
+    return;
+  }
+  const rl = createInterface({ input, output });
+  try {
+    for (const item of inReview) {
+      console.log("\n─────────────────────────────────────────");
+      console.log(`Title:      ${item.title}`);
+      console.log(`ID:         ${item.id}`);
+      console.log(`Claimed by: ${item.claimed_by ?? "(unclaimed)"}`);
+      console.log(`Status:     ${item.status}`);
+      const answer = (await rl.question("\n(a) approve -> done  (b) send back to claimed  (s) skip  (q) quit: ")).trim().toLowerCase();
+      if (answer === "q") break;
+      if (answer === "a" || answer === "b") {
+        const actor = (await rl.question("Your name/identity (for the self-approval check): ")).trim() || gitUserName(projectDir) || "unknown";
+        const toStage: WorkStage = answer === "a" ? "done" : "claimed";
+        const result = transitionWorkStage(projectDir, item.id, toStage, { actor, evidence: answer === "a" ? "kage gate review: approved" : "kage gate review: sent back" });
+        if (result.ok) console.log(`${toStage === "done" ? "Approved" : "Sent back"}: ${item.id}`);
+        else console.log(`Failed: ${result.errors.join("; ")}`);
+      } else {
+        console.log("Skipped.");
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const command = args[0];
+  let args = process.argv.slice(2);
+  let command = args[0];
   if (!command) usage();
   if (command === "help") {
     console.log(args.includes("--all") ? FULL_USAGE : CORE_USAGE);
     return;
+  }
+
+  // Phase E Task 10 quarantines the pre-vNext commands behind `kage legacy`. `kage legacy <command>`
+  // unwraps to the deprecated command; the banner below then fires exactly once for it.
+  if (command === "legacy") {
+    const inner = args.slice(1);
+    if (inner.length === 0 || inner[0] === "--help" || inner[0] === "help") {
+      console.log(renderLegacyHelp());
+      return;
+    }
+    // `kage legacy scan` — the migration report: which scripts/config still invoke a legacy command.
+    if (inner[0] === "scan") {
+      const projectDir = projectArg(inner);
+      const hits = scanLegacyCommandUsage(projectDir);
+      if (inner.includes("--json")) {
+        console.log(JSON.stringify({ project: projectDir, count: hits.length, hits }, null, 2));
+        return;
+      }
+      if (hits.length === 0) {
+        console.log("No scripts or config invoke a deprecated kage command.");
+        return;
+      }
+      console.log(`${hits.length} legacy command invocation(s) still present:`);
+      for (const hit of hits) {
+        const target = hit.removed ? "removed (no direct replacement)" : `use kage ${hit.replacement}`;
+        console.log(`  ${hit.file}:${hit.line}  kage ${hit.command} -> ${target}`);
+      }
+      return;
+    }
+    args = inner;
+    command = args[0];
+  }
+
+  // Every deprecated invocation — direct or via `kage legacy` — prints exactly one supported
+  // replacement, the v5 removal notice, and the docs link (to stderr, so --json stdout stays clean),
+  // and records ONLY the command name + version locally (never arguments, which can carry private
+  // paths or query text). The command still runs afterward for one major version.
+  if (isLegacyCommand(command)) {
+    console.error(formatDeprecationNotice(mapLegacyCommand(args)));
+    recordLegacyUsage(command);
   }
 
   if (command === "merge-packet") {
@@ -358,7 +551,7 @@ async function main(): Promise<void> {
       console.error(`Enable once per clone: ${PACKET_MERGE_DRIVER_CONFIG}`);
       process.exit(1);
     }
-    const result = mergePacketFiles(ours, base, theirs);
+    const result = mergePacketFiles(ours, base, theirs, process.cwd());
     console.error(result.detail);
     process.exit(result.ok ? 0 : 1);
   }
@@ -418,6 +611,175 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "cloud") {
+    const sub = args[1];
+
+    if (sub === "serve") {
+      const port = args.includes("--port") ? numberArg(args, "--port", 8790) : 8790;
+      const dbPath = takeArg(args, "--db");
+      startCloudServer({ port, dbPath: dbPath ?? undefined, verbose: args.includes("--verbose") });
+      return;
+    }
+
+    const server = takeArg(args, "--server");
+    if (!server && sub !== undefined) {
+      console.error("Usage: kage cloud <create-team|invite|push|pull|list|approve|reject> --server <url> ...");
+      process.exit(2);
+    }
+
+    if (sub === "create-team") {
+      const name = takeArg(args, "--name");
+      if (!name) { console.error("Usage: kage cloud create-team --server <url> --name <name>"); process.exit(2); }
+      const result = await cloudCreateTeam(server!, name);
+      if (args.includes("--json")) { console.log(JSON.stringify(result, null, 2)); return; }
+      console.log(`Team created: ${result.name} (${result.team_id})`);
+      console.log(`Owner token (save this — it is shown once): ${result.token}`);
+      console.log(`\nNext: kage cloud push --project . --server ${server} --team ${result.team_id} --token ${result.token}`);
+      return;
+    }
+
+    const teamId = takeArg(args, "--team");
+    const token = takeArg(args, "--token");
+    if (sub && sub !== "create-team" && (!teamId || !token)) {
+      console.error("Usage: kage cloud <subcommand> --server <url> --team <team-id> --token <token> ...");
+      process.exit(2);
+    }
+
+    if (sub === "link") {
+      const linked = writeTeamLink(projectArg(args), { server: server!, team_id: teamId!, token: token! });
+      if (args.includes("--json")) { console.log(JSON.stringify(linked, null, 2)); return; }
+      console.log(`Linked. \`kage viewer\` will now show a Team link to ${server}.`);
+      return;
+    }
+
+    if (sub === "invite") {
+      const label = takeArg(args, "--label") ?? "teammate";
+      const result = await cloudInvite(server!, teamId!, token!, label);
+      if (args.includes("--json")) { console.log(JSON.stringify(result, null, 2)); return; }
+      console.log(`New token for "${result.label}" (save this — it is shown once): ${result.token}`);
+      return;
+    }
+
+    if (sub === "push") {
+      const result = await cloudPush(server!, teamId!, token!, projectArg(args));
+      if (args.includes("--json")) { console.log(JSON.stringify(result, null, 2)); return; }
+      console.log(`Submitted ${result.submitted} packet(s) for review.`);
+      if (result.failed.length) console.log(`Failed:\n${result.failed.map((f) => `  - ${f.title}: ${f.reason}`).join("\n")}`);
+      return;
+    }
+
+    if (sub === "pull") {
+      const result = await cloudPull(server!, teamId!, token!, projectArg(args));
+      if (args.includes("--json")) { console.log(JSON.stringify(result, null, 2)); return; }
+      console.log(`Pulled ${result.pulled} team-approved packet(s). They'll surface in recall's "Team Memory" section, re-verified against this checkout.`);
+      return;
+    }
+
+    if (sub === "list") {
+      const status = takeArg(args, "--status") ?? "pending";
+      const result = await cloudList(server!, teamId!, token!, status);
+      if (args.includes("--json")) { console.log(JSON.stringify(result, null, 2)); return; }
+      if (!result.length) { console.log(`No ${status} packets.`); return; }
+      for (const entry of result) {
+        console.log(`[${entry.packet.id}] ${entry.packet.title}`);
+        console.log(`  submitted by ${entry.submitted_by}${entry.approved_by ? `, approved by ${entry.approved_by}` : ""}`);
+      }
+      return;
+    }
+
+    if (sub === "approve" || sub === "reject") {
+      const packetId = takeArg(args, "--packet");
+      if (!packetId) { console.error(`Usage: kage cloud ${sub} --server <url> --team <team-id> --token <token> --packet <packet-id>`); process.exit(2); }
+      const result = await cloudReview(server!, teamId!, token!, packetId, sub);
+      let workItemResult: WorkStageTransitionResult | null = null;
+      if (sub === "approve" && result.status === "approved") {
+        const project = projectArg(args);
+        const local = loadApprovedPackets(project).find((p) => p.id === packetId);
+        if (local && local.type === "proposal" && local.stage === "in_review") {
+          workItemResult = transitionWorkStage(project, packetId, "done", {
+            actor: gitUserName(project) ?? "cloud-approved",
+            evidence: "kage cloud approve: approved by a teammate on Kage Cloud",
+          });
+        }
+      }
+      if (args.includes("--json")) { console.log(JSON.stringify({ ...result, work_item: workItemResult }, null, 2)); return; }
+      console.log(`Packet ${packetId}: ${result.status}`);
+      if (workItemResult) {
+        console.log(workItemResult.ok
+          ? `  Work item advanced to done (non-forgeable cloud approval).`
+          : `  Work item stage NOT advanced: ${workItemResult.errors.join("; ")}`);
+      }
+      return;
+    }
+
+    console.error("Usage: kage cloud <serve|create-team|invite|push|pull|list|approve|reject> ...");
+    process.exit(2);
+  }
+
+  if (command === "run") {
+    // A pure exec wrapper: no tree-sitter, no indexes — it must start fast and get out of the
+    // way. Everything after the first `--` belongs to the child, untouched (so a child's own
+    // --project or --help is never mistaken for ours).
+    const rest = args.slice(1);
+    const separator = rest.indexOf("--");
+    const own = separator === -1 ? rest : rest.slice(0, separator);
+    if (own.includes("--help")) {
+      console.log("kage run — run one command through the local Kage proxy.");
+      console.log("");
+      console.log("Usage:  kage run [--project <dir>] [--port 8788] -- <command> [args...]");
+      console.log("        kage run -- claude");
+      console.log("");
+      console.log("Sets ANTHROPIC_BASE_URL=http://localhost:<port> in the child's environment (and nothing");
+      console.log("else), inherits your terminal, and exits with the child's exit code. With no --port it");
+      console.log("uses the background proxy's recorded port — verified live (pid + port), never trusted");
+      console.log("from the state file alone — and falls back to 8788. If nothing is listening it fails");
+      console.log("fast with a hint to start `kage up` — run never starts the proxy itself: up owns the");
+      console.log("proxy lifecycle, run only points a command at it.");
+      return;
+    }
+    const childCommand = separator === -1 ? [] : rest.slice(separator + 1);
+    if (!childCommand.length) {
+      console.error("Usage: kage run [--project <dir>] [--port <n>] -- <command> [args...]   e.g. kage run -- claude");
+      process.exit(2);
+    }
+    const result = await runWithProxy({
+      project_dir: projectArg(own),
+      // No --port means "ask the verified daemon state, then fall back to 8788" — see runWithProxy.
+      port: own.includes("--port") ? numberArg(own, "--port", 8788) : undefined,
+      command: childCommand,
+    });
+    if (result.hint) console.error(result.hint);
+    process.exit(result.exit_code);
+  }
+
+  if (command === "down") {
+    if (args.includes("--help")) {
+      console.log("kage down — stop what `kage up` started: the background proxy and the runtime daemon.");
+      console.log("");
+      console.log("Usage:  kage down [--project <dir>] [--json]");
+      console.log("");
+      console.log("Verifies the recorded proxy is really ours (pid alive + port accepting) before sending");
+      console.log("SIGTERM, escalates to SIGKILL after a bounded grace, removes the state file, and stops");
+      console.log("the runtime daemon. A stale record (left by a crash or SIGKILL) is cleaned and reported");
+      console.log("as stale — never signalled. Exits 0 whenever the end state is nothing-running.");
+      console.log("");
+      console.log("Note: `kage down` manages only the background proxy `kage up` recorded. A foreground");
+      console.log("proxy (`kage proxy` or `kage up --foreground`) is stopped with Ctrl-C in its terminal.");
+      return;
+    }
+    const project = projectArg(args);
+    const result = await downProject({
+      project_dir: project,
+      // The runtime daemon is the legacy daemon process (it hosts the vNext runtime when up
+      // started it with --vnext), so down reuses the exact `kage daemon stop` code path.
+      stop_runtime: (dir) => runtimeDownFrom(stopDaemon, dir),
+    });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else console.log(renderDown(result));
+    if (!result.ok) process.exit(1);
+    return;
+  }
+
   await ensureTreeSitterLanguages();
 
   if (command === "index") {
@@ -428,6 +790,38 @@ async function main(): Promise<void> {
     if (result.policyPath) console.log(`Agent policy: ${result.policyPath}`);
     console.log(`Indexes:\n${result.indexes.map((path) => `  - ${path}`).join("\n")}`);
     return;
+  }
+
+  if (command === "check") {
+    const checkTarget = resolve(projectArg(args));
+    if (args.includes("--init-ci")) {
+      const workflowPath = join(checkTarget, ".github", "workflows", "kage-check.yml");
+      if (existsSync(workflowPath) && !args.includes("--force")) {
+        console.log(`${workflowPath} already exists — rerun with --force to overwrite.`);
+        process.exit(2);
+      }
+      mkdirSync(dirname(workflowPath), { recursive: true });
+      writeFileSync(workflowPath, kageCheckWorkflowYaml(), "utf8");
+      console.log(`Wrote ${workflowPath}`);
+      console.log("Every PR now gets a drift check: it comments and fails only when the diff breaks a documented claim.");
+      return;
+    }
+    let report;
+    try {
+      report = driftCheck(checkTarget, { base: takeArg(args, "--base") });
+    } catch (error) {
+      console.error(`kage check failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(2);
+    }
+    if (args.includes("--write-baseline")) {
+      const written = writeCheckBaseline(checkTarget, report);
+      console.log(`Baseline written: ${written} (${report.confirmed.length} finding(s) accepted — future runs gate only on new drift)`);
+      return;
+    }
+    if (args.includes("--json")) console.log(JSON.stringify(report, null, 2));
+    else if (args.includes("--md")) console.log(checkReportMarkdown(report));
+    else console.log(formatCheckReport(report));
+    process.exit(report.totals.confirmed > 0 ? 1 : 0);
   }
 
   if (command === "scan") {
@@ -504,7 +898,7 @@ async function main(): Promise<void> {
         console.log(`Nothing alarming found — though ${small ? "a repo this small" : "a repo without git history"} gives these signals little to work with.`);
         console.log("Where Kage pays off here is the memory loop: what you and your agents learn while building this gets kept, verified, and recalled.\n");
       } else {
-        console.log("No surprising findings — this repo's knowledge is unusually well distributed.\n");
+        console.log("No findings across 8 checks — this repo's knowledge is well distributed.\n");
       }
     }
     if (result.warnings.length) console.log(`Warnings:\n${result.warnings.map((warning) => `  - ${warning}`).join("\n")}\n`);
@@ -522,8 +916,7 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    console.log("Kage demo — a live experiment in a sandbox repo. Nothing here is canned:");
-    console.log(`every step below ran for real, just now, in ${result.project_dir}\n`);
+    console.log(`Running the Kage demo in a sandbox repo: ${result.project_dir}\n`);
     console.log("  Created a small repo: src/auth.ts, src/payments.ts, src/legacy-retry.ts");
     console.log(`  Captured ${result.captured.length} memories, each citing real files — accepted and fingerprinted.\n`);
     console.log("1. Then we tried to save a memory citing a file that does NOT exist:");
@@ -535,7 +928,6 @@ async function main(): Promise<void> {
     for (const w of result.withheld) console.log(`   ⊘ "${w.title}" — WITHHELD\n     ${w.reason}`);
     console.log("\n3. What recall actually returns now — only memory that still checks out:");
     for (const t of result.recalled) console.log(`   ✓ ${t}`);
-    console.log("\n  Checks: write-time rejection ✓ · stale withholding ✓ · grounded recall ✓");
 
     // The sandbox proves the mechanism; the runner's own repo makes it matter.
     const here = process.cwd();
@@ -620,6 +1012,186 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "migrate") {
+    // Import the legacy .agent_memory packet store into the Phase B repository model. Non-destructive:
+    // packet files are never deleted. `plan` is a dry run (writes nothing to the model); `apply` only
+    // imports packets whose fingerprint still matches the plan.
+    const sub = args[1] && !args[1].startsWith("--") ? args[1] : "";
+    const project = resolve(projectArg(args));
+    const json = args.includes("--json");
+    const defaultPlanPath = join(project, ".agent_memory", "daemon", "vnext", "migration-plan.json");
+
+    const { openRepositoryModel } = await import("./vnext/migration/model-store.js");
+    const { planMigration, applyMigration, renderPlanText } = await import(
+      "./vnext/migration/migration-report.js"
+    );
+
+    if (sub === "plan") {
+      const packets = [
+        ...loadApprovedPackets(project),
+        ...(args.includes("--pending") ? loadPendingPackets(project) : []),
+      ];
+      const opened = openRepositoryModel(project);
+      try {
+        const plan = planMigration(packets, opened.model);
+        const outPath = takeArg(args, "--out") ? resolve(takeArg(args, "--out")!) : defaultPlanPath;
+        mkdirSync(dirname(outPath), { recursive: true });
+        writeFileSync(outPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+        if (json) {
+          console.log(JSON.stringify({ ...plan, plan_path: outPath }, null, 2));
+          return;
+        }
+        console.log(renderPlanText(plan));
+        console.log(`\nPlan written to ${outPath}`);
+        console.log(`Apply it:  kage migrate apply --project ${project} --plan ${outPath}`);
+      } finally {
+        opened.close();
+      }
+      return;
+    }
+
+    if (sub === "apply") {
+      const planPath = takeArg(args, "--plan");
+      if (!planPath) {
+        console.error("Usage: kage migrate apply --project <dir> --plan <path> [--json]");
+        process.exit(2);
+      }
+      const plan = JSON.parse(readFileSync(resolve(planPath), "utf8"));
+      // Load both approved and pending so apply can find any planned packet by id.
+      const packetsById = new Map<string, ReturnType<typeof loadApprovedPackets>[number]>();
+      for (const packet of [...loadApprovedPackets(project), ...loadPendingPackets(project)]) {
+        packetsById.set(packet.id, packet);
+      }
+      const opened = openRepositoryModel(project);
+      try {
+        const result = applyMigration(plan, [...packetsById.values()], opened.model);
+        if (json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        console.log(
+          `Applied ${result.applied} packet(s); skipped ${result.skipped_fingerprint_mismatch} (drifted), ${result.skipped_missing} (missing).`,
+        );
+        console.log("Grounded packets import as verified and are readable by agents; ungrounded ones stay proposed, and superseded/deprecated ones are archived.");
+      } finally {
+        opened.close();
+      }
+      return;
+    }
+
+    console.log("kage migrate — import legacy packet memory into the repository model (non-destructive).");
+    console.log("  kage migrate plan --project <dir> [--pending] [--out <path>] [--json]   dry run: per-disposition counts + a plan file");
+    console.log("  kage migrate apply --project <dir> --plan <path> [--json]               import only packets whose fingerprint still matches");
+    return;
+  }
+
+  if (command === "export") {
+    // Export the repository model as an OKF concept bundle. Identifiers ride in a machine-state body
+    // block, so the export round-trips even through a foreign OKF consumer that drops x-kage-* fields.
+    const project = resolve(projectArg(args));
+    const format = takeArg(args, "--format") ?? "okf";
+    if (format !== "okf") {
+      console.error(`kage export: unsupported --format "${format}" (only "okf" is supported).`);
+      process.exit(2);
+    }
+    const out = takeArg(args, "--out");
+    if (!out) {
+      console.error("Usage: kage export --project <dir> --format okf --out <dir>");
+      process.exit(2);
+    }
+    const outDir = resolve(out);
+    const { openRepositoryModel, repositoryIds } = await import("./vnext/migration/model-store.js");
+    const { exportModel } = await import("./vnext/okf/model-export.js");
+    const opened = openRepositoryModel(project);
+    try {
+      mkdirSync(outDir, { recursive: true });
+      const indexLines = ["# Kage model — OKF export", ""];
+      let written = 0;
+      for (const repositoryId of repositoryIds(opened.model)) {
+        for (const doc of exportModel(opened.model, repositoryId)) {
+          writeFileSync(join(outDir, doc.file_name), doc.markdown, "utf8");
+          indexLines.push(`- [${doc.concept.canonical_name}](/${doc.file_name}) — ${doc.concept.kind}`);
+          written += 1;
+        }
+      }
+      writeFileSync(join(outDir, "index.md"), `${indexLines.join("\n")}\n`, "utf8");
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({ out: outDir, written }, null, 2));
+        return;
+      }
+      console.log(`Kage model → OKF: wrote ${written} concept(s) to ${outDir}`);
+      console.log("Trust/freshness rides in x-kage-* frontmatter; identifiers also ride in a body block so a foreign OKF tool round-trips them.");
+    } finally {
+      opened.close();
+    }
+    return;
+  }
+
+  if (command === "model") {
+    // `kage model export-fixture --project <dir> --out <path> [--repository <id>]`
+    // Serialize a deterministic repository-model v1 fixture for cross-phase compatibility tests. The
+    // fixture sorts every row by its stable id and excludes timestamps, raw payloads, and local paths,
+    // so two runs over the same model are byte-identical.
+    const sub = args[1] && !args[1].startsWith("--") ? args[1] : "";
+    if (sub !== "export-fixture") {
+      console.log("kage model — repository-model tooling.");
+      console.log("  kage model export-fixture --project <dir> --out <path> [--repository <id>]   deterministic repository-model v1 fixture");
+      process.exit(sub ? 2 : 0);
+    }
+    const project = resolve(projectArg(args));
+    const out = takeArg(args, "--out");
+    if (!out) {
+      console.error("Usage: kage model export-fixture --project <dir> --out <path> [--repository <id>]");
+      process.exit(2);
+    }
+    const requestedRepo = takeArg(args, "--repository");
+    const { openRepositoryModel, repositoryIds } = await import("./vnext/migration/model-store.js");
+    const { serializeModelFixture, renderModelFixture } = await import("./vnext/repo-model/fixture.js");
+    const opened = openRepositoryModel(project);
+    try {
+      const repos = repositoryIds(opened.model);
+      let repositoryId: string;
+      if (requestedRepo) {
+        if (!repos.includes(requestedRepo)) {
+          console.error(`kage model export-fixture: repository "${requestedRepo}" has no entities in the model.`);
+          process.exit(2);
+        }
+        repositoryId = requestedRepo;
+      } else if (repos.length === 1) {
+        repositoryId = repos[0];
+      } else if (repos.length === 0) {
+        console.error("kage model export-fixture: the model is empty (no entities to serialize).");
+        process.exit(2);
+        return;
+      } else {
+        console.error(`kage model export-fixture: multiple repositories (${repos.join(", ")}); pass --repository <id>.`);
+        process.exit(2);
+        return;
+      }
+      const fixture = serializeModelFixture(opened.model, repositoryId);
+      const outPath = resolve(out);
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, renderModelFixture(fixture), "utf8");
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({
+          out: outPath,
+          repository_id: repositoryId,
+          fixture_version: fixture.fixture_version,
+          entities: fixture.entities.length,
+          claims: fixture.claims.length,
+          evidence: fixture.evidence.length,
+          relations: fixture.relations.length,
+        }, null, 2));
+        return;
+      }
+      console.log(`Kage model → fixture: wrote ${fixture.fixture_version} for ${repositoryId} to ${outPath}`);
+      console.log(`  entities=${fixture.entities.length} claims=${fixture.claims.length} evidence=${fixture.evidence.length} relations=${fixture.relations.length}`);
+    } finally {
+      opened.close();
+    }
+    return;
+  }
+
   if (command === "init") {
     const withPolicy = args.includes("--with-policy");
     const result = initProject(projectArg(args), { policy: withPolicy });
@@ -675,6 +1247,9 @@ async function main(): Promise<void> {
     const detected = requested ?? probes.filter((p) => p.paths.some((path) => existsSync(path))).map((p) => p.agent);
 
     const init = initProject(project, { policy: false });
+    // T4 — day-one value: bootstrap one verifiable starter runbook from package.json scripts so the
+    // very first recall answers from memory instead of returning nothing.
+    const bootstrap = bootstrapStarterMemory(project);
     // Always write the repo policy (AGENTS.md + CLAUDE.md) — it is what instructs
     // agents to use Kage and it travels with the repo, so teammates who clone are
     // covered even before they wire their own agent. Decoupled from agent detection:
@@ -692,12 +1267,16 @@ async function main(): Promise<void> {
       }
     }
     if (json) {
-      console.log(JSON.stringify({ project_dir: init.index.projectDir, packets: init.index.packets, validation_ok: init.validation.ok, agents: wired }, null, 2));
+      console.log(JSON.stringify({ project_dir: init.index.projectDir, packets: init.index.packets, validation_ok: init.validation.ok, agents: wired, bootstrap }, null, 2));
       if (!init.validation.ok) process.exit(2);
       return;
     }
     console.log(`Kage installed in ${init.index.projectDir}\n`);
     console.log("  Memory      .agent_memory/ created — packets are plain files, reviewable in git");
+    if (bootstrap.created) {
+      console.log(`  First win   starter runbook captured ("${bootstrap.title}") — try it now:`);
+      console.log(`                kage context "how do I run the tests" --project .`);
+    }
     console.log(`  Indexes     ${init.index.indexes.length} built (code graph, recall, structure)`);
     console.log(`  Policy      AGENTS.md + CLAUDE.md ${policy.created ? "written" : policy.updated ? "updated" : "current"} — commit these so every teammate's agent uses Kage`);
     if (skipAgents) {
@@ -715,7 +1294,19 @@ async function main(): Promise<void> {
     let vcDone = false;
     try {
       const gitignorePath = join(project, ".gitignore");
-      const want = [".agent_memory/indexes/", ".agent_memory/reports/"];
+      // Deny-then-allow. Listing only indexes/ and reports/ left everything else tracked:
+      // ensureMemoryDirs creates 17 directories, so `git add -A` after install committed the
+      // structural index, the code graph and thousands of raw observation files.
+      //
+      // Two things are deliberately allowed back. `packets/` is the durable memory — the whole
+      // point of storing it in git. `conflicts/` is where the merge driver preserves the side it
+      // did not pick: if that stays ignored, a teammate whose edit lost a merge is never told, and
+      // the "nothing is silently dropped" promise only holds on the machine that did the merge.
+      const want = [
+        ".agent_memory/*",
+        "!.agent_memory/packets/",
+        "!.agent_memory/conflicts/",
+      ];
       const current = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
       const missing = want.filter((line) => !current.split("\n").some((l) => l.trim() === line));
       if (missing.length) {
@@ -726,8 +1317,14 @@ async function main(): Promise<void> {
       vcDone = true;
     } catch { /* not a git repo or no git — fall back to a hint */ }
     console.log(`  Git         ${vcDone ? ".gitignore + packet merge driver configured" : "skipped (not a git repo)"}`);
-    console.log("\nNext:  restart your agent — Kage then recalls automatically every session.");
-    console.log("       kage scan      a 60-second Truth Report on this repo");
+    if (skipAgents || !wired.some((w) => w.ok)) {
+      console.log("\nNext:  wire an agent — kage setup <agent> --project . --write");
+    } else if (wired.some((w) => w.agent === "claude-code" && w.ok)) {
+      console.log("\nNext:  restart your agent — Kage then recalls automatically every session.");
+    } else {
+      console.log("\nNext:  restart your agent — its policy file now instructs it to call Kage each session.");
+    }
+    console.log("       kage scan      a Truth Report on this repo");
     if (!vcDone) console.log(`\nWhen this becomes a git repo, run once: ${PACKET_MERGE_DRIVER_CONFIG}`);
     if (!init.validation.ok) process.exit(2);
     return;
@@ -876,7 +1473,12 @@ async function main(): Promise<void> {
     const action = args[1];
     const projectDir = projectArg(args);
     if (action === "start") {
-      await startDaemon(projectDir, { restPort: numberArg(args, "--port", 3111) });
+      await startDaemon(projectDir, {
+        restPort: numberArg(args, "--port", 3111),
+        // Opt-in, and audit-only: startOptionalVnextRuntime starts the local runtime in audit mode
+        // and leaves the legacy daemon serving if it cannot.
+        vnext: args.includes("--vnext"),
+      });
       return;
     }
     if (action === "stop") {
@@ -911,6 +1513,176 @@ async function main(): Promise<void> {
 
   if (command === "viewer") {
     await startViewer(projectArg(args), { port: numberArg(args, "--port", 3113) });
+    return;
+  }
+
+  // `open` is today's viewer under the vNext name, so the connect → status → open → receipts
+  // surface is complete now and Phase C can replace the dashboard behind it without renaming a
+  // command a user has already learned.
+  if (command === "open") {
+    await startViewer(projectArg(args), { port: numberArg(args, "--port", 3113) });
+    return;
+  }
+
+  if (command === "connect") {
+    const project = projectArg(args);
+    const json = args.includes("--json");
+    // There is no --mode flag, by design: Phase A connects in audit mode, and audit forwards the
+    // agent's exact bytes. Enabling prompt mutation is not something a connect default may do.
+    const result = await connectProject({
+      project_dir: project,
+      agents: listArg(takeArg(args, "--agents")),
+      start: !args.includes("--no-start"),
+      initialize_memory: (dir) => { initProject(dir, { policy: false }); },
+    });
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(renderConnect(result));
+    return;
+  }
+
+  if (command === "status") {
+    const project = projectArg(args);
+    const report = await vnextStatus(runtimeClientFor(project));
+    const validation = validateProject(project);
+    const memory = {
+      ok: validation.ok,
+      errors: validation.errors.length,
+      warnings: validation.warnings.length,
+    };
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ ...report, memory }, null, 2));
+      if (!validation.ok) process.exit(2);
+      return;
+    }
+    console.log(renderStatus(report));
+    console.log("");
+    console.log(`Memory: ${memory.ok ? "valid" : "INVALID"} (${memory.errors} errors, ${memory.warnings} warnings)`);
+    // Which languages in THIS repo could have compiler-exact symbols, and which currently fall to a
+    // lower tier. Reported, never acted on: Kage does not install toolchains.
+    const indexers = codeIndexerStatus(project);
+    if (indexers.indexers.length) {
+      console.log("");
+      console.log("Code indexers (compiler-exact symbols; a missing one just falls to the next tier):");
+      for (const entry of indexers.indexers) {
+        const languages = entry.languages.join(", ");
+        console.log(entry.state === "installed"
+          ? `  ${entry.id.padEnd(16)} installed   ${languages}`
+          : `  ${entry.id.padEnd(16)} available   ${languages} — ${entry.install_hint}`);
+      }
+    }
+    if (!validation.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "receipts") {
+    const project = projectArg(args);
+    const taskId = takeArg(args, "--task");
+    const limit = args.includes("--limit") ? numberArg(args, "--limit", 0) : undefined;
+    const report = await vnextReceipts(runtimeClientFor(project), {
+      task_id: taskId,
+      limit: Number.isSafeInteger(limit) && (limit as number) > 0 ? limit : undefined,
+    });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+    console.log(renderReceipts(report));
+    return;
+  }
+
+  if (command === "up") {
+    if (args.includes("--help")) {
+      console.log("kage up — bring the ambient stack up with one command; the proxy runs in the background.");
+      console.log("");
+      console.log("Usage:  kage up [--project <dir>] [--port 8788] [--mode audit|assist] [--foreground] [--no-runtime] [--json]");
+      console.log("");
+      console.log("In order: (1) connect — writes the audit-only vNext config (up NEVER writes assist config;");
+      console.log("--mode governs the proxy process alone, exactly like kage proxy --mode); (2) starts the");
+      console.log("vNext runtime daemon (detached) when this Node supports it — if it can't run, the proxy");
+      console.log("still works and evidence just isn't captured to /v2/events (--no-runtime skips it); (3)");
+      console.log("starts the proxy DETACHED in the background on --port (default 8788): it survives this");
+      console.log("terminal closing, and `kage down` stops it. A machine reboot stops it too — run `kage up`");
+      console.log("once afterwards; there is no system service. --foreground keeps the proxy in this");
+      console.log("terminal instead (Ctrl-C stops it; no daemon state is written, so `kage down` does not");
+      console.log("manage it).");
+      console.log("");
+      console.log("Default --mode audit: measurement only, nothing injected — the safe onboarding default.");
+      console.log("Note: bare `kage proxy` keeps its historical assist default; `kage up` deliberately does not.");
+      console.log("Already running? up verifies the recorded proxy (pid alive + port accepting — never the");
+      console.log("state file alone), reuses it, and exits 0; a stale record is cleaned and started fresh.");
+      console.log("Then, in ANY terminal: kage run -- <agent>   or   export ANTHROPIC_BASE_URL=http://localhost:<port>");
+      return;
+    }
+    const project = projectArg(args);
+    const port = args.includes("--port") ? numberArg(args, "--port", 8788) : 8788;
+    const modeArg = takeArg(args, "--mode");
+    if (modeArg && modeArg !== "audit" && modeArg !== "assist") {
+      console.error(`Unknown --mode "${modeArg}". Use audit (measure only, forward the client's exact bytes) or assist (inject memory).`);
+      process.exitCode = 1;
+      return;
+    }
+    const mode = modeArg === "assist" ? ("assist" as const) : ("audit" as const);
+    const foreground = args.includes("--foreground");
+    let result;
+    try {
+      result = await upProject({
+        project_dir: project,
+        port,
+        mode,
+        start_runtime: !args.includes("--no-runtime"),
+        initialize_memory: (dir) => { initProject(dir, { policy: false }); },
+      });
+    } catch (error) {
+      // Fail-open ethos: nothing half-started is left behind — the config write is idempotent,
+      // the runtime is a detached daemon or nothing, and the proxy has not started yet.
+      console.error(`kage up: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+
+    // The default path: start the proxy DETACHED, confirm it listens, record it, exit 0. The
+    // state file is written by this parent only after liveness is confirmed (proxy-daemon.ts),
+    // so a failed start leaves nothing behind but the log.
+    if (result.proxy.action === "start" && !foreground) {
+      const started = await startProxyDaemon({ project_dir: project, port: result.port, mode: result.mode });
+      if (!started.ok) {
+        if (args.includes("--json")) {
+          console.log(JSON.stringify({ ...result, daemon: { running: false, ...started } }, null, 2));
+        }
+        console.error(`kage up: the background proxy did not start — ${started.detail}. Log: ${started.log_path}`);
+        process.exit(1);
+      }
+      if (args.includes("--json")) {
+        const daemon = { running: true, pid: started.state.pid, port: started.state.port, mode: started.state.mode, log_path: started.state.log_path, reason: null };
+        console.log(JSON.stringify({ ...result, daemon }, null, 2));
+        return;
+      }
+      console.log(renderUp(result));
+      console.log("");
+      console.log(`Proxy running in the background (pid ${started.state.pid}, log: ${started.state.log_path}). Stop it with \`kage down --project ${project}\`.`);
+      console.log("It survives this terminal; a machine reboot stops it — run `kage up` once afterwards.");
+      return;
+    }
+
+    // reuse_running carries the verified daemon record inside result.proxy.daemon, so --json
+    // consumers see the live pid/port/mode without a separate field.
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else console.log(renderUp(result, { foreground }));
+    // reuse_running: the verified daemon already serves this project — exit 0, nothing to start.
+    // already_listening: a listener we did not record owns the port; the honest message printed
+    // above suggests --port and we exit 0 without touching any state.
+    if (result.proxy.action !== "start") return;
+    console.log("");
+    const server = startProxy(project, { port: result.port, mode: result.mode });
+    server.on("error", (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      console.error(code === "EADDRINUSE"
+        ? `kage up: port ${result.port} was claimed between the check and the start. If that's another Kage proxy you're already set; otherwise rerun with --port <n>.`
+        : `kage up: the proxy could not start — ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    });
     return;
   }
 
@@ -957,7 +1729,7 @@ async function main(): Promise<void> {
     }
     if (result.deleted.length) {
       console.log(`\nDeleted (${result.deleted.length}):`);
-      for (const p of result.deleted) console.log(`  🗑  ${p.title}`);
+      for (const p of result.deleted) console.log(`  ✗ ${p.title}`);
     }
     if (!result.deprecated.length && !result.deleted.length) {
       console.log("No stale packets found — memory is clean.");
@@ -967,7 +1739,11 @@ async function main(): Promise<void> {
 
   if (command === "compact") {
     const project = projectArg(args);
-    const dryRun = args.includes("--dry-run");
+    // Safe by default, matching kage_compact's MCP default (dry_run:true unless set
+    // false) — the CLI used to default to executing, the opposite safety posture of
+    // the exact same compactProject() call reached via MCP. --dry-run is still
+    // accepted (now a no-op) so existing scripts that pass it keep working.
+    const dryRun = !args.includes("--execute");
     const result = compactProject(project, { dryRun });
     if (args.includes("--json")) {
       console.log(JSON.stringify(result, null, 2));
@@ -977,7 +1753,7 @@ async function main(): Promise<void> {
     console.log(`Kage compact${label} — scanned ${result.total_scanned} packets`);
     if (result.pruned_citations.length) {
       console.log(`\nPruned dead citations (${result.pruned_citations.length}):`);
-      for (const p of result.pruned_citations) console.log(`  ✂  ${p.title} — removed ${p.removed_paths.join(", ")}`);
+      for (const p of result.pruned_citations) console.log(`  ✗ ${p.title} — removed ${p.removed_paths.join(", ")}`);
     }
     if (result.deprecated.length) {
       console.log(`\nDeprecated stale (${result.deprecated.length}):`);
@@ -1058,6 +1834,42 @@ async function main(): Promise<void> {
     console.log(`Next actions:\n${result.next_actions.map((action) => `  - ${action}`).join("\n")}`);
     if (!result.ok) process.exit(2);
     return;
+  }
+
+  if (command === "minimal-change") {
+    const action = args[1];
+    if (action === "check") {
+      const project = projectArg(args);
+      const report = minimalChangeReport(project, { base: takeArg(args, "--base") ?? null });
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(report, null, 2));
+        if (report && !report.ok) process.exit(2);
+        return;
+      }
+      if (!report) {
+        console.log("Minimal Change Guard is not enabled for this project.");
+        console.log("Enable it in .agent_memory/daemon/vnext/config.json (vnext.minimal_change).");
+        return;
+      }
+      console.log(`Minimal Change Guard (${report.mode}) for ${project}`);
+      console.log(report.summary);
+      for (const finding of report.findings) {
+        const tag = report.blocking.includes(finding) ? "BLOCK" : finding.severity === "info" ? "note " : "warn ";
+        console.log(`  [${tag}] ${finding.kind}: ${finding.title}${finding.deterministic ? "" : " (advisory, model opinion)"}`);
+        for (const evidence of finding.evidence.slice(0, 3)) {
+          console.log(`         evidence: ${evidence.source_uri}${evidence.symbol ? `#${evidence.symbol}` : ""}`);
+        }
+      }
+      if (report.suppressed.length) {
+        console.log(`Suppressed: ${report.suppressed.length} finding(s) with recorded justifications.`);
+      }
+      if (!report.ok) {
+        console.log("To dismiss a finding, record a justification (actor, reason, commit, expiry).");
+        process.exit(2);
+      }
+      return;
+    }
+    usage();
   }
 
   if (command === "pr") {
@@ -1178,6 +1990,41 @@ async function main(): Promise<void> {
       for (const error of result.errors) console.log(`  - ${error}`);
       process.exitCode = 2;
     }
+    return;
+  }
+
+  if (command === "community-domains") {
+    console.log(await kageListPublicDomains());
+    return;
+  }
+
+  if (command === "community-search") {
+    const query = firstPositional(args);
+    if (!query) usage();
+    console.log(await kageSearchPublicGraph(query, takeArg(args, "--domain") ?? null));
+    return;
+  }
+
+  if (command === "community-fetch") {
+    const domain = takeArg(args, "--domain");
+    const nodeId = takeArg(args, "--node");
+    if (!domain || !nodeId) usage();
+    console.log(await kageFetchPublicGraphNode(domain, nodeId));
+    return;
+  }
+
+  if (command === "ledger") {
+    const result = kageSessionLearningLedger(projectArg(args), {
+      sessionId: takeArg(args, "--session"),
+      limit: args.includes("--limit") ? numberArg(args, "--limit", 50) : undefined,
+    });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else console.log(result.context_block);
+    return;
+  }
+
+  if (command === "workflow") {
+    console.log(KAGE_WORKFLOW_TEXT);
     return;
   }
 
@@ -1446,11 +2293,13 @@ async function main(): Promise<void> {
     console.log(`  Evidence coverage: ${result.memory_graph.evidence_coverage_percent}%`);
     console.log(`  Average quality: ${result.memory_graph.average_quality_score}/100`);
     console.log(`  Duplicate candidates: ${result.memory_graph.duplicate_candidate_pairs}`);
-    console.log("\nToken savings:");
+    console.log("\nToken savings (whole-repo modeled estimate, not measured usage):");
     console.log(`  Indexed source tokens: ${result.savings.estimated_indexed_source_tokens}`);
     console.log(`  Memory tokens: ${result.savings.estimated_memory_tokens}`);
     console.log(`  Recall context tokens: ${result.savings.estimated_recall_context_tokens}`);
     console.log(`  Estimated tokens saved per recall: ${result.savings.estimated_tokens_saved_per_recall}`);
+    console.log(`  This models a typical recall against the whole indexed repo — it is not from real recall events.`);
+    console.log(`  For your actual cumulative savings: kage gains. For a reproducible before/after benchmark: kage savings.`);
     if (result.quality) {
       console.log("\nQuality:");
       console.log(`  Useful memory ratio: ${result.quality.useful_memory_ratio_percent}%`);
@@ -1474,50 +2323,51 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "report" && args[1] === "team") {
+    // T3 — the lead-facing "is this helping?" report. Measured-or-unavailable, never fabricated;
+    // estimated figures keep their _estimated suffix so they can never masquerade as measured.
+    const report = teamValueReport(projectArg(args));
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+    console.log(`Team value report — ${report.generated_for}`);
+    console.log("");
+    console.log(`Value (measured counts): recalls served ${report.value.recalls_served}, stale withheld ${report.value.stale_withheld}`);
+    console.log(`Value (ESTIMATED tokens): read-vs-source ${report.value.tokens_saved_estimated}, knowledge replay ${report.value.replay_tokens_estimated}`);
+    console.log("");
+    if (report.injection_gate.available) {
+      console.log(`Injection gate (live): ${report.injection_gate.injected}/${report.injection_gate.gates} requests injected (rate ${report.injection_gate.injection_rate}), avg confidence ${report.injection_gate.average_confidence}`);
+    } else {
+      console.log(`Injection gate (live): ${report.injection_gate.note}`);
+    }
+    console.log("");
+    console.log(`Store composition: ${report.composition.total_packets} packets — ${Math.round(report.composition.non_derivable_share * 100)}% non-derivable (what code cannot say), ${Math.round(report.composition.derivable_risk_share * 100)}% derivable-risk`);
+    for (const row of report.composition.classes.slice(0, 6)) {
+      console.log(`  ${row.class}: ${row.count} packets, ${row.uses_30d} uses in 30d`);
+    }
+    console.log("");
+    if (report.top_memories.length) {
+      console.log("Most-used memory (30d):");
+      for (const memory of report.top_memories) console.log(`  ${memory.uses_30d}× [${memory.type}] ${memory.title}`);
+    } else {
+      console.log("Most-used memory (30d): none recorded yet");
+    }
+    console.log("");
+    console.log(`Coverage: ${report.coverage.areas} top-level areas; dark (no approved memory): ${report.coverage.dark_areas.length ? report.coverage.dark_areas.join(", ") : "none"}`);
+    console.log(`Review health: ${report.review_health.pending} pending${report.review_health.oldest_pending_days !== null ? ` (oldest ${report.review_health.oldest_pending_days}d)` : ""}, ${report.review_health.contradictions} contradiction link(s)`);
+    return;
+  }
+
   if (command === "gains") {
     const summary = valueSummary(projectArg(args));
     if (args.includes("--json")) {
       console.log(JSON.stringify(summary, null, 2));
       return;
     }
-    const plural = (count: number, singular: string, pluralForm: string): string => (count === 1 ? singular : pluralForm);
-    const week = summary.last_7d;
-    if (!summary.all_time.recalls && !summary.all_time.stale_withheld && !summary.all_time.stale_caught && !summary.all_time.caller_answers) {
-      console.log("No value events recorded yet — this ledger fills up as your agent works.");
-      console.log("Every recall logs the tokens it saved (by not re-reading cited files) and every");
-      console.log("stale memory it withheld. Come back after a session and you'll see a receipt here.\n");
-      console.log("Start now:");
-      console.log("  kage scan --project .                  a 60-second Truth Report on this repo");
-      console.log("  kage scan --project . --scorecard      a shareable scorecard you can post");
-      console.log("  then just work — your agent captures and recalls, verified against this code.");
-      return;
-    }
-    console.log(
-      `This week Kage saved you ~${formatTokenCount(week.tokens_saved)} tokens (~$${week.estimated_dollars.toFixed(2)}), ` +
-      `blocked ${week.stale_withheld} stale ${plural(week.stale_withheld, "memory", "memories")}, ` +
-      `caught ${week.stale_caught} stale at change-time, ` +
-      `answered ${week.recalls} ${plural(week.recalls, "recall", "recalls")}.`
-    );
-    const windowLine = (label: string, window: typeof week): string =>
-      `  ${label} ~${formatTokenCount(window.tokens_saved)} tokens (~$${window.estimated_dollars.toFixed(2)}) · ` +
-      `${window.stale_withheld} stale blocked · ${window.stale_caught} stale caught at change-time · ` +
-      `${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
-      `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")}`;
-    console.log(windowLine("Today:   ", summary.today));
-    console.log(windowLine("All time:", summary.all_time));
-    if (summary.all_time.replay_tokens > 0) {
-      console.log(
-        `Knowledge replay value: ~${formatTokenCount(week.replay_tokens)} tokens this week · ` +
-        `~${formatTokenCount(summary.all_time.replay_tokens)} all time ` +
-        `(discovery cost of served memories vs their compressed read cost)`
-      );
-    }
-    const usdOverridden = Number.isFinite(Number(process.env.KAGE_USD_PER_MTOK)) && Number(process.env.KAGE_USD_PER_MTOK) > 0;
-    console.log(
-      `\nDollars estimated at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
-      `(${usdOverridden ? "via KAGE_USD_PER_MTOK" : "Sonnet-class default — set KAGE_USD_PER_MTOK for your model"}). ` +
-      `Ledger: .agent_memory/reports/value.json`
-    );
+    // Rendering lives in the kernel (formatValueGains) so the measured/estimated honesty
+    // contract is unit-tested, not re-typed here where it could silently drift.
+    for (const line of formatValueGains(summary)) console.log(line);
     return;
   }
 
@@ -1620,17 +2470,126 @@ async function main(): Promise<void> {
   }
 
   if (command === "reverify") {
+    // Bulk grounding refresh for packets that predate an anchor improvement. Safe by
+    // construction: only byte-identical files are touched, so no claim is re-asserted
+    // and no verification clock is reset. Packets whose code moved are reported, not
+    // stamped — those need `--evidence`.
+    if (args.includes("--reanchor-unchanged")) {
+      const result = reanchorUnchangedPackets(projectArg(args));
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Re-anchored ${result.refreshed.length} packet(s) against unchanged code`);
+        if (result.skipped_changed.length) {
+          console.log(`  ${result.skipped_changed.length} skipped — cited code moved, so these need kage reverify --packet <id> --evidence "<what you checked>"`);
+        }
+        for (const error of result.errors) console.log(`  error: ${error}`);
+      }
+      if (!result.ok) process.exit(2);
+      return;
+    }
     const packetId = takeArg(args, "--packet");
     if (!packetId) usage();
-    const result = reverifyMemory(projectArg(args), packetId!);
+    const result = reverifyMemory(projectArg(args), packetId!, {
+      evidence: takeArg(args, "--evidence"),
+      verifiedBy: takeArg(args, "--verified-by"),
+    });
     if (args.includes("--json")) {
       console.log(JSON.stringify(result, null, 2));
     } else if (result.ok) {
       console.log(`Reverified ${result.packet_id}`);
       console.log(`  grounding refreshed for ${result.refreshed_paths.length} path(s)${result.was_stale ? " · stale flag cleared" : ""}`);
+      if (result.changed_paths.length) console.log(`  evidence recorded for changed path(s): ${result.changed_paths.join(", ")}`);
       if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
     } else {
       console.log(`Reverify failed: ${result.errors.join("; ")}`);
+    }
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "plan") {
+    // The plan loop's deterministic core: intent -> grounded, clustered, estimated work
+    // items, with the memory that bears on it surfaced BEFORE anyone starts.
+    const project = projectArg(args);
+    const intentText = takeArg(args, "--intent") ?? firstPositional(args);
+    if (!intentText) {
+      console.error("Usage: kage plan --intent \"what should become true\" [--title <t>] [--project <dir>] [--json]");
+      process.exit(2);
+    }
+    const plan = planIntent(project, intentText!, { title: takeArg(args, "--title") });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(plan, null, 2));
+    } else if (plan.ok) {
+      if (plan.bearing_memory.length) {
+        console.log("What the team already knows (bears on this intent):");
+        for (const entry of plan.bearing_memory.slice(0, 5)) console.log(`  · ${entry.title}`);
+        console.log("");
+      }
+      console.log(`Planned ${plan.items.length} work item(s):`);
+      for (const item of plan.items) {
+        const est = item.estimate.confidence === "none"
+          ? "no estimate yet — completes after the first tracked changes"
+          : `~${item.estimate.tokens_p50} tokens (${item.estimate.confidence})`;
+        console.log(`  ${item.title}`);
+        console.log(`    paths: ${item.paths.join(", ") || "(none — ground before claiming)"} · blast +${item.dependents.length} dependents · ${est}`);
+        console.log(`    claim: kage claim --packet ${item.work_id}`);
+      }
+    } else {
+      console.error(plan.errors.join("; "));
+    }
+    if (!plan.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "work") {
+    // The derived board (orchestrator §5-§6): stages computed from commands + git
+    // evidence, never from clicks, with the attention queue on top. Read-only by design.
+    const project = projectArg(args);
+    const state = deriveWorkState(project, {
+      openPullRequestBranches: () => cachedOpenPullRequestBranches(project),
+    });
+    const attention = attentionQueue(project);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ ...state, attention }, null, 2));
+      return;
+    }
+    if (attention.length) {
+      console.log(`Attention (${attention.length}):`);
+      for (const item of attention.slice(0, 8)) {
+        console.log(`  [${String(item.severity).padStart(3)}] ${item.kind.padEnd(18)} ${item.summary}`);
+        console.log(`        actions: ${item.actions.join(" · ")}`);
+      }
+      console.log("");
+    }
+    if (!state.items.length) {
+      console.log("No work items. Create one: kage learn --type proposal --title \"…\" --learning \"…\" --paths <files>");
+      return;
+    }
+    console.log("Work (stage derived from evidence):");
+    for (const item of state.items) {
+      const who = item.claimed_by ? ` · ${item.claimed_by}` : "";
+      const evidence = item.correlated_commits.length ? ` · ${item.correlated_commits.length} commit(s)` : "";
+      console.log(`  ${item.derived_stage.padEnd(9)} ${item.title}${who}${evidence}`);
+    }
+    return;
+  }
+
+  if (command === "brief") {
+    // The missing half of the work-item loop: what does the team already know about the code this
+    // task touches, and what does it reach? Assembled from recall + risk, never a stored document.
+    const packetId = takeArg(args, "--packet") ?? firstPositional(args);
+    if (!packetId) {
+      console.error("Usage: kage brief --packet <work-item-id> [--project <dir>] [--json]");
+      process.exit(2);
+    }
+    const result = workItemBrief(projectArg(args), packetId);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log(result.brief);
+    } else {
+      console.error(result.errors.join("; "));
     }
     if (!result.ok) process.exit(2);
     return;
@@ -2042,6 +3001,92 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "proxy") {
+    const project = projectArg(args);
+    const port = args.includes("--port") ? numberArg(args, "--port", 8788) : 8788;
+    const upstream = takeArg(args, "--upstream");
+    const workspace = takeArg(args, "--workspace");
+    const modeArg = takeArg(args, "--mode");
+    if (modeArg && modeArg !== "audit" && modeArg !== "assist" && modeArg !== "protect") {
+      console.error(`Unknown --mode "${modeArg}". Use audit (measure only, forward the client's exact bytes), assist (inject memory + reversible compression), or protect (defensive, measured, forwards the original).`);
+      process.exitCode = 1;
+      return;
+    }
+    // Bare `kage proxy` keeps its historical assist default (kage up defaults to audit — see G7);
+    // audit and protect are explicit opt-ins.
+    const mode = modeArg === "audit" ? ("audit" as const) : modeArg === "protect" ? ("protect" as const) : ("assist" as const);
+    // assist can ADD and (with lossy enabled) COMPRESS context. A lossy transform with no reversible
+    // store is a data-loss risk, and assist with no receipt sink runs entirely unmeasured — so the CLI
+    // refuses to start assist on unhealthy storage rather than quietly degrading. audit/protect are
+    // always safe (they forward the client's exact bytes), so they never gate on storage health.
+    if (mode === "assist" && existsSync(join(project, ".agent_memory"))) {
+      const health = probeAssistStorage(project);
+      if (!health.healthy) {
+        console.error(`kage proxy --mode assist refused: ${health.detail}.`);
+        console.error(`assist needs healthy reversible + receipt storage before it may add or compress context. Run \`kage proxy --mode audit\` to measure safely instead.`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    startProxy(project, {
+      port,
+      upstream: upstream ?? undefined,
+      verbose: args.includes("--verbose"),
+      noInject: args.includes("--no-inject"),
+      workspace: workspace ?? undefined,
+      mode,
+      receiptSink: args.includes("--no-receipts") ? null : undefined,
+      countTokens: args.includes("--count-tokens"),
+    });
+    return;
+  }
+
+  if (command === "savings") {
+    const result = benchmarkSavings(projectArg(args), { queries: args.includes("--queries") ? numberArg(args, "--queries", 12) : undefined });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    const pct = result.reduction_percent;
+    console.log("");
+    console.log(`  Kage cut context by ${pct}%`);
+    console.log("");
+    console.log(`  Baseline (read the files)   ${formatTokenCount(result.baseline_tokens_avg)} tokens / query`);
+    console.log(`  With Kage (recall + graph)  ${formatTokenCount(result.kage_tokens_avg)} tokens / query`);
+    console.log(`  Saved                       ${formatTokenCount(result.baseline_tokens_avg - result.kage_tokens_avg)} tokens / query  (${result.queries} queries, recall hit ${Math.round(result.recall_hit_rate * 100)}%)`);
+    console.log("");
+    console.log(`  Deterministic · no LLM · rerun on this commit = identical ${pct}%`);
+    console.log(`  Reproduce:  npx -y @kage-core/kage-graph-mcp savings --project . --json`);
+    console.log("");
+    console.log(`  ${result.caveats[0]}`);
+    console.log(`  This is a controlled benchmark, not your cumulative usage. For that: kage gains.`);
+    console.log("");
+    return;
+  }
+
+  if (command === "team") {
+    const result = teamMemoryReport(projectArg(args));
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    const freshPct = Math.round(result.freshness_rate * 100);
+    console.log("");
+    console.log(`  Team memory health: ${freshPct}% verified fresh`);
+    console.log("");
+    console.log(`  ${result.approved_packets} approved packets` + (result.unattributed_packets ? `  (${result.unattributed_packets} unattributed)` : ""));
+    if (result.contributors.length) {
+      console.log(`  Contributors: ${result.contributors.map((c) => `${c.name} (${c.packets})`).join(", ")}`);
+    }
+    console.log(`  Pending review     ${result.pending_review}${result.oldest_pending_days !== null ? `  (oldest ${result.oldest_pending_days}d)` : ""}`);
+    console.log(`  Stale, withheld    ${result.stale_withheld}`);
+    console.log(`  Contradictions     ${result.contradictions}`);
+    console.log(`  Conflicts saved    ${result.conflicts_preserved}  (concurrent edits preserved, not dropped)`);
+    console.log("");
+    console.log(`  Reproduce:  npx -y @kage-core/kage-graph-mcp team --project . --json`);
+    return;
+  }
+
   if (command === "benchmark") {
     if (args.includes("--trust")) {
       const result = benchmarkTrust(projectArg(args));
@@ -2274,9 +3319,24 @@ async function main(): Promise<void> {
     else {
       console.log(result.context_block);
       if (result.value_receipt) {
-        console.log(`\n↳ saved ~${formatTokenCount(result.value_receipt.tokens_saved)} tokens vs reading source · ${result.value_receipt.stale_withheld} stale withheld`);
+        console.log(formatRecallValueReceipt(result.value_receipt));
       }
     }
+    return;
+  }
+
+  if (command === "context") {
+    const query = firstPositional(args);
+    if (!query) usage();
+    const result = kageContext(projectArg(args), query, {
+      limit: args.includes("--limit") ? numberArg(args, "--limit", 5) : undefined,
+      targets: listArg(takeArg(args, "--targets")),
+      changedFiles: listArg(takeArg(args, "--changed-files")),
+      sessionId: takeArg(args, "--session"),
+    });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else console.log(result.context_block);
+    if (!result.validation_ok) process.exitCode = 2;
     return;
   }
 
@@ -2497,6 +3557,114 @@ async function main(): Promise<void> {
   if (command === "review") {
     await review(projectArg(args));
     return;
+  }
+
+  if (command === "claim") {
+    const packetId = takeArg(args, "--packet");
+    if (!packetId) usage();
+    const project = projectArg(args);
+    const actor = takeArg(args, "--actor") ?? gitUserName(project) ?? "unknown";
+    const result = claimWorkItem(project, packetId!, actor);
+    // The claim is also a command EVENT — the derivation engine's evidence. The kernel
+    // write above holds the lock; the event is what `kage work` and attention reduce over.
+    if (result.ok) {
+      try { appendCommandEvent(project, { kind: "task.claimed", work_id: packetId!, actor }); } catch { /* derivation-only; never fails a claim */ }
+    }
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else if (result.ok) console.log(`Claimed ${packetId} as ${actor}.`);
+    else console.log(`Claim failed: ${result.errors.join("; ")}`);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "implements") {
+    const outputId = takeArg(args, "--packet");
+    const proposalId = takeArg(args, "--proposal");
+    if (!outputId || !proposalId) usage();
+    const project = projectArg(args);
+    const evidence = takeArg(args, "--evidence") ?? "";
+    const result = linkImplements(project, outputId!, proposalId!, evidence);
+    // Cloud glue: if this repo has a team linked (`kage cloud link`) and the
+    // proposal just advanced to in_review, push it so a teammate can approve it
+    // through the non-forgeable, token-authenticated gate (see `kage cloud
+    // approve`'s matching glue below) instead of the weaker local `kage gate
+    // review`. Best-effort — a push failure never fails the link itself.
+    let cloudPushResult: Awaited<ReturnType<typeof cloudPush>> | null = null;
+    if (result.ok && result.auto_advanced) {
+      const link = readTeamLink(project);
+      if (link) {
+        try {
+          cloudPushResult = await cloudPush(link.server, link.team_id, link.token, project);
+        } catch (error) {
+          cloudPushResult = { submitted: 0, failed: [{ title: proposalId!, reason: error instanceof Error ? error.message : String(error) }] };
+        }
+      }
+    }
+    if (args.includes("--json")) console.log(JSON.stringify({ ...result, cloud_push: cloudPushResult }, null, 2));
+    else if (result.ok) {
+      console.log(`Linked ${outputId} implements ${proposalId}.`);
+      if (result.auto_advanced) console.log(`  ${proposalId} advanced to in_review.`);
+      if (cloudPushResult) {
+        console.log(cloudPushResult.failed.length
+          ? `  Cloud push failed: ${cloudPushResult.failed.map((f) => f.reason).join("; ")}`
+          : `  Pushed to the team's Kage Cloud for review (kage cloud approve).`);
+      }
+    } else {
+      console.log(`Link failed: ${result.errors.join("; ")}`);
+    }
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "stage") {
+    const packetId = takeArg(args, "--packet");
+    const toStage = takeArg(args, "--to") as WorkStage | undefined;
+    if (!packetId || !toStage || !(WORK_STAGES as readonly string[]).includes(toStage)) {
+      console.error(`Usage: kage stage --packet <id> --to <${WORK_STAGES.join("|")}> --actor <name>`);
+      process.exit(2);
+    }
+    const project = projectArg(args);
+    const actor = takeArg(args, "--actor") ?? gitUserName(project) ?? "unknown";
+    // The terminal in_review -> done edge is not reachable from this non-interactive
+    // command — only `kage gate review` (TTY-interactive) or the cloud approve gate
+    // (token-authenticated) can perform it. See gateReview()'s comment for why.
+    if (toStage === "done") {
+      console.error("kage stage cannot advance a work item to done non-interactively. Use `kage gate review` or `kage cloud approve`.");
+      process.exit(2);
+    }
+    const evidence = takeArg(args, "--evidence") ?? "";
+    const result = transitionWorkStage(project, packetId, toStage, { actor, evidence });
+    if (args.includes("--json")) console.log(JSON.stringify(result, null, 2));
+    else if (result.ok) console.log(`${packetId}: ${result.from_stage} -> ${result.to_stage}`);
+    else console.log(`Transition failed: ${result.errors.join("; ")}`);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "gate") {
+    const sub = args[1];
+    if (sub === "review") {
+      await gateReview(projectArg(args));
+      return;
+    }
+    if (sub === "list" || sub === undefined) {
+      const project = projectArg(args);
+      const stage = takeArg(args, "--stage") as WorkStage | undefined;
+      const items = listWorkItems(project, { stage });
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(items, null, 2));
+        return;
+      }
+      if (!items.length) {
+        console.log(stage ? `No work items at stage ${stage}.` : "No work items.");
+        return;
+      }
+      for (const item of items) {
+        console.log(`${item.stage.padEnd(10)} ${item.id}  ${item.title}${item.claimed_by ? `  (claimed by ${item.claimed_by})` : ""}`);
+      }
+      return;
+    }
+    usage();
   }
 
   if (command === "validate") {

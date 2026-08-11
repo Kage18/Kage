@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -8,6 +8,19 @@ import { Worker } from "node:worker_threads";
 import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
+import { averageNumber, codingMrr, codingNdcgAt, codingPrecisionAt, codingRecallAt, countByKey, percentileNumber, roundDecimal, titleCase } from "./metrics-math.js";
+import { isRecord } from "./type-guards.js";
+import {
+  certifySurface,
+  type AgentSurface,
+  type AgentSurfaceCertification,
+  type CertifySurfaceInput,
+} from "./vnext/adapters/capability-matrix.js";
+import {
+  buildMinimalChangeReport,
+  type MinimalChangeReport,
+} from "./vnext/policy/report.js";
+import { readVnextConfig } from "./vnext/runtime/config.js";
 
 export const PACKET_SCHEMA_VERSION = 2;
 
@@ -16,6 +29,7 @@ export const MEMORY_TYPES = [
   "runbook",
   "bug_fix",
   "decision",
+  "proposal",
   "rationale",
   "convention",
   "workflow",
@@ -34,6 +48,15 @@ export type MemoryStatus = "pending" | "approved" | "deprecated" | "superseded";
 export type MemoryScope = "session" | "personal" | "repo" | "org" | "public";
 export type MemoryVisibility = "private" | "team" | "org" | "public";
 export type MemorySensitivity = "public" | "internal" | "confidential" | "blocked";
+
+// SDLC work-item position, independent of MemoryStatus. `status` answers "is this
+// trustworthy for recall"; `stage` answers "where is this in the SDLC." A `stage:
+// "done"` proposal can still later become `status: "superseded"` — these are
+// orthogonal axes and must stay that way. Only `type: "proposal"` packets carry a
+// stage in Phase 1; see transitionWorkStage(), the single function allowed to
+// write this field.
+export type WorkStage = "proposed" | "claimed" | "in_review" | "done";
+export const WORK_STAGES = ["proposed", "claimed", "in_review", "done"] as const;
 
 export interface MemoryPacket {
   schema_version: 2;
@@ -58,6 +81,12 @@ export interface MemoryPacket {
   created_at: string;
   updated_at: string;
   author_branch?: string | null;
+  // Git user.name at capture time — who on the team wrote this, surfaced in recall
+  // and `kage review` so teammates see whose claim they're trusting, not just when.
+  author_name?: string | null;
+  stage?: WorkStage;
+  claimed_by?: string | null;
+  claimed_at?: string | null;
 }
 
 // Per-symbol content fingerprint. Anchors a memory to the SPECIFIC symbols it is
@@ -155,6 +184,10 @@ export interface AgentActivationReport {
     code_graph_works: boolean;
     mcp_tool_reachable: boolean;
     ambient_hooks_present: boolean;
+    /** False for every agent except claude-code — the others have no hook mechanism
+     *  at all, so ambient_hooks_present being vacuously true for them does not mean
+     *  automation exists; it means there was nothing to check. */
+    ambient_hooks_supported: boolean;
   };
   hook_summary?: AgentHookSummary;
   config_path: string | null;
@@ -168,6 +201,8 @@ export interface AgentHookSummary {
   required: string[];
   installed: string[];
   missing: string[];
+  /** Installed scripts whose kage-hooks-v stamp is older than the current templates. */
+  outdated: string[];
   script_paths: string[];
   ready: boolean;
 }
@@ -186,9 +221,29 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+// Corpus-normalized injection decision (W3). Recall scores are match-strength SUMS, not normalized
+// relevance — a 325-packet store's lexical noise outscores a small store's genuine direct match, so
+// an ABSOLUTE score floor is impossible (see the negative_result packet
+// "recall-scores-are-not-corpus-normalized"). What IS decidable is whether the top candidate stands
+// OUT of its own corpus's score distribution: a real answer is a spike above the noise band; topical
+// noise is a flat band with no spike. This decision is computed inside recall (the only place the
+// full candidate distribution exists) and consumed by composeInjection to answer the question an
+// eager injector never asked: "is ANY of this worth the tokens?"
+export interface RecallInjectionDecision {
+  /** Should an automatic injector attach this recall's results? */
+  inject: boolean;
+  /** 0..1 — how far the top candidate stands out of this corpus's own score distribution. */
+  confidence: number;
+  top_score: number | null;
+  /** How many packets scored above zero for this query. */
+  candidate_count: number;
+  why: string;
+}
+
 export interface RecallResult {
   query: string;
   context_block: string;
+  injection: RecallInjectionDecision;
   results: Array<{
     packet: MemoryPacket;
     score: number;
@@ -205,6 +260,9 @@ export interface RecallResult {
   // Personal-memory section (~/.kage/memory): kept OUT of `results` so repo flows
   // (pr-check, stale-catch, refresh, access tracking) never see personal packets.
   personal?: PersonalRecallEntry[];
+  // Team-memory section (Kage Cloud pull cache, .agent_memory/team/): same reasoning —
+  // kept out of `results` so repo-only flows never see server-sourced packets.
+  team?: TeamRecallEntry[];
 }
 
 export interface RecallScoreBreakdown {
@@ -218,6 +276,8 @@ export interface RecallScoreBreakdown {
   vector: number;
   usage: number;
   freshness: number;
+  recency: number;
+  identifier: number;
   quality: number;
   feedback: number;
   final: number;
@@ -1897,7 +1957,9 @@ export type MemoryAuditOperation =
   | "reject"
   | "supersede"
   | "deprecate"
-  | "delete";
+  | "delete"
+  | "claim"
+  | "transition";
 
 export interface MemoryAuditEntry {
   schema_version: 1;
@@ -2203,6 +2265,12 @@ export interface PrCheckResult {
   warnings: string[];
   required_actions: string[];
   memory_reconciliation?: MemoryReconciliationReport;
+  /**
+   * The Minimal Change Guard report (Phase D, Task 10). Present only when vNext policy is enabled.
+   * Advisory by default: it contributes warnings, never errors. Only `enforced` mode with selected
+   * deterministic rules can add to `errors` and fail the check.
+   */
+  minimal_change?: MinimalChangeReport;
 }
 
 export interface MemoryReconciliationItem {
@@ -2310,13 +2378,10 @@ Do this without waiting for the user to ask. Kage should feel like ambient repo 
 If Kage appears installed but no Kage tools are available, report that the active
 agent session has not loaded the MCP server and ask the user to restart the
 agent. After restart, call \`kage_verify_agent\` to prove the harness is live.
-
-## Show the Value
-
-\`kage_context\` and \`kage_recall\` return a one-line gains receipt (tokens/$ saved
-this session, stale memories withheld). When it is non-trivial, relay it to the
-user in your own words — Kage's value is otherwise invisible, and a user who never
-sees it churns. Repeat only what the tool actually reported; never fabricate numbers.
+Until then, fall back to the memory directly: read the packet files under
+\`.agent_memory/packets/\` — each is a self-describing OKF markdown document
+(verification status in \`x-kage-*\` frontmatter; treat anything not marked
+verified as unconfirmed). No tools are required to read them.
 
 ## Automatic Capture
 
@@ -2392,25 +2457,32 @@ For normal coding tasks:
 For quick factual questions, \`kage_context\` alone is enough. For status or demo requests, call \`kage_metrics\`.
 ${AGENTS_POLICY_END}
 `;
+// Hooks pass raw user prompts as recall queries ("what is X? can we replace it"),
+// so interrogatives, pronouns, and auxiliaries must be stopwords too — otherwise
+// filler words collect BM25/vector/graph credit and drown the query's rare,
+// high-IDF terms (a packet literally titled with the queried term lost to
+// packets matching only "what"/"can"/"we").
 const STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "do",
-  "does",
-  "for",
-  "how",
-  "i",
-  "in",
-  "is",
-  "it",
-  "of",
-  "on",
-  "or",
-  "the",
-  "to",
-  "with",
+  "a", "about", "again", "also", "an", "and", "are", "as", "at",
+  "be", "been", "being", "but", "by",
+  "can", "could",
+  "did", "do", "does",
+  "else",
+  "for", "from",
+  "had", "has", "have", "having", "he", "her", "hers", "here", "him", "his", "how",
+  "i", "if", "in", "into", "is", "it", "its",
+  "just",
+  "let", "lets",
+  "may", "me", "might", "mine", "my",
+  "no", "not",
+  "of", "on", "once", "or", "our", "ours", "over",
+  "please",
+  "shall", "she", "should", "so",
+  "than", "that", "the", "their", "theirs", "them", "then", "there", "these", "they", "this", "those", "to", "too",
+  "under", "us",
+  "very",
+  "was", "we", "were", "what", "when", "where", "which", "who", "whom", "whose", "why", "will", "would", "with",
+  "you", "your", "yours",
 ]);
 
 export function memoryRoot(projectDir: string): string {
@@ -2427,6 +2499,58 @@ export function pendingDir(projectDir: string): string {
 
 export function publicCandidatesDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "public-candidates");
+}
+
+// Local cache of packets pulled from a Kage Cloud team namespace (`kage cloud pull`).
+// Deliberately NOT the same directory as repo packets (packetsDir): this is server-sourced
+// state, not something a contributor authored and reviewed via this repo's own PR flow, so
+// it must never be git-committed or touched by gc/refresh/the merge driver's repo-packet
+// assumptions. Verification stays entirely client-side (see teamRecallEntries): the server
+// only ever stores packets + fingerprints, never re-derives trust itself.
+export function teamPacketsDir(projectDir: string): string {
+  return join(memoryRoot(projectDir), "team", "packets");
+}
+
+function teamLinkPath(projectDir: string): string {
+  return join(memoryRoot(projectDir), "team", "link.json");
+}
+
+export interface TeamLink {
+  server: string;
+  team_id: string;
+  token: string;
+  linked_at: string;
+}
+
+// Persists which Kage Cloud team this repo talks to (`kage cloud link`), so `kage viewer`
+// can surface a one-click "Team" link instead of every command needing --server/--team/--token
+// spelled out. Not a secret vault: the token sits in the SAME trust tier it already lives in
+// everywhere else in this codebase (CLI args, the dashboard URL query string) — this file is
+// gitignored (.agent_memory/team/ is not on the packets allowlist) and never committed.
+export function writeTeamLink(projectDir: string, link: Omit<TeamLink, "linked_at">): TeamLink {
+  ensureDir(join(memoryRoot(projectDir), "team"));
+  const stamped: TeamLink = { ...link, linked_at: nowIso() };
+  writeJson(teamLinkPath(projectDir), stamped);
+  return stamped;
+}
+
+export function readTeamLink(projectDir: string): TeamLink | null {
+  const path = teamLinkPath(projectDir);
+  if (!existsSync(path)) return null;
+  try {
+    return readJson<TeamLink>(path);
+  } catch {
+    return null;
+  }
+}
+
+// Where the packet merge driver preserves a losing side instead of discarding it.
+// The driver is last-write-wins by self-reported updated_at, not a field-level
+// three-way merge — so when two teammates concurrently edit the SAME packet file
+// (e.g. both reverify it, or one approves while the other supersedes), one side's
+// work would otherwise vanish with no trace. See mergePacketFiles().
+export function conflictsDir(projectDir: string): string {
+  return join(memoryRoot(projectDir), "conflicts");
 }
 
 export function indexesDir(projectDir: string): string {
@@ -2544,7 +2668,7 @@ export function slugify(input: string): string {
   return slug || "memory";
 }
 
-function packetFileName(packet: Pick<MemoryPacket, "type" | "title" | "id">): string {
+export function packetFileName(packet: Pick<MemoryPacket, "type" | "title" | "id">): string {
   const idHash = createHash("sha256").update(packet.id).digest("hex").slice(0, 8);
   return `${packet.type}-${slugify(packet.title)}-${idHash}.md`;
 }
@@ -3112,7 +3236,10 @@ export type ValueEvent =
   | { kind: "recall_served"; tokens_saved: number; replay_tokens?: number }
   | { kind: "stale_withheld"; packet_title: string }
   | { kind: "stale_caught"; packet_title: string }
-  | { kind: "caller_answered" };
+  | { kind: "caller_answered" }
+  // T3: the LIVE injection-gate decision (corpus-normalized) — recorded so `kage report team`
+  // shows real-session injection behaviour, not only the bench.
+  | { kind: "injection_gate"; injected: boolean; confidence: number };
 
 interface ValueLedgerEvent {
   at: string;
@@ -3122,12 +3249,14 @@ interface ValueLedgerEvent {
   // packets minus the compressed cost of re-reading them as context.
   replay_tokens?: number;
   packet_title?: string;
+  injected?: boolean;
+  confidence?: number;
 }
 
 interface ValueLedger {
   schema_version: number;
   // All-time rollups survive the event cap: events get trimmed, totals never lose history.
-  totals: { tokens_saved: number; replay_tokens: number; stale_withheld: number; stale_caught: number; recalls: number; caller_answers: number };
+  totals: { tokens_saved: number; replay_tokens: number; stale_withheld: number; stale_caught: number; recalls: number; caller_answers: number; injection_gates?: number; injections?: number };
   events: ValueLedgerEvent[];
 }
 
@@ -3178,7 +3307,7 @@ function readValueLedger(projectDir: string): ValueLedger {
         return Boolean(candidate)
           && typeof candidate?.at === "string"
           && Number.isFinite(Date.parse(candidate.at))
-          && (candidate.kind === "recall_served" || candidate.kind === "stale_withheld" || candidate.kind === "stale_caught" || candidate.kind === "caller_answered");
+          && (candidate.kind === "recall_served" || candidate.kind === "stale_withheld" || candidate.kind === "stale_caught" || candidate.kind === "caller_answered" || candidate.kind === "injection_gate");
       })
       .slice(-VALUE_LEDGER_EVENT_CAP);
     return {
@@ -3190,6 +3319,8 @@ function readValueLedger(projectDir: string): ValueLedger {
         stale_caught: nonNegativeCount(totals.stale_caught),
         recalls: nonNegativeCount(totals.recalls),
         caller_answers: nonNegativeCount(totals.caller_answers),
+        injection_gates: nonNegativeCount(totals.injection_gates),
+        injections: nonNegativeCount(totals.injections),
       },
       events,
     };
@@ -3217,6 +3348,11 @@ function recordValueEvents(projectDir: string, events: ValueEvent[]): void {
       } else if (event.kind === "stale_caught") {
         record.packet_title = event.packet_title;
         ledger.totals.stale_caught += 1;
+      } else if (event.kind === "injection_gate") {
+        record.injected = event.injected;
+        record.confidence = Number(event.confidence.toFixed(3));
+        ledger.totals.injection_gates = (ledger.totals.injection_gates ?? 0) + 1;
+        if (event.injected) ledger.totals.injections = (ledger.totals.injections ?? 0) + 1;
       } else {
         ledger.totals.caller_answers += 1;
       }
@@ -3237,6 +3373,241 @@ function recordValueEvents(projectDir: string, events: ValueEvent[]): void {
 
 export function recordValueEvent(projectDir: string, event: ValueEvent): void {
   recordValueEvents(projectDir, [event]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// T4 — day-one value. A fresh repo has an empty store, so the first recalls return nothing and the
+// value is invisible exactly when a new user is judging the tool. Bootstrap ONE honest starter
+// runbook from what is already verifiable — the repo's own package.json scripts — so "how do I run
+// the tests?" answers from memory on day one. It is runbook-shaped operational knowledge (the
+// highest-demand class in the store audit: ~1.0-1.4 uses/packet), grounded to package.json, tagged
+// `bootstrap`, and idempotent (a repo that already has a bootstrap packet gets nothing new).
+// ---------------------------------------------------------------------------------------------
+
+export interface BootstrapResult {
+  created: boolean;
+  title: string | null;
+  reason: string;
+}
+
+export function bootstrapStarterMemory(projectDir: string): BootstrapResult {
+  const existing = [...loadApprovedPackets(projectDir), ...loadPendingPackets(projectDir)]
+    .some((packet) => packet.tags.includes("bootstrap"));
+  if (existing) return { created: false, title: null, reason: "bootstrap memory already present" };
+
+  const packageJsonPath = join(projectDir, "package.json");
+  if (!existsSync(packageJsonPath)) {
+    return { created: false, title: null, reason: "no package.json to derive verifiable commands from" };
+  }
+  let scripts: Record<string, string> = {};
+  let name = "";
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { scripts?: Record<string, string>; name?: string };
+    scripts = parsed.scripts ?? {};
+    name = typeof parsed.name === "string" ? parsed.name : "";
+  } catch {
+    return { created: false, title: null, reason: "package.json unreadable" };
+  }
+  const interesting = ["test", "build", "dev", "start", "lint"].filter((key) => typeof scripts[key] === "string");
+  if (!interesting.length) {
+    return { created: false, title: null, reason: "no runnable scripts found in package.json" };
+  }
+
+  const lines = interesting.map((key) => `- \`npm run ${key}\`${key === "test" ? " (run this before committing)" : ""} — \`${scripts[key]}\``);
+  const title = `How to run, build and test ${name || "this repo"}`;
+  const body = [
+    // Lead with the exact question users ask ("how do I run the tests") so the day-one direct match
+    // carries broad term evidence and decisively outranks auto-generated structural packets.
+    interesting.includes("test")
+      ? "To run the tests: \`npm run test\`. Run the tests before committing."
+      : `To run this repo: \`npm run ${interesting[0]}\`.`,
+    "",
+    "Bootstrap runbook derived from package.json scripts at install time — every command below is",
+    "verifiable against that file (re-verify with \`kage check\` after script changes).",
+    "",
+    ...lines,
+  ].join("\n");
+
+  const result = capture({
+    projectDir,
+    type: "runbook",
+    title,
+    summary: `Verified commands from package.json: ${interesting.map((key) => `npm run ${key}`).join(", ")}`,
+    body,
+    paths: ["package.json"],
+    tags: ["bootstrap", "runbook"],
+  });
+  if (!result.ok) {
+    return { created: false, title: null, reason: result.errors?.join("; ") ?? "capture refused the bootstrap packet" };
+  }
+  return { created: true, title, reason: "bootstrapped from package.json scripts" };
+}
+
+// ---------------------------------------------------------------------------------------------
+// T3 — the lead-facing "is this helping?" report. Every number is measured from local ledgers and
+// the real store; anything unmeasured is null/"unavailable", never a fabricated zero. Estimated
+// figures keep their label (tokens_saved is the read-vs-source ESTIMATE, exactly as `kage gains`
+// reports it) and are never mixed with measured counts.
+// ---------------------------------------------------------------------------------------------
+
+export interface TeamValueReport {
+  generated_for: string;
+  value: {
+    recalls_served: number;
+    stale_withheld: number;
+    tokens_saved_estimated: number;
+    replay_tokens_estimated: number;
+  };
+  injection_gate: {
+    available: boolean;
+    gates: number;
+    injected: number;
+    injection_rate: number | null;
+    average_confidence: number | null;
+    note: string;
+    /** IC transparency: the most recent live decisions (what attached and at what confidence). */
+    recent: Array<{ at: string; injected: boolean; confidence: number }>;
+  };
+  composition: {
+    total_packets: number;
+    non_derivable_share: number;
+    derivable_risk_share: number;
+    classes: Array<{ class: string; count: number; uses_30d: number }>;
+  };
+  top_memories: Array<{ title: string; type: MemoryType; uses_30d: number }>;
+  coverage: {
+    areas: number;
+    dark_areas: string[];
+    note: string;
+  };
+  review_health: {
+    pending: number;
+    oldest_pending_days: number | null;
+    contradictions: number;
+  };
+}
+
+// The T1 store-audit classifier, shipped as code so the report and the audit can never drift.
+export function classifyPacketDerivability(packet: MemoryPacket): string {
+  const text = `${packet.title}\n${packet.summary}\n${packet.body}`;
+  if (packet.status === "superseded") return "superseded";
+  if (packet.type === "gotcha" || packet.type === "negative_result") return "non-derivable: gotcha/dead-end";
+  if (packet.type === "decision" && /\b(because|why|instead of|rejected|trade-?off|rationale|deliberately|chose|rather than|the reason)\b/i.test(text)) {
+    return "non-derivable: decision+rationale";
+  }
+  if ((packet.type === "runbook" || packet.type === "workflow") && /\b(verified by|npm test|node --test|to verify|reproduce|deploy|docker|macos|node 18|node 22)\b/i.test(text)) {
+    return "non-derivable: ops/verify recipe";
+  }
+  if (packet.type === "code_explanation") return "derivable-risk: code explanation";
+  if (packet.type === "reference") return "derivable-risk: reference dump";
+  return `other (${packet.type})`;
+}
+
+export function teamValueReport(projectDir: string): TeamValueReport {
+  const approvedAll = loadApprovedPackets(projectDir);
+  const pending = loadPendingPackets(projectDir);
+  const packets: MemoryPacket[] = [...approvedAll, ...pending];
+  const approved = approvedAll.filter((packet: MemoryPacket) => packet.status === "approved");
+  const access = readMemoryAccessEntries(projectDir, packets);
+  const summary = valueSummary(projectDir);
+  const ledger = readValueLedger(projectDir);
+
+  const gates = ledger.totals.injection_gates ?? 0;
+  const injections = ledger.totals.injections ?? 0;
+  const gateEvents = ledger.events.filter((event) => event.kind === "injection_gate" && typeof event.confidence === "number");
+  const avgConfidence = gateEvents.length
+    ? Number((gateEvents.reduce((sum, event) => sum + (event.confidence ?? 0), 0) / gateEvents.length).toFixed(3))
+    : null;
+
+  const classes = new Map<string, { count: number; uses_30d: number }>();
+  for (const packet of packets) {
+    const cls = classifyPacketDerivability(packet);
+    const bucket = classes.get(cls) ?? { count: 0, uses_30d: 0 };
+    bucket.count += 1;
+    bucket.uses_30d += access.get(packet.id)?.uses_30d ?? 0;
+    classes.set(cls, bucket);
+  }
+  const classRows = [...classes.entries()]
+    .map(([cls, bucket]) => ({ class: cls, ...bucket }))
+    .sort((a, b) => b.count - a.count);
+  const nonDerivable = classRows.filter((row) => row.class.startsWith("non-derivable")).reduce((sum, row) => sum + row.count, 0);
+  const derivableRisk = classRows.filter((row) => row.class.startsWith("derivable-risk")).reduce((sum, row) => sum + row.count, 0);
+
+  const topMemories = approved
+    .map((packet) => ({ title: packet.title, type: packet.type, uses_30d: access.get(packet.id)?.uses_30d ?? 0 }))
+    .filter((entry) => entry.uses_30d > 0)
+    .sort((a, b) => b.uses_30d - a.uses_30d || a.title.localeCompare(b.title))
+    .slice(0, 5);
+
+  // Coverage: which top-level repo areas have ZERO memory citing them — where the team flies blind.
+  const citedTop = new Set(
+    approved.flatMap((packet) => packet.paths).map((path) => path.split("/")[0]).filter(Boolean),
+  );
+  let areaNames: string[] = [];
+  try {
+    areaNames = readdirSync(projectDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => !name.startsWith(".") && !["node_modules", "dist", "build", "out", "coverage", "tmp"].includes(name));
+  } catch {
+    areaNames = [];
+  }
+  const darkAreas = areaNames.filter((name) => !citedTop.has(name)).sort();
+
+  const oldestPending = pending.reduce<number | null>((oldest, packet) => {
+    const created = Date.parse(packet.created_at);
+    if (Number.isNaN(created)) return oldest;
+    const ageDays = Math.floor((Date.now() - created) / 86_400_000);
+    return oldest === null || ageDays > oldest ? ageDays : oldest;
+  }, null);
+  const contradictions = packets.reduce(
+    (sum, packet) => sum + (Array.isArray((packet.quality as Record<string, unknown> | undefined)?.contradicts) ? ((packet.quality as Record<string, unknown>).contradicts as unknown[]).length : 0),
+    0,
+  );
+
+  return {
+    generated_for: projectDir,
+    value: {
+      recalls_served: summary.all_time.recalls,
+      stale_withheld: summary.all_time.stale_withheld,
+      tokens_saved_estimated: summary.all_time.tokens_saved,
+      replay_tokens_estimated: summary.all_time.replay_tokens,
+    },
+    injection_gate: {
+      available: gates > 0,
+      gates,
+      injected: injections,
+      injection_rate: gates > 0 ? Number((injections / gates).toFixed(3)) : null,
+      average_confidence: avgConfidence,
+      recent: gateEvents.slice(-10).map((event) => ({
+        at: event.at,
+        injected: event.injected === true,
+        confidence: event.confidence ?? 0,
+      })),
+      note: gates > 0
+        ? "live corpus-normalized gate decisions recorded by the proxy"
+        : "unavailable — no proxy traffic has exercised the injection gate yet",
+    },
+    composition: {
+      total_packets: packets.length,
+      non_derivable_share: packets.length ? Number((nonDerivable / packets.length).toFixed(3)) : 0,
+      derivable_risk_share: packets.length ? Number((derivableRisk / packets.length).toFixed(3)) : 0,
+      classes: classRows,
+    },
+    top_memories: topMemories,
+    coverage: {
+      areas: areaNames.length,
+      dark_areas: darkAreas,
+      note: darkAreas.length
+        ? "top-level areas with no approved memory citing them"
+        : "every top-level area has at least one approved memory citing it",
+    },
+    review_health: {
+      pending: pending.length,
+      oldest_pending_days: oldestPending,
+      contradictions,
+    },
+  };
 }
 
 function estimatedTokenDollars(tokensSaved: number): number {
@@ -3282,6 +3653,74 @@ export function formatTokenCount(tokens: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
   if (count >= 1_000) return `${Math.round(count / 1_000)}K`;
   return String(count);
+}
+
+// The one-line receipt printed under a `kage recall`. tokens_saved is a per-recall
+// ESTIMATE (read-vs-source / discovery-cost heuristic in recallTokensSaved /
+// replayTokensSaved), so it must be labeled estimated at the point of display and never
+// read as a measured before/after. stale_withheld is a MEASURED COUNT of packets the
+// recall gate actually withheld, so it is presented as counted, distinct from the estimate.
+export function formatRecallValueReceipt(receipt: { tokens_saved: number; stale_withheld: number }): string {
+  return `\n↳ ~${formatTokenCount(receipt.tokens_saved)} tokens saved (estimated, vs re-reading cited source) · ${receipt.stale_withheld} stale withheld (measured)`;
+}
+
+// The full `kage gains` rendering, returned as lines so it is testable without spawning
+// the CLI. HONESTY CONTRACT: the token and dollar figures are ESTIMATES (the per-recall
+// discovery/read-vs-source heuristic accumulated in the value ledger), while stale blocks,
+// stale-caught, recalls and caller answers are MEASURED COUNTS of events that actually
+// fired. The two must stay visibly distinct, and no estimate may be phrased as a measured
+// "saved you N tokens".
+export function formatValueGains(summary: ValueSummary): string[] {
+  const plural = (count: number, singular: string, pluralForm: string): string => (count === 1 ? singular : pluralForm);
+  if (!summary.all_time.recalls && !summary.all_time.stale_withheld && !summary.all_time.stale_caught && !summary.all_time.caller_answers) {
+    return [
+      "No value events recorded yet — this ledger fills up as your agent works.",
+      "Every recall logs the estimated tokens it saved (by not re-reading cited files) and",
+      "counts every stale memory it withheld. Come back after a session for a receipt here.\n",
+      "Start now:",
+      "  kage scan --project .                  a Truth Report on this repo",
+      "  kage scan --project . --scorecard      a shareable scorecard you can post",
+      "  then just work — your agent captures and recalls, verified against this code.",
+    ];
+  }
+  const lines: string[] = [];
+  // Lead with the measured/estimated split so no figure below can be mistaken for the other.
+  lines.push(
+    "Kage value ledger — token and dollar figures are ESTIMATED (per-recall discovery / read-vs-source heuristic); " +
+    "stale blocks, stale-caught, recalls and caller answers are MEASURED counts.",
+  );
+  const windowLine = (label: string, window: ValueWindowSummary): string =>
+    `  ${label} ~${formatTokenCount(window.tokens_saved)} tokens saved (estimated) · ~$${window.estimated_dollars.toFixed(2)} (estimated) · ` +
+    `${window.stale_withheld} stale blocked · ${window.stale_caught} stale caught at change-time · ` +
+    `${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
+    `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")} (measured counts)`;
+  lines.push(windowLine("This week:", summary.last_7d));
+  lines.push(windowLine("Today:    ", summary.today));
+  lines.push(windowLine("All time: ", summary.all_time));
+  if (summary.all_time.caller_answers > 0) {
+    lines.push("  (caller answers: \"who calls this\" code-graph questions answered from the call-edge index)");
+  }
+  if (summary.all_time.replay_tokens > 0) {
+    lines.push(
+      `Knowledge replay value (estimated): ~${formatTokenCount(summary.last_7d.replay_tokens)} tokens this week · ` +
+      `~${formatTokenCount(summary.all_time.replay_tokens)} all time ` +
+      `(estimated discovery cost of served memories vs their compressed read cost)`
+    );
+  }
+  const usdOverridden = Number.isFinite(Number(process.env.KAGE_USD_PER_MTOK)) && Number(process.env.KAGE_USD_PER_MTOK) > 0;
+  lines.push(
+    `\nDollars estimated at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
+    `(${usdOverridden ? "via KAGE_USD_PER_MTOK" : "Sonnet-class default — set KAGE_USD_PER_MTOK for your model"}). ` +
+    `Ledger: .agent_memory/reports/value.json`
+  );
+  // The counts are your actual cumulative usage; the token/$ savings are an estimate, not a
+  // measured before/after. Point at the two surfaces that carry real measurement.
+  lines.push(
+    "The event counts above are your actual cumulative usage (measured). The token/$ savings are " +
+    "ESTIMATED, not a measured before/after — for the measured injected-cost cross-check run " +
+    "`node benchmarks/reuse-value-kage.mjs --receipts`, and for a reproducible before/after: kage savings.",
+  );
+  return lines;
 }
 
 // Receipt math: tokens an agent would have spent reading the cited source files
@@ -3382,7 +3821,7 @@ export function kageFileContext(projectDir: string, filePath: string): FileConte
   const lines = [
     `# Kage File Context: ${rel}`,
     ...verified.flatMap((packet, index) => [
-      `${index + 1}. [${packet.type} | confidence ${packet.confidence.toFixed(2)}] ${packet.title}`,
+      `${index + 1}. [${packet.type} | ${packetVerificationLabel(packet)}] ${packet.title}`,
       `   ${packet.summary}`,
     ]),
     `_${verified.length} verified memor${verified.length === 1 ? "y" : "ies"} citing this file (citations checked, not stale)._`,
@@ -3397,6 +3836,9 @@ export function kageFileContext(projectDir: string, filePath: string): FileConte
   }));
   const replay = replayTokensSaved(verified, result.context_block);
   recordValueEvent(projectDir, { kind: "recall_served", tokens_saved: replay, replay_tokens: replay });
+  // File-context serves are real uses — the uses_30d counter read 0 forever
+  // because only recall() counted.
+  recordRecallAccess(projectDir, verified.map((packet) => ({ packet })) as unknown as RecallResult["results"]);
   return result;
 }
 
@@ -3481,6 +3923,37 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return intersection / (a.size + b.size - intersection);
 }
 
+function termFrequencies(text: string): Map<string, number> {
+  const frequencies = new Map<string, number>();
+  for (const term of tokenize(text)) {
+    if (term.length <= 2) continue;
+    frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
+  }
+  return frequencies;
+}
+
+// Term-frequency cosine between two texts (W3 dedup). Jaccard on token SETS punishes length
+// mismatch and ignores emphasis: a reworded near-duplicate that shares its core vocabulary but pads
+// different filler drops below a set-overlap threshold while its WEIGHTED overlap stays high. The
+// dedup scorer takes the max of both, so neither view alone can hide a near-duplicate.
+export function tfCosine(textA: string, textB: string): number {
+  const a = termFrequencies(textA);
+  const b = termFrequencies(textB);
+  if (a.size === 0 || b.size === 0) return 0;
+  let dot = 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  for (const [term, weight] of small) {
+    const other = large.get(term);
+    if (other) dot += weight * other;
+  }
+  if (dot === 0) return 0;
+  let normA = 0;
+  for (const weight of a.values()) normA += weight * weight;
+  let normB = 0;
+  for (const weight of b.values()) normB += weight * weight;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
 function duplicateCandidates(projectDir: string, packet: MemoryPacket, threshold = 0.58): Array<{ id: string; title: string; score: number; status: string }> {
   return duplicateCandidatesWithContext(packet, memoryQualityContext(projectDir), threshold);
 }
@@ -3518,7 +3991,20 @@ function duplicateCandidatesWithContext(packet: MemoryPacket, context: MemoryQua
   return candidates
     .filter((candidate) => candidate.id !== packet.id)
     .filter((candidate) => !(isGeneratedChangeMemory(packet) && isGeneratedChangeMemory(candidate)))
-    .map((candidate) => ({ packet: candidate, score: jaccard(current, context.tokenSets.get(candidate.id) ?? tokenSet(packetText(candidate))) }))
+    .map((candidate) => {
+      const candidateText = packetText(candidate);
+      const candidateSet = context.tokenSets.get(candidate.id) ?? tokenSet(candidateText);
+      const setScore = jaccard(current, candidateSet);
+      // W3: weighted-overlap view alongside set overlap — a reworded near-duplicate whose padding
+      // differs but whose core vocabulary repeats scores high on TF-cosine while Jaccard dilutes.
+      // Guarded to texts with enough DISTINCT vocabulary: on short notes the vector is dominated by
+      // shared boilerplate ("Verified by: npm test"), and cosine over a dozen terms flags genuinely
+      // different facts as duplicates. Below the floor the set view alone decides, as before.
+      const cosineScore = Math.min(current.size, candidateSet.size) >= 12
+        ? tfCosine(packetText(packet), candidateText)
+        : 0;
+      return { packet: candidate, score: Math.max(setScore, cosineScore) };
+    })
     .filter((entry) => entry.score >= threshold)
     .sort((a, b) => b.score - a.score || a.packet.title.localeCompare(b.packet.title))
     .slice(0, 5)
@@ -3783,11 +4269,25 @@ function packetFeedbackScore(packet: MemoryPacket): number {
   return Number(quality.votes_up ?? 0) * 2 - Number(quality.votes_down ?? 0) * 3 - Number(quality.reports_stale ?? 0) * 4;
 }
 
+// A packet Kage derived from the repo itself — a package.json transcription, a repo
+// map — is a fact about the code, not something a teammate decided. Presenting it as
+// "Team memory: …" attributed to whoever ran the installer overstates its provenance
+// on the very first recall a new user sees.
+export function isGeneratedRepoFact(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): boolean {
+  if (packet.type === "repo_map") return true;
+  if (Array.isArray(packet.tags) && packet.tags.includes("bootstrap")) return true;
+  return ((packet.quality ?? {}) as Record<string, unknown>).reviewer === "kage-indexer";
+}
+
+export function memoryProvenanceLabel(packet: Pick<MemoryPacket, "type" | "tags" | "quality">): string {
+  return isGeneratedRepoFact(packet) ? "Repo fact (generated):" : "Team memory:";
+}
+
 function recallQualityScore(packet: MemoryPacket): number {
   const stored = Number(((packet.quality ?? {}) as Record<string, unknown>).score);
   if (Number.isFinite(stored)) return Math.max(0, Math.min(10, stored / 10));
   let score = 45;
-  if (["runbook", "bug_fix", "decision", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type)) score += 14;
+  if (["runbook", "bug_fix", "decision", "proposal", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type)) score += 14;
   if (packet.source_refs.length) score += 12;
   if (packet.paths.length) score += 10;
   if (packet.tags.length) score += 5;
@@ -3862,6 +4362,36 @@ function identifierTokens(text: string): Set<string> {
   return out;
 }
 
+// Anchor candidates must be written AS CODE in the memory text — camelCase,
+// snake_case, `backticked`, or called() — never plain prose words. Treating
+// every word as a candidate anchored 90% of packets to tokens like "verified"
+// and "when" that happened to collide with incidental symbols in the file.
+function codeAnchorTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  const add = (token: string) => {
+    if (token.length >= 6) out.add(token.toLowerCase());
+  };
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    for (const token of match[1].matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) add(token[0]);
+  }
+  for (const match of text.matchAll(/\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/g)) add(match[0]);
+  for (const match of text.matchAll(/\b[A-Za-z0-9]+_[A-Za-z0-9_]+\b/g)) add(match[0]);
+  for (const match of text.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]{2,})\(\)/g)) add(match[1]);
+  return out;
+}
+
+// Symbol kinds that make meaningful anchors. Constants are allowed only when
+// the name itself is code-shaped (contains an underscore after lowercasing) —
+// a constant literally named "verified" is a prose-word collision, not a handle.
+// Must be drawn from the kinds extractSymbols actually emits — "function" | "class" |
+// "method" | "constant" | "route" | "test". The previous set listed interface/type/enum,
+// which are never emitted, and omitted "constant", which is the most common kind in the
+// store by a wide margin (2089 anchors vs 427 functions). camelCase consts like
+// `defaultGateways` were therefore unanchorable, while SCREAMING_SNAKE ones slipped
+// through only via the underscore escape below — so whether a memory anchored to a
+// constant came down to how the constant happened to be spelled.
+const ANCHOR_SYMBOL_KINDS = new Set(["function", "class", "method", "constant"]);
+
 // current-file symbol span hashes, keyed by `${nameLower}\0${kind}` -> [sha256...].
 // Cached by mtime+size: extraction only runs when a file actually changed.
 const anchorSymbolCache = new Map<string, { mtimeMs: number; size: number; byKey: Map<string, string[]> }>();
@@ -3917,7 +4447,7 @@ function fileSymbolSpanHashes(projectDir: string, path: string): Map<string, str
 // title+summary+body) is supplied, anchor each TS/JS file to the symbols the
 // memory actually names, so unrelated edits in the same file do not mark it stale.
 function memoryPathFingerprints(projectDir: string, paths: string[], anchorText?: string): MemoryPathFingerprint[] {
-  const idents = anchorText ? identifierTokens(anchorText) : null;
+  const idents = anchorText ? codeAnchorTokens(anchorText) : null;
   const fingerprints: MemoryPathFingerprint[] = [];
   for (const path of unique(paths).filter(fingerprintableMemoryPath)) {
     const fingerprint = memoryPathFingerprint(projectDir, path);
@@ -3937,6 +4467,7 @@ function memoryPathFingerprints(projectDir: string, paths: string[], anchorText?
         for (const [key, hashes] of byKey) {
           const [name, kind] = key.split("\0");
           if (!idents.has(name) || spanCountByName.get(name) !== 1) continue;
+          if (!ANCHOR_SYMBOL_KINDS.has(kind) && !name.includes("_")) continue;
           symbols.push({ name, kind, sha256: hashes[0] });
         }
         if (symbols.length) {
@@ -4125,11 +4656,27 @@ function changedPathsFromStaleReasons(reasons: string[]): string[] {
   }));
 }
 
-function observationTouchedPaths(observations: ObservationRecord[]): string[] {
+// Agent hooks report file changes as ABSOLUTE host paths — every Claude Code
+// file_change carries tool_input.file_path, and an audit of this repo's own store
+// found 36 of 36 observed paths absolute, none relative. Simply stripping the leading
+// slash turned `/Users/you/.claude/plans/x.md` into `Users/you/.claude/plans/x.md`,
+// which reads as repo-relative: unrelated host files were recorded as touched and then
+// demanded memory reconciliation for work that never happened in this repository.
+// Resolve against the project and drop anything landing outside it.
+function observedRepoPath(projectDir: string, rawPath: string): string | null {
+  const normalized = rawPath.replace(/\\/g, "/").trim();
+  if (!normalized) return null;
+  const absolute = isAbsolute(normalized) ? normalized : join(projectDir, normalized);
+  const relativePath = relative(projectDir, absolute).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || isAbsolute(relativePath)) return null;
+  return meaningfulMemoryPath(relativePath) ? relativePath : null;
+}
+
+function observationTouchedPaths(projectDir: string, observations: ObservationRecord[]): string[] {
   return unique(observations
     .filter((event) => event.type === "file_change" && typeof event.path === "string" && event.path.trim().length > 0)
-    .map((event) => event.path!.replace(/\\/g, "/").replace(/^\/+/, ""))
-    .filter(meaningfulMemoryPath)
+    .map((event) => observedRepoPath(projectDir, event.path!))
+    .filter((path): path is string => path !== null)
   ).sort();
 }
 
@@ -4153,12 +4700,12 @@ function reconciliationInstruction(items: MemoryReconciliationItem[]): string {
 export function kageMemoryReconciliation(projectDir: string, options: { sessionId?: string; limit?: number } = {}): MemoryReconciliationReport {
   ensureMemoryDirs(projectDir);
   const observations = loadObservations(projectDir, options.sessionId);
-  const touchedPaths = observationTouchedPaths(observations);
+  const touchedPaths = observationTouchedPaths(projectDir, observations);
   const sessionIdsByPath = new Map<string, Set<string>>();
   for (const event of observations) {
     if (event.type !== "file_change" || !event.path) continue;
-    const path = event.path.replace(/\\/g, "/").replace(/^\/+/, "");
-    if (!meaningfulMemoryPath(path)) continue;
+    const path = observedRepoPath(projectDir, event.path);
+    if (!path) continue;
     const sessions = sessionIdsByPath.get(path) ?? new Set<string>();
     sessions.add(event.session_id);
     sessionIdsByPath.set(path, sessions);
@@ -4225,7 +4772,7 @@ function evaluateMemoryQuality(projectDir: string, packet: MemoryPacket, context
   const bodyTokens = tokenize(packet.body);
   const hasEvidence = packet.source_refs.length > 0;
   const hasPaths = packet.paths.length > 0;
-  const highValueType = ["runbook", "bug_fix", "decision", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type);
+  const highValueType = ["runbook", "bug_fix", "decision", "proposal", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type);
 
   if (highValueType) {
     score += 14;
@@ -4286,13 +4833,64 @@ function evaluateMemoryQuality(projectDir: string, packet: MemoryPacket, context
   };
 }
 
+// What share of the packet body's distinct meaningful terms already appear in its cited files.
+// A high containment with no rationale/trigger language means the body RESTATES the code — the
+// lowest-value memory class (measured: ~0 uses/packet), because an agent can read the code itself.
+// Prefix-lite matching (first 5 chars) absorbs simple morphology ("retries" vs "retry"). Bounded:
+// first 3 cited files, 50 KB each; unreadable files contribute nothing (containment can only drop).
+function citedCodeContainment(projectDir: string, packet: MemoryPacket): number {
+  let corpus = "";
+  for (const relPath of packet.paths.slice(0, 3)) {
+    try {
+      const filePath = join(projectDir, relPath);
+      if (!existsSync(filePath)) continue;
+      corpus += `\n${readFileSync(filePath, "utf8").slice(0, 50_000).toLowerCase()}`;
+    } catch {
+      continue;
+    }
+  }
+  if (!corpus) return 0;
+  const terms = unique(tokenize(packet.body).filter((term) => term.length >= 4));
+  if (terms.length < 6) return 0; // too few terms to judge restatement
+  let contained = 0;
+  for (const term of terms) {
+    // Prefix fallbacks absorb simple morphology ("retries"→"retry", "doubling"→"doubl"). This only
+    // ever runs on trigger-free bodies (the caller gates it), so the looseness cannot penalize
+    // rationale-bearing memory.
+    if (
+      corpus.includes(term) ||
+      (term.length > 5 && corpus.includes(term.slice(0, 5))) ||
+      (term.length > 4 && corpus.includes(term.slice(0, 4)))
+    ) {
+      contained += 1;
+    }
+  }
+  return contained / terms.length;
+}
+
+/**
+ * Does this body carry language the CODE CANNOT express — cause, contrast, decision? Only such a body
+ * is exempt from the derivable-restatement check, so this predicate decides whether that check runs at
+ * all. Exported so it can be tested directly: the check's own threshold sits close enough to real
+ * bodies that varying a word and varying containment cannot be separated inside a fixture.
+ *
+ * It previously matched bare temporal and bug words (`when`, `after`, `before`, `fix`, `issue`,
+ * `must`), which occur in nearly all technical prose. Measured on a 228-packet store, 88.6% of
+ * packets matched and the restatement check therefore ran on only 7% of them — the gate was
+ * effectively off. Narrowed to genuine rationale markers it reaches 35.5%. `must not` / `should not`
+ * are kept where bare `must` is not: the negation is the part code cannot state.
+ */
+export function hasRationaleLanguage(body: string): boolean {
+  return /(because|instead of|rather than|root cause|rationale|trade-?off|we tried|rejected|dead[- ]?end|must not|should not|avoid|workaround|gotcha|caveat|invariant|constraint|counter-?intuitive|surprising|turns out|the reason|so that|requires)/i.test(body);
+}
+
 export function evaluateMemoryAdmission(projectDir: string, packet: MemoryPacket): MemoryAdmissionResult {
   const reasons: string[] = [];
   const risks: string[] = [];
   const text = `${packet.title}\n${packet.summary}\n${packet.body}`.toLowerCase();
   let score = 0;
 
-  if (["runbook", "bug_fix", "decision", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type)) {
+  if (["runbook", "bug_fix", "decision", "proposal", "rationale", "convention", "workflow", "gotcha", "policy", "issue_context", "code_explanation", "negative_result", "constraint"].includes(packet.type)) {
     score += 18;
     reasons.push("durable memory type");
   }
@@ -4335,6 +4933,46 @@ export function evaluateMemoryAdmission(projectDir: string, packet: MemoryPacket
   if (packet.body.length < 80) {
     score -= 10;
     risks.push("too little context");
+  }
+  // T2 — derivability. The live reuse A/B measured memory's value as ~ZERO when the fact is
+  // derivable from code and transformative when it is not; the store audit confirmed it in usage
+  // (reference dumps 0.00 uses/packet, code explanations 0.12, vs rationale/gotcha/ops carrying all
+  // demand). So admission BOOSTS knowledge the code cannot express and PENALIZES a body that merely
+  // restates its cited code.
+  // Non-derivable BY TYPE, before any word heuristic. These types exist to carry what code cannot
+  // state — a trap, a rejected path, a reason, an invariant — so term overlap with the cited code is
+  // not evidence of restatement for them. Measured why this matters: narrowing the word guard below
+  // without this list flagged 74 packets as restatements, and 56 of them were `decision` — the single
+  // highest-value type. A decision that quotes the config it decided about ("chose base:'/app/' over
+  // './'") necessarily shares vocabulary with that config; penalising it inverts the product's intent.
+  const nonDerivableType =
+    packet.type === "gotcha" ||
+    packet.type === "negative_result" ||
+    packet.type === "decision" ||
+    packet.type === "rationale" ||
+    packet.type === "constraint" ||
+    packet.type === "issue_context";
+  const nonDerivable =
+    nonDerivableType ||
+    /\b(instead of|rejected|rather than|dead[- ]?ends?|does not work|external|upstream|rate[- ]?limits?|incident|postmortem|stampede|tribal)\b/i.test(text);
+  if (nonDerivable) {
+    score += 10;
+    reasons.push("non-derivable knowledge the code cannot express");
+  }
+  // This guard exempts a body from the restatement check, so it must match language the code CANNOT
+  // express — cause, contrast, decision. The original list included bare temporal and bug words
+  // (`when`, `after`, `before`, `fix`, `issue`, `policy`) that occur in almost any technical prose,
+  // which disabled the check it guards: measured on a 228-packet store, 88.6% of packets matched and
+  // the containment check therefore ran on only 7% of them (top offenders `fix` 59, `when` 40,
+  // `must` 16, `after` 14). Narrowed to genuine rationale markers, the check reaches 35.5%. `must not`
+  // and `should not` are kept where bare `must` is not: the negation is the part code cannot state.
+  const hasTriggerLanguage = hasRationaleLanguage(packet.body);
+  if (!nonDerivable && !hasTriggerLanguage && packet.paths.length) {
+    const containment = citedCodeContainment(projectDir, packet);
+    if (containment >= 0.65) {
+      score -= 30;
+      risks.push(`restates what the cited code already says (derivable; ${Math.round(containment * 100)}% of body terms appear in the cited files — agents read code)`);
+    }
   }
   // Ungrounded conversational chatter (a path-less, repo-reference-free user outburst) is not
   // durable memory regardless of its other signals — keywords like "issue"/"before" can
@@ -4464,6 +5102,9 @@ export function validatePacket(packet: Partial<MemoryPacket>, source = "packet")
   if (packet.status && !["pending", "approved", "deprecated", "superseded"].includes(packet.status)) {
     errors.push(`${source}: invalid status ${packet.status}`);
   }
+  if (packet.stage && !(WORK_STAGES as readonly string[]).includes(packet.stage)) {
+    errors.push(`${source}: invalid stage ${packet.stage}`);
+  }
   if (typeof packet.confidence === "number" && (packet.confidence < 0 || packet.confidence > 1)) {
     errors.push(`${source}: confidence must be between 0 and 1`);
   }
@@ -4515,6 +5156,134 @@ function stripPrivateFromContext(context: EngineeringMemoryContext): Engineering
 
 export function catalogDomainNodeCount(domain: PublicCatalogDomainShape): number {
   return domain.nodes ?? domain.node_count ?? 0;
+}
+
+const PUBLIC_GRAPH_BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
+
+export interface PublicGraphCatalogDomain {
+  nodes?: number;
+  node_count?: number;
+  top_tags?: string[];
+}
+
+export interface PublicGraphCatalog {
+  domains: Record<string, PublicGraphCatalogDomain>;
+}
+
+export interface PublicGraphIndexNode {
+  id: string;
+  title: string;
+  type: string;
+  tags: string[];
+  summary: string;
+  score: number;
+  updated: string;
+}
+
+interface PublicGraphDomainIndex {
+  nodes: PublicGraphIndexNode[];
+}
+
+async function fetchPublicGraphText(url: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+  return res.text();
+}
+
+async function fetchPublicGraphJSON<T>(url: string): Promise<T> {
+  return JSON.parse(await fetchPublicGraphText(url)) as T;
+}
+
+function publicGraphDomainTopTags(domain: PublicGraphCatalogDomain): string[] {
+  return domain.top_tags ?? [];
+}
+
+function scorePublicGraphNodeMatch(query: string, node: PublicGraphIndexNode): number {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  let score = 0;
+  const title = node.title.toLowerCase();
+  const summary = (node.summary || "").toLowerCase();
+  const tags = (node.tags ?? []).map((t) => t.toLowerCase());
+  for (const term of terms) {
+    if (title.includes(term)) score += 3;
+    if (tags.some((t) => t.includes(term))) score += 2;
+    if (summary.includes(term)) score += 1;
+  }
+  return score;
+}
+
+function scorePublicGraphDomainMatch(query: string, domain: PublicGraphCatalogDomain): number {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tags = publicGraphDomainTopTags(domain);
+  return terms.reduce((sum, term) => sum + tags.filter((t) => t.includes(term)).length, 0);
+}
+
+// Community graph tools: untrusted, advisory-only public content (see CLAUDE.md's
+// Safety section) — separate from repo-local memory. Shared by the MCP tools and
+// their `kage graph-*` CLI equivalents so both surfaces read the same catalog.
+export async function kageListPublicDomains(): Promise<string> {
+  const catalog = await fetchPublicGraphJSON<PublicGraphCatalog>(`${PUBLIC_GRAPH_BASE_URL}/catalog.json`);
+  const lines = Object.entries(catalog.domains)
+    .filter(([, d]) => catalogDomainNodeCount(d) > 0)
+    .sort(([, a], [, b]) => catalogDomainNodeCount(b) - catalogDomainNodeCount(a))
+    .map(([domain, d]) => `**${domain}** — ${catalogDomainNodeCount(d)} nodes | tags: ${publicGraphDomainTopTags(d).slice(0, 5).join(", ")}`);
+  return `# kage-graph Domains\n\n${lines.join("\n")}`;
+}
+
+export async function kageSearchPublicGraph(query: string, domainFilter: string | null = null): Promise<string> {
+  const catalog = await fetchPublicGraphJSON<PublicGraphCatalog>(`${PUBLIC_GRAPH_BASE_URL}/catalog.json`);
+  let domainsToSearch: string[];
+  if (domainFilter) {
+    domainsToSearch = [domainFilter];
+  } else {
+    domainsToSearch = Object.entries(catalog.domains)
+      .filter(([, d]) => catalogDomainNodeCount(d) > 0)
+      .map(([name, d]) => ({ name, score: scorePublicGraphDomainMatch(query, d) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .filter((d) => d.score > 0)
+      .map((d) => d.name);
+    if (domainsToSearch.length === 0) {
+      domainsToSearch = Object.entries(catalog.domains).filter(([, d]) => catalogDomainNodeCount(d) > 0).map(([name]) => name);
+    }
+  }
+
+  const indexResults = await Promise.allSettled(
+    domainsToSearch.map(async (domain) => {
+      const index = await fetchPublicGraphJSON<PublicGraphDomainIndex>(`${PUBLIC_GRAPH_BASE_URL}/domains/${domain}/index.json`);
+      return { domain, nodes: index.nodes };
+    })
+  );
+
+  const scored: Array<{ domain: string; node: PublicGraphIndexNode; score: number }> = [];
+  for (const result of indexResults) {
+    if (result.status === "fulfilled") {
+      const { domain, nodes } = result.value;
+      for (const node of nodes) {
+        const s = scorePublicGraphNodeMatch(query, node);
+        if (s > 0) scored.push({ domain, node, score: s });
+      }
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || b.node.score - a.node.score);
+  const top = scored.slice(0, 5);
+  if (top.length === 0) return `No nodes found matching "${query}". Try listing domains to see what's available.`;
+
+  const lines = top.map((r, i) => {
+    const n = r.node;
+    return [
+      `### [${i + 1}] ${n.title}`,
+      `**Domain:** ${r.domain} | **Type:** ${n.type} | **Score:** ${n.score} | **Updated:** ${n.updated}`,
+      `**Tags:** ${(n.tags ?? []).join(", ")}`,
+      n.summary ? `**Summary:** ${n.summary}` : "",
+      `**Fetch:** domain="${r.domain}" node_id="${n.id}"`,
+    ].filter(Boolean).join("\n");
+  });
+  return `# kage-graph results for "${query}"\n\n${lines.join("\n\n---\n\n")}`;
+}
+
+export async function kageFetchPublicGraphNode(domain: string, nodeId: string): Promise<string> {
+  return fetchPublicGraphText(`${PUBLIC_GRAPH_BASE_URL}/domains/${domain}/nodes/${nodeId}.md`);
 }
 
 export function ensureMemoryDirs(projectDir: string): void {
@@ -4574,7 +5343,7 @@ function isPacketFile(name: string): boolean {
 // Read a packet file from disk, dispatching on format. Throws on an unparseable
 // file (same contract as the JSON reader it replaces); callers that tolerate bad
 // files go through tryReadPacket.
-function readPacketFromDisk(path: string): MemoryPacket {
+export function readPacketFromDisk(path: string): MemoryPacket {
   if (path.endsWith(".md")) {
     const packet = okfConceptToPacket(readFileSync(path, "utf8"));
     if (!packet) throw new Error(`not a parseable OKF concept: ${path}`);
@@ -4704,6 +5473,8 @@ export function kageMemoryAudit(projectDir: string, limit = 100): MemoryAuditRep
     supersede: 0,
     deprecate: 0,
     delete: 0,
+    claim: 0,
+    transition: 0,
   };
   for (const entry of entries) {
     totals[entry.operation] = Number(totals[entry.operation] || 0) + 1;
@@ -4993,6 +5764,10 @@ function gitBranch(projectDir: string): string | null {
   return readGit(projectDir, ["branch", "--show-current"]) || readGit(projectDir, ["rev-parse", "--short", "HEAD"]);
 }
 
+export function gitUserName(projectDir: string): string | null {
+  return readGit(projectDir, ["config", "user.name"]) || null;
+}
+
 function gitDefaultBranch(projectDir: string): string | null {
   // Prefer the remote's view of the default branch (origin/HEAD), then fall
   // back to whichever of master/main exists locally.
@@ -5025,6 +5800,59 @@ function gitTree(projectDir: string): string | null {
 function gitMergeBase(projectDir: string): string | null {
   return readGit(projectDir, ["merge-base", "HEAD", "origin/main"])
     || readGit(projectDir, ["merge-base", "HEAD", "origin/master"]);
+}
+
+// The unified diff text for a branch/working-tree change, as ground truth for the Minimal Change Guard.
+// Preference order: an explicit base ref (`base...HEAD`), then the merge-base with the default branch,
+// then the working tree vs HEAD. Returns "" outside a git repo (the guard then finds nothing, honestly).
+function branchDiffText(projectDir: string, base: string | null): string {
+  if (base) {
+    const explicit = readGit(projectDir, ["diff", `${base}...HEAD`]);
+    if (explicit !== null) return explicit;
+  }
+  const mergeBase = gitMergeBase(projectDir);
+  if (mergeBase) {
+    const branchDiff = readGit(projectDir, ["diff", mergeBase, "HEAD"]);
+    if (branchDiff !== null && branchDiff.trim()) return branchDiff;
+  }
+  return readGit(projectDir, ["diff", "HEAD"]) ?? "";
+}
+
+export interface MinimalChangeCheckOptions {
+  /** Diff against `<base>...HEAD` when given; otherwise the merge-base with the default branch. */
+  base?: string | null;
+  repositoryId?: string;
+  declaredComponents?: string[];
+  /** Explicit ISO timestamp for suppression expiry checks. Defaults to now. */
+  now?: string;
+}
+
+/**
+ * Build the Minimal Change Guard report for the current change, or `null` when the guard is disabled
+ * (the default). This is the single seam shared by `pr check`, the `kage minimal-change check` CLI, and
+ * the per-task API route, so all three agree on findings. Runs with a `null` repository model on the
+ * legacy CLI (diff-grounded rules only); model-backed callers pass a live model to the report builder.
+ */
+export function minimalChangeReport(
+  projectDir: string,
+  options: MinimalChangeCheckOptions = {},
+): MinimalChangeReport | null {
+  const config = readVnextConfig(projectDir);
+  const policy = config?.vnext.minimal_change;
+  if (!policy || !policy.enabled || policy.mode === "off") return null;
+  const diffText = branchDiffText(projectDir, options.base ?? null);
+  const repositoryId = options.repositoryId ?? basename(resolve(projectDir)) ?? "repo";
+  return buildMinimalChangeReport({
+    diff_text: diffText,
+    task: {
+      task_id: `pr:${repositoryId}`,
+      repository_id: repositoryId,
+      declared_components: options.declaredComponents ?? [],
+    },
+    model: null,
+    policy,
+    now: options.now ?? new Date().toISOString(),
+  });
 }
 
 function gitProjectPrefix(projectDir: string): string | null {
@@ -8003,6 +8831,81 @@ function writeScipTypescriptIndex(projectDir: string): CodeIndexArtifactResult |
   }
 }
 
+export interface CodeIndexerSpec {
+  id: string;
+  languages: string[];
+  // The binary that produces a SCIP index for these languages.
+  command: string;
+  args: (projectDir: string) => string[];
+  installHint: string;
+}
+
+export interface CodeIndexerStatusEntry {
+  id: string;
+  languages: string[];
+  state: "installed" | "available" | "unsupported";
+  install_hint: string;
+}
+
+export interface CodeIndexerStatusReport {
+  project_dir: string;
+  indexers: CodeIndexerStatusEntry[];
+  // Always false. Stated explicitly because the one thing a registry like this must never do is
+  // install a toolchain behind the user's back.
+  installed_anything: false;
+}
+
+// Compiler-exact symbols come from indexers, not from parsers we write. `parseScipJsonObject` is
+// already language-agnostic and the precedence ladder already prefers scip > lsif > lsp >
+// tree-sitter > ts-ast > generic — but only ONE indexer was ever run, so every language other than
+// TypeScript fell to the regex tier no matter what the developer had installed.
+//
+// Each entry is a subprocess invocation, not an extractor: the work of resolving a call belongs to
+// the language's own toolchain, which does it exactly rather than heuristically.
+export const CODE_INDEXERS: readonly CodeIndexerSpec[] = [
+  { id: "scip-typescript", languages: ["typescript", "javascript"], command: "scip-typescript",
+    args: (dir) => existsSync(join(dir, "tsconfig.json")) ? ["index"] : ["index", "--infer-tsconfig"],
+    installHint: "npm i -g @sourcegraph/scip-typescript" },
+  { id: "scip-python", languages: ["python"], command: "scip-python",
+    args: () => ["index", "."], installHint: "npm i -g @sourcegraph/scip-python" },
+  { id: "scip-ruby", languages: ["ruby"], command: "scip-ruby",
+    args: () => ["--index-file=index.scip"], installHint: "gem install scip-ruby" },
+  { id: "scip-java", languages: ["java", "kotlin", "scala"], command: "scip-java",
+    args: () => ["index"], installHint: "cs install scip-java" },
+  { id: "scip-dotnet", languages: ["csharp"], command: "scip-dotnet",
+    args: () => ["index"], installHint: "dotnet tool install --global scip-dotnet" },
+  { id: "scip-clang", languages: ["cpp"], command: "scip-clang",
+    args: () => ["--compdb-path=compile_commands.json"], installHint: "see github.com/sourcegraph/scip-clang" },
+  { id: "rust-analyzer", languages: ["rust"], command: "rust-analyzer",
+    args: () => ["scip", "."], installHint: "rustup component add rust-analyzer" },
+  { id: "scip-go", languages: ["go"], command: "scip-go",
+    args: () => ["."], installHint: "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest" },
+];
+
+// Which languages this repo actually contains, from the structural scan rather than a guess.
+function projectLanguages(projectDir: string): Set<string> {
+  const languages = new Set<string>();
+  try {
+    for (const file of scanStructuralFiles(projectDir).files) languages.add(codeLanguage(file));
+  } catch { /* an unscannable repo reports no languages rather than throwing */ }
+  return languages;
+}
+
+// Report only. Never installs, never blocks: a missing indexer means the file falls one rung down
+// the precedence ladder exactly as it does today, and the user is told what would sharpen it.
+export function codeIndexerStatus(projectDir: string): CodeIndexerStatusReport {
+  const present = projectLanguages(projectDir);
+  const indexers = CODE_INDEXERS
+    .filter((spec) => spec.languages.some((language) => present.has(language)))
+    .map((spec): CodeIndexerStatusEntry => ({
+      id: spec.id,
+      languages: spec.languages.filter((language) => present.has(language)),
+      state: executableOnPath(projectDir, spec.command) ? "installed" : "available",
+      install_hint: spec.installHint,
+    }));
+  return { project_dir: projectDir, indexers, installed_anything: false };
+}
+
 export function writeCodeIndex(projectDir: string): CodeIndexArtifactResult {
   const scip = writeScipTypescriptIndex(projectDir);
   if (scip?.ok) return scip;
@@ -9241,6 +10144,10 @@ function refreshPacketStaleness(projectDir: string, options: { quiet?: boolean }
   let updated = 0;
   const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
   const ignorePatterns = readKageIgnore(projectDir);
+  // Usage telemetry reconciliation: the live counters accumulate in the
+  // machine-local memory-access report; refresh copies them onto the packet so
+  // the committed store carries real usage instead of a hardcoded zero.
+  const accessEntries = readMemoryAccessEntries(projectDir);
   for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
     // Drop any .kageignore'd grounding (presentation layers etc.) from the stored packet
     // so memory is never anchored to non-knowledge files.
@@ -9263,6 +10170,15 @@ function refreshPacketStaleness(projectDir: string, options: { quiet?: boolean }
       const { stale: _stale, stale_reasons: _staleReasons, suggested_action: _suggestedAction, ...rest } = oldQuality;
       nextQuality = rest;
     }
+    const access = accessEntries.get(packet.id);
+    if (access && (access.uses_30d !== nextQuality.uses_30d || access.total_uses !== nextQuality.total_uses)) {
+      nextQuality = {
+        ...nextQuality,
+        uses_30d: access.uses_30d,
+        total_uses: access.total_uses,
+        ...(access.last_accessed_at ? { last_accessed_at: access.last_accessed_at } : {}),
+      };
+    }
     const nextFreshness = oldFreshness;
     const contentChanged = pruned !== null;
     const changed = contentChanged
@@ -9273,7 +10189,10 @@ function refreshPacketStaleness(projectDir: string, options: { quiet?: boolean }
         ...packet,
         freshness: nextFreshness,
         quality: nextQuality,
-        updated_at: nowIso(),
+        // updated_at is a CONTENT timestamp. Metadata rewrites (stale flags,
+        // usage counters) bumping it made dead packets look fresh forever:
+        // recency scoring lied and gc retention could never age them out.
+        updated_at: contentChanged ? nowIso() : packet.updated_at,
       });
       updated += 1;
     }
@@ -9302,6 +10221,7 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   }
   const validation = validateProject(projectDir);
   const metrics = kageMetricsShallow(projectDir, { codeGraph, knowledgeGraph, validation });
+  pruneObservations(projectDir);
   ensureDir(reportsDir(projectDir));
   writeJson(join(reportsDir(projectDir), "context-slots.json"), kageContextSlots(projectDir));
   writeJson(join(reportsDir(projectDir), "handoff.json"), kageMemoryHandoff(projectDir));
@@ -9351,6 +10271,9 @@ export interface GcResult {
   total_scanned: number;
 }
 
+// How long deprecated/superseded packets stay on disk before gc deletes them.
+const GC_DEAD_PACKET_RETENTION_DAYS = positiveIntEnv("KAGE_GC_RETENTION_DAYS", 30);
+
 export function gcProject(projectDir: string, options: { dryRun?: boolean; force?: boolean } = {}): GcResult {
   ensureMemoryDirs(projectDir);
   const packetEntries = loadPacketEntriesFromDir(packetsDir(projectDir));
@@ -9359,8 +10282,18 @@ export function gcProject(projectDir: string, options: { dryRun?: boolean; force
   const skipped: GcResult["skipped"] = [];
 
   for (const { path, packet } of packetEntries) {
-    if (packet.status === "deprecated") {
-      skipped.push({ id: packet.id, title: packet.title, reason: "already deprecated" });
+    if (packet.status === "deprecated" || packet.status === "superseded") {
+      // Dead packets used to be immortal — 32% of the store was deprecated
+      // weight every teammate cloned forever. Retain briefly for undo, then
+      // delete; the audit trail keeps the tombstone.
+      const stamp = Date.parse(packet.updated_at || packet.created_at || "");
+      const expired = Number.isFinite(stamp) && Date.now() - stamp > GC_DEAD_PACKET_RETENTION_DAYS * 86_400_000;
+      if (expired) {
+        if (!options.dryRun) unlinkSync(path);
+        deleted.push({ id: packet.id, title: packet.title });
+      } else {
+        skipped.push({ id: packet.id, title: packet.title, reason: `${packet.status} — retained ${GC_DEAD_PACKET_RETENTION_DAYS}d before deletion` });
+      }
       continue;
     }
     // Serialized transcript / tool-output / file-content dumps and ungrounded conversational
@@ -9474,6 +10407,18 @@ export function kageSuppressedMemory(projectDir: string): SuppressedMemoryReport
   return { schema_version: 1, generated_at: nowIso(), count: items.length, items };
 }
 
+// A packet is "verified" only when something actually checked the claim: an
+// evidence-backed reverification. Capture at birth is provenance, not
+// verification — packets are born unverified and must earn the label.
+export function packetVerificationLabel(packet: MemoryPacket): "verified" | "unverified" | "stale" {
+  const quality = (packet.quality ?? {}) as Record<string, unknown>;
+  if (quality.stale === true) return "stale";
+  const freshness = (packet.freshness ?? {}) as Record<string, unknown>;
+  const verification = freshness.verification;
+  const checked = typeof verification === "string" && verification.length > 0 && verification !== "repo_local_agent_capture";
+  return checked && freshness.last_verified_at ? "verified" : "unverified";
+}
+
 export function verifyCitations(projectDir: string, options: { id?: string } = {}): CitationVerificationResult {
   ensureMemoryDirs(projectDir);
   const approved = loadApprovedPackets(projectDir);
@@ -9500,13 +10445,17 @@ export function verifyCitations(projectDir: string, options: { id?: string } = {
       stale_reasons: reasons,
     };
   });
+  const hardStale = packets.filter((entry) => entry.stale_severity === "hard").length;
+  const ungrounded = packets.filter((entry) => !entry.grounded).length;
   return {
-    ok: true,
+    // ok used to be hardcoded true, which made `kage verify` a check that
+    // cannot fail. It fails now: hard-stale or ungrounded memory is a defect.
+    ok: hardStale === 0 && ungrounded === 0,
     project_dir: projectDir,
     checked: packets.length,
     valid: packets.filter((entry) => !entry.stale && entry.grounded).length,
     stale: packets.filter((entry) => entry.stale).length,
-    ungrounded: packets.filter((entry) => !entry.grounded).length,
+    ungrounded,
     packets,
     errors: [],
   };
@@ -9674,10 +10623,6 @@ function tokenize(text: string): string[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function countBy<T>(values: T[], key: (value: T) => string): Record<string, number> {
@@ -10311,6 +11256,8 @@ function recallBreakdown(
   semanticScore = 0,
   vectorScore = 0,
   usageScore = 0,
+  recencyScore = 0,
+  identifierScore = 0,
   graph = buildKnowledgeGraph(projectDir),
   lookup = recallGraphLookup(graph)
 ): RecallScoreBreakdown {
@@ -10318,11 +11265,14 @@ function recallBreakdown(
   const rawGraphScore = packetEntityId
     ? (lookup.edgesByEntityId.get(packetEntityId) ?? []).reduce((sum, edge) => sum + scoreText(terms, edge.fact), 0)
     : 0;
+  // Graph prior at parity with lexical evidence, log1p-damped: raw edge sums
+  // grow with graph density, not with relevance — an old release note with 40
+  // edges must not outscore the packet whose title matches the query.
   const graphCap = packet.type === "reference"
     ? 0
-    : (textScore > 0 ? textScore * 1.5 + 12 : 8);
+    : (textScore > 0 ? Math.min(textScore, 8) : 4);
   const graphWeight = packet.type === "reference" ? 0 : 0.45;
-  const graphScore = Math.min(rawGraphScore * graphWeight, graphCap);
+  const graphScore = Math.min(Math.log1p(rawGraphScore * graphWeight) * 3, graphCap);
   const pathTypeTag = scoreText(terms, `${packet.type} ${packet.tags.join(" ")} ${packet.paths.join(" ")}`, [packet.type, ...packet.tags, ...packet.paths]);
   const intent = recallIntentBoost(terms, packet);
   const freshness = packet.status === "approved" ? 2 : packet.status === "pending" ? 0 : -5;
@@ -10331,12 +11281,20 @@ function recallBreakdown(
   const vector = Number(vectorScore.toFixed(2));
   const usage = Number(usageScore.toFixed(2));
   const pathTypeTagWeight = packet.type === "reference" ? 0.2 : 0.8;
-  // Popularity (usage) must only AMPLIFY genuine relevance, never float a packet that has no
-  // lexical/semantic/graph/intent match to the top — that is what produced confident
-  // off-domain junk (a hot packet ranked #1 for a query it shared no terms with).
-  const coreRelevance = textScore + graphScore + intent + vector;
+  // Priors (usage, quality, freshness) must only AMPLIFY genuine relevance, never float a
+  // packet that has no lexical/semantic/graph/tag/intent match to the top — that is what
+  // produced confident off-domain junk: a hot, high-quality packet ranked above the one
+  // packet whose title literally contained the queried term, because its unconditional
+  // quality+freshness (~12 pts) beat a weak-but-real lexical match.
+  const coreRelevance = textScore + graphScore + intent + vector + identifierScore;
+  const matchSignal = coreRelevance + pathTypeTag;
   const effectiveUsage = coreRelevance > 0 ? usage : 0;
-  const final = Number((textScore + graphScore + pathTypeTag * pathTypeTagWeight + intent + vector + effectiveUsage + freshness + quality + feedback).toFixed(2));
+  const effectiveQuality = matchSignal > 0 ? quality : 0;
+  const effectiveFreshness = matchSignal > 0 ? freshness : Math.min(freshness, 0);
+  // Recency amplifies matches and sinks aged changelog-shaped memory; like
+  // freshness, the positive side never floats a non-match.
+  const effectiveRecency = matchSignal > 0 ? recencyScore : Math.min(recencyScore, 0);
+  const final = Number((textScore + graphScore + pathTypeTag * pathTypeTagWeight + intent + vector + identifierScore + effectiveUsage + effectiveFreshness + effectiveRecency + effectiveQuality + feedback).toFixed(2));
   return {
     bm25: textScore,
     text: textScore,
@@ -10348,10 +11306,27 @@ function recallBreakdown(
     vector,
     usage,
     freshness,
+    recency: Number(effectiveRecency.toFixed(2)),
+    identifier: Number(identifierScore.toFixed(2)),
     quality: Number(quality.toFixed(2)),
     feedback,
     final,
   };
+}
+
+// Changelog-shaped memory (decisions, fixes, change summaries) ages fast — a
+// four-month-old release note outranking the current runbook was the headline
+// ranking bug. Evergreen types (runbooks, conventions, gotchas) keep the boost
+// window but never take the penalty.
+const RECENCY_FAST_TYPES = new Set<string>(["decision", "bug_fix", "workflow", "reference", "issue_context"]);
+export function recallRecencyScore(packet: Pick<MemoryPacket, "type" | "created_at" | "updated_at">): number {
+  const stamp = Date.parse(packet.updated_at || packet.created_at || "");
+  if (!Number.isFinite(stamp)) return 0;
+  const days = (Date.now() - stamp) / 86_400_000;
+  if (days <= 14) return 3;
+  if (days <= 60) return 1;
+  if (days <= 120) return 0;
+  return RECENCY_FAST_TYPES.has(packet.type) ? -3 : 0;
 }
 
 type ScoredRecallEntry = {
@@ -10405,6 +11380,11 @@ function diversifyRecallEntries(entries: ScoredRecallEntry[], limit: number, max
 function isSerializedDumpTitle(title: string): boolean {
   const t = (title ?? "").trimStart();
   return /^(workflow|runbook)\s*:?\s*[{[]/i.test(t)
+    // "Runbook: Tool failed: {...}" evaded the brace check above because prose
+    // sits between the label and the payload; braces early in a title are a
+    // dump signature regardless of what precedes them.
+    || /^(workflow|runbook)\s*:.{0,40}[{[]/i.test(t)
+    || /^(workflow|runbook)\s*:\s*tool failed/i.test(t)
     || t.startsWith('{"')
     || /^<(task-notification|div|svg|html)\b/i.test(t)
     || /\btool_use_id\b|toolu_[A-Za-z0-9]{10}/.test(title)
@@ -10558,6 +11538,23 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   const referenceBodyScores = scoreReferenceBodyBm25(terms, approvedPackets);
   const accessEntries = readMemoryAccessEntries(projectDir, approvedPackets);
   const graphLookup = recallGraphLookup(knowledgeGraph);
+  // Terse identifier queries ("recallBreakdown") often share no prose with the
+  // packet that documents them; ground them through the code graph instead — a
+  // packet citing the file that defines the queried identifier is evidence.
+  const identifierTerms = unique((query.match(/[A-Za-z_][A-Za-z0-9_]{5,}/g) ?? []).filter((token) => /[a-z][A-Z]|_/.test(token)));
+  let identifierFiles: Set<string> | null = null;
+  if (identifierTerms.length) {
+    try {
+      const wanted = new Set(identifierTerms.map((token) => token.toLowerCase()));
+      identifierFiles = new Set(
+        buildCodeGraph(projectDir).symbols
+          .filter((symbol) => wanted.has(symbol.name.toLowerCase()))
+          .map((symbol) => symbol.path)
+      );
+    } catch {
+      identifierFiles = null;
+    }
+  }
   const rankedScored = approvedPackets
     .map((packet) => {
       const base = baseScores.get(packet.id) ?? { score: 0, why: [] };
@@ -10568,8 +11565,10 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
       const lexicalScore = base.score + temporal.score + semantic.score;
       const textScore = packet.type === "reference" ? Math.max(lexicalScore, referenceBodyScore) : lexicalScore;
       const usageScore = memoryAccessScore(accessEntries.get(packet.id));
-      const score_breakdown = recallBreakdown(projectDir, terms, packet, textScore, temporal.score, semantic.score, vector.score, usageScore, knowledgeGraph, graphLookup);
-      const relevance = textScore + score_breakdown.graph + score_breakdown.path_type_tag + score_breakdown.intent + score_breakdown.vector;
+      const identifierScore = identifierFiles && identifierFiles.size && packet.paths.some((path) => (identifierFiles as Set<string>).has(path)) ? 6 : 0;
+      const recencyScore = recallRecencyScore(packet);
+      const score_breakdown = recallBreakdown(projectDir, terms, packet, textScore, temporal.score, semantic.score, vector.score, usageScore, recencyScore, identifierScore, knowledgeGraph, graphLookup);
+      const relevance = textScore + score_breakdown.graph + score_breakdown.path_type_tag + score_breakdown.intent + score_breakdown.vector + score_breakdown.identifier;
       const why = [
         ...base.why,
         ...temporal.why.map((item) => `temporal:${item}`),
@@ -10577,6 +11576,7 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
         ...(semantic.score > 0 ? expansion.semanticLabels.map((label) => `semantic-concept:${label}`) : []),
         ...vector.why,
         ...(usageScore > 0 ? [`usage:${accessEntries.get(packet.id)?.uses_30d ?? 0} recalls in 30d`] : []),
+        ...(identifierScore > 0 ? ["identifier: query names a symbol defined in a cited file"] : []),
       ];
       return { packet, score: score_breakdown.final, relevance, why_matched: unique(why).slice(0, 12), score_breakdown };
     })
@@ -10601,6 +11601,10 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
       return true;
     })
     .slice(0, 3);
+  // Team memory (Kage Cloud pull cache): reviewed by a second teammate before it ever
+  // reached this machine, so it ranks above personal notes but still after repo memory —
+  // repo memory is reviewed via this repo's own PR flow, which outranks a remote team's.
+  const teamEntries = teamRecallEntries(projectDir, terms, 3);
   // Personal memory (~/.kage/memory): a clearly separated, lower-trust section
   // appended AFTER every repo section — repo memory always ranks first. Cited
   // personal packets are re-verified against this checkout (hard-stale ones are
@@ -10650,10 +11654,12 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
         : entry.packet.type === "convention" ? "convention since"
         : "noted";
       const cited = entry.packet.paths.slice(0, 3).join(", ");
-      const meta = `${verb}${when ? ` ${when}` : ""}${cited ? ` · ${cited}` : ""}`;
+      const generated = isGeneratedRepoFact(entry.packet);
+      const author = !generated && entry.packet.author_name ? ` by ${entry.packet.author_name}` : "";
+      const meta = `${verb}${when ? ` ${when}` : ""}${author}${cited ? ` · ${cited}` : ""}`;
       return [
         "",
-        `${index + 1}. Team memory: ${entry.packet.title}`,
+        `${index + 1}. ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
         `   ${entry.packet.summary}`,
         ...(meta.trim() ? [`   (${meta})`] : []),
         ...(contested
@@ -10665,7 +11671,7 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
     pendingScored.length ? "## Working Memory (Pending Review)" : "",
     ...pendingScored.flatMap((entry, index) => [
       "",
-      `${index + 1}. [${entry.packet.type} | pending | confidence ${entry.packet.confidence.toFixed(2)}] ${entry.packet.title}`,
+      `${index + 1}. [${entry.packet.type} | pending | unreviewed draft] ${entry.packet.title}`,
       `   Summary: ${entry.packet.summary}`,
       `   Why matched: ${entry.why_matched.join(", ") || "text relevance"}`,
       `   Source: pending packet; unapproved local/session memory`,
@@ -10681,6 +11687,19 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
           ...suppressed.slice(0, 5).map((s) => `- ${s.title} — ${s.reason} (kage reverify --packet ${s.id})`),
         ]
       : []),
+    ...(teamEntries.length
+      ? [
+          "",
+          "## Team Memory",
+          "_Pulled from a Kage Cloud team namespace (review-gated: a second teammate approved each of these). Re-verified against THIS checkout — a packet approved on the team can still be withheld here if the local code has diverged._",
+          ...teamEntries.flatMap((entry, index) => [
+            "",
+            `${index + 1}. [team] [${entry.packet.type}] ${entry.packet.title}${entry.packet.author_name ? ` (by ${entry.packet.author_name})` : ""}`,
+            `   [team] Summary: ${entry.packet.summary}`,
+            `   [team] Why matched: ${entry.why_matched.join(", ") || "text relevance"}`,
+          ]),
+        ]
+      : []),
     ...(personalEntries.length
       ? [
           "",
@@ -10688,7 +11707,7 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
           "_Cross-machine personal store (~/.kage/memory). Lower trust than repo memory: not repo-reviewed — verify before relying on it. Repo memory above takes precedence on conflict._",
           ...personalEntries.flatMap((entry, index) => [
             "",
-            `${index + 1}. [personal] [${entry.packet.type} | confidence ${entry.packet.confidence.toFixed(2)}] ${entry.packet.title}`,
+            `${index + 1}. [personal] [${entry.packet.type} | ${packetVerificationLabel(entry.packet)}] ${entry.packet.title}`,
             `   [personal] Summary: ${entry.packet.summary}`,
             `   [personal] Why matched: ${entry.why_matched.join(", ") || "text relevance"}`,
             `   [personal] Verification: ${entry.unverifiable ? "unverifiable (citation-free personal note)" : "citations re-verified against this checkout"}`,
@@ -10701,8 +11720,23 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   const result: RecallResult = {
     query,
     context_block: inputs.maxContextTokens ? boundContextBlock(assembledBlock, inputs.maxContextTokens) : assembledBlock,
+    // Corpus-normalized injection decision, computed over the FULL ranked candidate list (the only
+    // place the distribution exists) — automatic injectors gate on this, humans can ignore it.
+    // Corpus-normalized injection decision. Scores drive the tiny-corpus anchors; term-evidence
+    // relevances drive the z-band (freshness/quality boosts inflate every packet in a fresh store —
+    // auto-generated structural packets score 47+ with zero query-term hits — which would flatten
+    // the spike signal). Index 0 of both arrays is the top-SCORED entry: the one that would inject.
+    injection: decideRecallInjection(
+      rankedScored.map((entry) => entry.score),
+      rankedScored.length ? countDistinctTermMatches(expansion.baseTerms, rankedScored[0].packet) : 0,
+      rankedScored.length
+        ? [rankedScored[0].relevance, ...rankedScored.slice(1).map((entry) => entry.relevance).sort((a, b) => b - a)]
+        : [],
+      unique(expansion.baseTerms.filter((term) => term.length >= 3)).length,
+    ),
     results: scored,
     suppressed: suppressed.length ? suppressed : undefined,
+    team: teamEntries.length ? teamEntries : undefined,
     personal: personalEntries.length ? personalEntries : undefined,
     explanations: explain
       ? scored.map((entry) => ({
@@ -10731,6 +11765,142 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
     ]);
   }
   return result;
+}
+
+// How far must the top candidate stand out of its corpus's score distribution before an automatic
+// injector may attach it. Tuned against benchmarks/injection-relevance-kage.mjs (the acceptance
+// harness for this decision): content-free and absent-topic queries must fall below it on BOTH the
+// small and large stores, while the genuine small-store direct match and large-store real questions
+// stay above it.
+const INJECTION_CONFIDENCE_FLOOR = 0.5;
+
+function clamp01(value: number): number {
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/**
+ * Decide, from the FULL ranked candidate score list (descending) plus the top candidate's QUERY
+ * EVIDENCE BREADTH, whether this recall is worth injecting at all. Two orthogonal signals, both
+ * required, both deterministic:
+ *
+ *   EVIDENCE BREADTH — how many DISTINCT meaningful query terms the top candidate actually matches.
+ *   A content-free prompt ("Reply with the single word: pong") can spike a packet on ONE term
+ *   ("pong" all over a websocket-heartbeat runbook) with a score as high as a real question's; what
+ *   it cannot do is match several distinct query terms, because it does not contain several. Real
+ *   questions carry their topic in 2+ terms ("websocket gateway heartbeat connections").
+ *
+ *   CORPUS NORMALIZATION — does the top candidate SPIKE above this corpus's own score distribution?
+ *   Scores are un-normalized match sums (a big store's noise band outscores a small store's genuine
+ *   direct match), so no absolute floor exists; the spike-vs-flat-band shape is what generalizes.
+ */
+export function decideRecallInjection(
+  scoresDescending: number[],
+  topDistinctTerms = 2,
+  // Term-evidence relevances (BM25-scale), aligned with scoresDescending: [top-scored entry's
+  // relevance, rest sorted desc]. The z-band branch normalizes over THESE, because final scores
+  // carry freshness/quality boosts that inflate every packet in a fresh store and flatten the
+  // spike signal. The tiny-corpus branch keeps SCORE semantics — its ratio/anchor rules are tuned
+  // on that scale, and BM25 values are too small for absolute anchors.
+  relevancesDescending?: number[],
+  /** How many meaningful (len>=3) terms the query itself carries — the denominator of coverage. */
+  queryTermCount = 0,
+): RecallInjectionDecision {
+  const scores = scoresDescending.filter((score) => Number.isFinite(score) && score > 0);
+  const count = scores.length;
+  if (count === 0) {
+    return { inject: false, confidence: 0, top_score: null, candidate_count: 0, why: "no candidate scored above zero" };
+  }
+  const top = scores[0];
+  const rest = scores.slice(1);
+
+  // Evidence-breadth gate: a top hit carried by a single query term is a lexical accident, not an
+  // answer — regardless of its score. It caps confidence below the floor rather than zeroing it, so
+  // the decision output still ranks "almost" cases above true zeros.
+  if (topDistinctTerms < 2) {
+    const confidence = Math.min(0.4, top >= 8 ? 0.4 : 0.2);
+    return {
+      inject: false,
+      confidence,
+      top_score: top,
+      candidate_count: count,
+      why: `top candidate matches only ${topDistinctTerms} distinct query term(s) — one incidental token is not evidence (score ${top})`,
+    };
+  }
+
+  // QUERY COVERAGE override (any corpus size): when the top candidate matches essentially ALL of
+  // the query's meaningful terms (>=80%, and the query has at least two), it answers what was
+  // asked — inject regardless of corpus shape. Ties with auto-generated structural packets or a
+  // crowded topical band cannot demote a complete direct answer. Content-free and absent-topic
+  // prompts can never reach this bar: their terms are not covered by any one packet.
+  if (queryTermCount >= 2 && topDistinctTerms >= Math.ceil(queryTermCount * 0.8) && top >= 10) {
+    return {
+      inject: true,
+      confidence: 0.75,
+      top_score: top,
+      candidate_count: count,
+      why: `top candidate covers ${topDistinctTerms}/${queryTermCount} meaningful query terms — a complete direct answer`,
+    };
+  }
+
+  // Tiny corpora (a new/small repo) have no distribution to normalize against. Decide by the gap to
+  // the runner-up plus a minimal evidence anchor: a genuine direct match dwarfs its runner-up (or
+  // stands alone with broad evidence); a marginal leader does not.
+  if (rest.length < 4) {
+    const runnerUp = rest[0] ?? 0;
+    const ratio = runnerUp > 0 ? top / runnerUp : Number.POSITIVE_INFINITY;
+    let confidence: number;
+    let why: string;
+    if (rest.length === 0) {
+      // One-term accidents were already refused by the breadth gate above, so a lone candidate here
+      // carries multi-term evidence — a modest anchor suffices.
+      confidence = top >= 12 ? 0.8 : top >= 6 ? 0.55 : 0.25;
+      why = `single candidate (score ${top}, ${topDistinctTerms} distinct terms)`;
+    } else if (ratio >= 2 && top >= 6) {
+      confidence = 0.8;
+      why = `top (${top}) dwarfs runner-up (${runnerUp}) in a ${count}-candidate corpus`;
+    } else if (ratio >= 1.5 && top >= 10) {
+      confidence = 0.6;
+      why = `top (${top}) clearly leads runner-up (${runnerUp})`;
+    } else {
+      confidence = 0.3;
+      why = `top (${top}) does not stand out of ${count} candidates (runner-up ${runnerUp})`;
+    }
+    return { inject: confidence >= INJECTION_CONFIDENCE_FLOOR, confidence, top_score: top, candidate_count: count, why };
+  }
+
+  // Normal corpora: z-score of the top against the rest of the band, blended with the runner-up
+  // ratio — computed over term-evidence RELEVANCES when supplied (boost-free), else the scores.
+  // A spike (high z AND a real lead) injects; a flat band is topical noise at any absolute level.
+  const band = (relevancesDescending && relevancesDescending.length === scoresDescending.length
+    ? relevancesDescending
+    : scoresDescending
+  ).filter((value) => Number.isFinite(value) && value > 0);
+  const bandTop = band[0] ?? top;
+  const bandRest = band.slice(1);
+  const mean = bandRest.length ? bandRest.reduce((sum, value) => sum + value, 0) / bandRest.length : 0;
+  const variance = bandRest.length ? bandRest.reduce((sum, value) => sum + (value - mean) ** 2, 0) / bandRest.length : 0;
+  const sd = Math.sqrt(variance);
+  const z = sd > 0 ? (bandTop - mean) / sd : bandTop > mean ? 4 : 0;
+  const ratio = bandRest[0] > 0 ? bandTop / bandRest[0] : 4;
+  const zComponent = clamp01(z / 4);
+  const ratioComponent = clamp01((ratio - 1) / 1.5);
+  const confidence = clamp01(Math.max(
+    zComponent * 0.7 + ratioComponent * 0.3,
+    ratioComponent * 0.7 + zComponent * 0.3,
+  ));
+  const why = `top ${top} vs band mean ${mean.toFixed(1)}±${sd.toFixed(1)} over ${count} candidates (z=${z.toFixed(2)}, lead ×${ratio.toFixed(2)}, ${topDistinctTerms} distinct terms)`;
+  return { inject: confidence >= INJECTION_CONFIDENCE_FLOOR, confidence: Number(confidence.toFixed(3)), top_score: top, candidate_count: count, why };
+}
+
+/** Count DISTINCT meaningful query terms (length >= 3) present in a packet's searchable text. */
+export function countDistinctTermMatches(terms: string[], packet: MemoryPacket): number {
+  const haystack = packetText(packet).toLowerCase();
+  const seen = new Set<string>();
+  for (const term of terms) {
+    if (!term || term.length < 3 || seen.has(term)) continue;
+    if (haystack.includes(term)) seen.add(term);
+  }
+  return seen.size;
 }
 
 export function recall(projectDir: string, query: string, limit = 5, explain = false, inputs: GraphInputs = {}): RecallResult {
@@ -11151,22 +12321,126 @@ function commitCategory(subject: string): string {
   return "other";
 }
 
+// ── One history pass, not one per file per commit ────────────────────────────
+//
+// Every per-file git signal (churn, recency, ownership, co-change) is answerable from a single
+// `git log --name-only` walk. Asking git per file — and, for co-change, per commit per file —
+// cost `kageRisk` 118 SECONDS on this repo and made `kage plan` never return.
+//
+// The window is capped so a very long history cannot make this unbounded; when the cap bites,
+// the report says so rather than quietly reporting counts as if they were totals.
+const HISTORY_WINDOW_COMMITS = 5000;
+
+interface HistoryCommit {
+  at: number;
+  author: string;
+  paths: string[];
+}
+
+interface GitHistoryIndex {
+  commitsByPath: Map<string, HistoryCommit[]>;
+  /** True when history was longer than the window, so counts are floors rather than totals. */
+  truncated: boolean;
+  available: boolean;
+}
+
+const EMPTY_HISTORY: GitHistoryIndex = { commitsByPath: new Map(), truncated: false, available: false };
+
+function buildGitHistoryIndex(projectDir: string): GitHistoryIndex {
+  // \x1e separates commits and \x1f separates fields, so neither can collide with a path,
+  // an author name, or a commit message.
+  const raw = readGit(projectDir, [
+    "log",
+    `-n`,
+    String(HISTORY_WINDOW_COMMITS),
+    "--no-renames",
+    "--name-only",
+    "--format=\x1e%cI\x1f%an <%ae>\x1f",
+  ]);
+  if (raw === null) return EMPTY_HISTORY;
+
+  const commitsByPath = new Map<string, HistoryCommit[]>();
+  let commits = 0;
+  for (const record of raw.split("\x1e")) {
+    if (!record.trim()) continue;
+    commits += 1;
+    // Each record is `<iso-date>\x1f<author>\x1f\n\n<path>\n<path>…`.
+    const [isoDate, author, body = ""] = record.split("\x1f");
+    const at = Date.parse((isoDate ?? "").trim());
+    const paths = body.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!paths.length) continue; // merge commits carry no file list
+    const commit: HistoryCommit = {
+      at: Number.isFinite(at) ? at : 0,
+      author: (author ?? "").trim(),
+      paths,
+    };
+    for (const path of new Set(paths)) {
+      const bucket = commitsByPath.get(path);
+      if (bucket) bucket.push(commit);
+      else commitsByPath.set(path, [commit]);
+    }
+  }
+  return { commitsByPath, truncated: commits >= HISTORY_WINDOW_COMMITS, available: true };
+}
+
+// Memoized on HEAD rather than on a clock. A TTL would make the index go stale inside a test
+// that commits and immediately re-reads; HEAD is exact — new commit, new key, fresh index —
+// and costs one cheap `rev-parse` per lookup instead of ~86 log walks per file.
+// Working-tree edits deliberately do not invalidate: this index describes committed history.
+let historyIndexCache: { project: string; head: string; index: GitHistoryIndex } | null = null;
+
+// The cache key must be cheap enough to check on every lookup, and `git rev-parse HEAD` is
+// not — it was itself 500 spawns per risk report. HEAD is readable straight off the
+// filesystem in microseconds, so read it there and keep the spawn only for the cases the
+// files cannot answer (packed refs, worktrees, a `.git` file).
+function headShaWithoutSpawning(projectDir: string): string | null {
+  try {
+    const gitDir = join(projectDir, ".git");
+    if (!statSync(gitDir).isDirectory()) return gitHead(projectDir);
+    const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    if (!head.startsWith("ref: ")) return head || null; // detached HEAD stores the sha itself
+    const refPath = join(gitDir, head.slice(5).trim());
+    if (!existsSync(refPath)) return gitHead(projectDir); // packed-refs
+    return readFileSync(refPath, "utf8").trim() || null;
+  } catch {
+    return gitHead(projectDir);
+  }
+}
+
+function gitHistoryIndex(projectDir: string): GitHistoryIndex {
+  const head = headShaWithoutSpawning(projectDir);
+  if (!head) return EMPTY_HISTORY;
+  if (historyIndexCache && historyIndexCache.project === projectDir && historyIndexCache.head === head) {
+    return historyIndexCache.index;
+  }
+  const index = buildGitHistoryIndex(projectDir);
+  historyIndexCache = { project: projectDir, head, index };
+  return index;
+}
+
+// Answered from the shared index. This was the second-largest source of the storm: ownership
+// and hotspot reporting call it once per file in the code graph, which was ~500 log walks.
+// Only the two `since` windows the callers actually use are supported, because a general
+// date parser here would be inventing capability nothing asks for.
 function gitCommitCountForPath(projectDir: string, path: string, since?: string): number {
-  const args = ["log", "--format=%H"];
-  if (since) args.push(`--since=${since}`);
-  args.push("--", path);
-  return gitLines(projectDir, args).length;
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!since) return commits.length;
+  const days = since.startsWith("30") ? 30 : 90;
+  const cutoff = Date.now() - days * DAY_MS_RISK;
+  return commits.filter((commit) => commit.at >= cutoff).length;
 }
 
 function gitPrimaryOwnerForPath(projectDir: string, path: string): Pick<GitFileSignal, "primary_owner" | "primary_owner_pct" | "contributor_count"> {
-  const authors = gitLines(projectDir, ["log", "--format=%an <%ae>", "--", path]);
-  if (!authors.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) return { primary_owner: null, primary_owner_pct: null, contributor_count: 0 };
   const counts = new Map<string, number>();
-  for (const author of authors) counts.set(author, (counts.get(author) ?? 0) + 1);
+  for (const commit of commits) {
+    if (commit.author) counts.set(commit.author, (counts.get(commit.author) ?? 0) + 1);
+  }
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     primary_owner: ranked[0]?.[0] ?? null,
-    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / authors.length).toFixed(2)) : null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
     contributor_count: ranked.length,
   };
 }
@@ -11180,14 +12454,16 @@ function gitAuthorCountsForPath(projectDir: string, path: string, since?: string
   return counts;
 }
 
+// Was `1 + 80` git spawns per file — a log walk to find the commits, then a `git show` for
+// every one of them. The same answer falls out of the shared history index for free.
 function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths: Set<string>): Array<{ file_path: string; count: number }> {
-  const commits = gitLines(projectDir, ["log", "--format=%H", "-n", "80", "--", path]);
   const counts = new Map<string, number>();
-  for (const commit of commits) {
-    const changed = gitLines(projectDir, ["show", "--name-only", "--format=", "--no-renames", commit])
-      .filter((candidate) => candidate !== path && graphPaths.has(candidate));
-    if (changed.length > 200) continue;
-    for (const file of new Set(changed)) counts.set(file, (counts.get(file) ?? 0) + 1);
+  for (const commit of gitHistoryIndex(projectDir).commitsByPath.get(path) ?? []) {
+    if (commit.paths.length > 200) continue;
+    for (const candidate of new Set(commit.paths)) {
+      if (candidate === path || !graphPaths.has(candidate)) continue;
+      counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    }
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -11195,19 +12471,62 @@ function gitCoChangePartnersForPath(projectDir: string, path: string, graphPaths
     .map(([file_path, count]) => ({ file_path, count }));
 }
 
+const DAY_MS_RISK = 86_400_000;
+
+// Every field below comes from the shared history index — no git process is forked here at
+// all. Previously this function alone cost roughly 86 spawns per file.
 function gitFileSignal(projectDir: string, path: string, graphPaths: Set<string>): GitFileSignal {
-  const total = gitCommitCountForPath(projectDir, path);
-  const owner = gitPrimaryOwnerForPath(projectDir, path);
+  const commits = gitHistoryIndex(projectDir).commitsByPath.get(path) ?? [];
+  if (!commits.length) {
+    return {
+      file_path: path,
+      commit_count_total: 0,
+      commit_count_30d: 0,
+      commit_count_90d: 0,
+      last_commit_at: null,
+      primary_owner: null,
+      primary_owner_pct: null,
+      contributor_count: 0,
+      co_change_partners: [],
+    };
+  }
+
+  const now = Date.now();
+  const authors = new Map<string, number>();
+  const partners = new Map<string, number>();
+  let within30 = 0;
+  let within90 = 0;
+  let newest = 0;
+
+  for (const commit of commits) {
+    if (commit.author) authors.set(commit.author, (authors.get(commit.author) ?? 0) + 1);
+    const age = now - commit.at;
+    if (commit.at && age <= 30 * DAY_MS_RISK) within30 += 1;
+    if (commit.at && age <= 90 * DAY_MS_RISK) within90 += 1;
+    if (commit.at > newest) newest = commit.at;
+    // Sweeping commits say nothing about coupling — the old code skipped them at >200 files
+    // and that judgement is preserved.
+    if (commit.paths.length > 200) continue;
+    for (const partner of new Set(commit.paths)) {
+      if (partner === path || !graphPaths.has(partner)) continue;
+      partners.set(partner, (partners.get(partner) ?? 0) + 1);
+    }
+  }
+
+  const ranked = [...authors.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   return {
     file_path: path,
-    commit_count_total: total,
-    commit_count_30d: gitCommitCountForPath(projectDir, path, "30 days ago"),
-    commit_count_90d: gitCommitCountForPath(projectDir, path, "90 days ago"),
-    last_commit_at: gitLines(projectDir, ["log", "-1", "--format=%cI", "--", path])[0] ?? null,
-    primary_owner: owner.primary_owner,
-    primary_owner_pct: owner.primary_owner_pct,
-    contributor_count: owner.contributor_count,
-    co_change_partners: gitCoChangePartnersForPath(projectDir, path, graphPaths),
+    commit_count_total: commits.length,
+    commit_count_30d: within30,
+    commit_count_90d: within90,
+    last_commit_at: newest ? new Date(newest).toISOString() : null,
+    primary_owner: ranked[0]?.[0] ?? null,
+    primary_owner_pct: ranked[0] ? Number((ranked[0][1] / commits.length).toFixed(2)) : null,
+    contributor_count: ranked.length,
+    co_change_partners: [...partners.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 5)
+      .map(([file_path, count]) => ({ file_path, count })),
   };
 }
 
@@ -11219,12 +12538,21 @@ function gitChangedFiles(projectDir: string): string[] {
     .filter((path) => !isNoisePath(path));
 }
 
+// Hotspots were ALWAYS empty, in every install, and nothing said so. The old query passed
+// `--format=__KAGE_COMMIT__`, and git treats a format string containing no `%` as the NAME of
+// a built-in format — so it exited with "invalid --pretty format" on every call, `gitLines`
+// swallowed the failure, and the feature silently returned nothing. On this repo that was
+// 6,585 file-change lines discarded.
+//
+// Reading the shared index instead removes both the bug and the spawn.
 function globalGitHotspots(projectDir: string, graph: CodeGraph): KageRiskReport["global_hotspots"] {
   const graphPaths = new Set(graph.files.map((file) => file.path));
+  const cutoff = Date.now() - 90 * DAY_MS_RISK;
   const counts = new Map<string, number>();
-  for (const line of gitLines(projectDir, ["log", "--since=90 days ago", "--name-only", "--format=__KAGE_COMMIT__", "-n", "1000"])) {
-    if (line === "__KAGE_COMMIT__" || !graphPaths.has(line)) continue;
-    counts.set(line, (counts.get(line) ?? 0) + 1);
+  for (const [path, commits] of gitHistoryIndex(projectDir).commitsByPath) {
+    if (!graphPaths.has(path)) continue;
+    const recent = commits.filter((commit) => commit.at >= cutoff).length;
+    if (recent > 0) counts.set(path, recent);
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -12113,13 +13441,19 @@ export function truthReport(projectDir: string): TruthReport {
     ghostCandidates.push(symbol);
   }
   // Graph edges miss dynamic/property references, so a ghost claim must survive a raw-text
-  // check: the name may appear nowhere in the repo outside its own file.
+  // check: the name may appear nowhere in the repo outside its own file. Cap is generous
+  // (not MAX_CODE_FILE_BYTES, which gates far more expensive AST parsing elsewhere) — this
+  // is one cheap, memoized read, and single hand-written source files legitimately exceed
+  // 512KB (this repo's own mcp/kernel.ts is ~900KB); a tight cap here silently disables the
+  // safety net for exactly the largest, most central files, producing false ghost-export
+  // positives for symbols only ever used from within them.
+  const TRUTH_TEXT_MAX_FILE_BYTES = 5 * 1024 * 1024;
   const truthTextCache = new Map<string, string>();
   const truthFileText = (path: string): string => {
     const cached = truthTextCache.get(path);
     if (cached !== undefined) return cached;
     const file = fileByPath.get(path);
-    const text = file && file.size_bytes <= 512 * 1024 ? safeReadText(join(projectDir, path)) ?? "" : "";
+    const text = file && file.size_bytes <= TRUTH_TEXT_MAX_FILE_BYTES ? safeReadText(join(projectDir, path)) ?? "" : "";
     truthTextCache.set(path, text);
     return text;
   };
@@ -12315,14 +13649,33 @@ export function truthReport(projectDir: string): TruthReport {
   // bound the walk so a huge repo stays fast.
   const debtFindings: TruthFinding[] = [];
   const DEBT_RE = /(?:^|[^A-Za-z0-9_])(TODO|FIXME|HACK|XXX|@deprecated|@todo)(?:[^A-Za-z0-9_]|$)/gi;
+  // Two+ DIFFERENT marker keywords sitting immediately next to each other (only a
+  // punctuation char apart, e.g. "TODO/FIXME/HACK" or "TODO, FIXME") is code or prose
+  // describing the convention itself, not a real marker at that spot — a genuine
+  // comment only ever uses one keyword. Distinct real markers are always separated by
+  // actual comment content (their own sentence, usually a different line), which is
+  // far more than a few characters. Caught dogfooding this exact detector on kernel.ts
+  // itself: this file's own debt-marker code (the regex literal, its comments) was
+  // flagging as 8 "debt markers" of its own name-dropping the keywords it detects.
+  const DEBT_LISTING_GAP = 15;
+  const isDebtListingMention = (matches: RegExpMatchArray[], index: number): boolean => {
+    const current = matches[index];
+    const currentEnd = (current.index ?? 0) + current[0].length;
+    return matches.some((other, otherIndex) => {
+      if (otherIndex === index || other[1].toLowerCase() === current[1].toLowerCase()) return false;
+      const otherStart = other.index ?? 0;
+      const otherEnd = otherStart + other[0].length;
+      return Math.abs(otherStart - currentEnd) <= DEBT_LISTING_GAP || Math.abs((current.index ?? 0) - otherEnd) <= DEBT_LISTING_GAP;
+    });
+  };
   const debtScanTargets = [...sourceFiles]
     .sort((a, b) => (centrality.get(b.path) ?? 0) - (centrality.get(a.path) ?? 0))
     .slice(0, 400);
   for (const file of debtScanTargets) {
     const text = truthFileText(file.path);
     if (!text) continue;
-    const matches = text.match(DEBT_RE);
-    const count = matches ? matches.length : 0;
+    const allMatches = [...text.matchAll(DEBT_RE)];
+    const count = allMatches.filter((_match, index) => !isDebtListingMention(allMatches, index)).length;
     if (count < 1) continue;
     const fileCentrality = centrality.get(file.path) ?? 0;
     // A lone marker in a leaf file is noise; require either repetition or reach.
@@ -12473,9 +13826,9 @@ export function truthReport(projectDir: string): TruthReport {
     findings,
     warnings,
     next_actions: [
-      "npx -y @kage-core/kage-graph-mcp install      one command: creates repo memory + wires your agents (Claude Code, Codex, Cursor, ...)",
-      "then just work — agents capture learnings and recall them, verified against this code",
-      "kage gains --project .      the receipt: what the memory loop saved you this week",
+      "kage check --project .      verify CLAUDE.md/AGENTS.md/docs claims against this code — counted, not estimated",
+      "kage check --init-ci        gate every PR: fail only when a diff breaks a documented claim",
+      "npx -y @kage-core/kage-graph-mcp install      wire repo memory + agents (Claude Code, Codex, Cursor, ...)",
     ],
   };
 }
@@ -12948,9 +14301,6 @@ export function renderClaudeMemAuditReceipt(report: ClaudeMemAuditReport): strin
     lines.push("");
     for (const warning of report.warnings) lines.push(`Warning: ${warning}`);
   }
-  lines.push("");
-  lines.push("claude-mem remembers everything. Kage tells you what's still true.");
-  lines.push("Import coming soon — https://kage-core.github.io/Kage/");
   return lines.join("\n");
 }
 
@@ -13647,6 +14997,75 @@ export function kageCapabilityAudit(projectDir: string): CapabilityAuditReport {
   };
 }
 
+// Phase D Task 6 — the three-surface certification release gate.
+//
+// A surface is only counted as an automatic attachment when a transcript-based
+// smoke test proves it (certifySurface). The gate REQUIRES honest certification
+// for three surfaces — Claude Code native hooks, a proxy-compatible agent using
+// the measured gateway, and Cursor session-start injection on a certified
+// version. Codex is visible in the matrix but is NOT required to count as an
+// automatic attachment while it remains MCP fallback; its presence never fails
+// the gate, and its label can never be flipped to automatic by installed config.
+// If a required surface fails certification, the gate stays failed instead of
+// relabeling the surface.
+
+export const REQUIRED_AUTOMATIC_SURFACES: readonly AgentSurface[] = [
+  "claude-code",
+  "anthropic-proxy",
+  "cursor",
+] as const;
+
+export interface AgentSurfaceCertificationGateReport {
+  schema_version: 1;
+  generated_at: string;
+  passed: boolean;
+  required_surfaces: AgentSurface[];
+  certifications: AgentSurfaceCertification[];
+  failures: string[];
+  summary: string;
+}
+
+export function agentSurfaceCertificationGate(
+  inputs: CertifySurfaceInput[],
+  options: { now?: string } = {},
+): AgentSurfaceCertificationGateReport {
+  const now = options.now ?? nowIso();
+  const certifications = inputs.map((input) =>
+    certifySurface({ ...input, certified_at: input.certified_at ?? now }),
+  );
+  const bySurface = new Map<AgentSurface, AgentSurfaceCertification>();
+  for (const cert of certifications) bySurface.set(cert.surface, cert);
+
+  const failures: string[] = [];
+  for (const surface of REQUIRED_AUTOMATIC_SURFACES) {
+    const cert = bySurface.get(surface);
+    if (!cert) {
+      failures.push(`${surface}: no certification fixture provided`);
+      continue;
+    }
+    if (!cert.counts_as_automatic_attachment) {
+      failures.push(
+        `${surface}: not certified as automatic attachment (capture=${cert.capture}, injection=${cert.injection})`,
+      );
+    }
+  }
+
+  const passed = failures.length === 0;
+  const summary = passed
+    ? `All ${REQUIRED_AUTOMATIC_SURFACES.length} required surfaces certified as automatic attachments; Codex remains honest MCP fallback.`
+    : `Agent-surface certification gate FAILED: ${failures.join("; ")}`;
+
+  return {
+    schema_version: 1,
+    generated_at: now,
+    passed,
+    required_surfaces: [...REQUIRED_AUTOMATIC_SURFACES],
+    certifications,
+    failures,
+    summary,
+  };
+}
+
 const DECISION_INTELLIGENCE_TYPES = new Set<MemoryType>([
   "bug_fix",
   "code_explanation",
@@ -13656,6 +15075,7 @@ const DECISION_INTELLIGENCE_TYPES = new Set<MemoryType>([
   "gotcha",
   "negative_result",
   "policy",
+  "proposal",
   "rationale",
   "runbook",
   "workflow",
@@ -15428,10 +16848,10 @@ export interface DemoResult {
   viewer_command: string;
 }
 
-// `kage demo`: a self-contained 60-second proof of the trust wedge. Seeds a tiny
-// repo with grounded memory, then shows Kage (1) reject a hallucinated citation,
-// (2) withhold a memory whose cited file was deleted, and (3) recall only grounded
-// memory — the three things that make agent memory trustworthy.
+// `kage demo`: a self-contained 60-second proof that agent memory can be trusted.
+// Seeds a tiny repo with grounded memory, then shows Kage (1) reject a hallucinated
+// citation, (2) withhold a memory whose cited file was deleted, and (3) recall only
+// grounded memory — the three things that make agent memory trustworthy.
 export function runDemo(demoDir: string): DemoResult {
   rmSync(demoDir, { recursive: true, force: true });
   mkdirSync(join(demoDir, "src"), { recursive: true });
@@ -16069,29 +17489,6 @@ function codingQualityByCategory(perQuery: CodingMemoryQualityBenchmarkReport["p
   }));
 }
 
-function codingRecallAt(retrieved: Array<{ packet_id: string }>, relevant: Set<string>, k: number): number {
-  if (!relevant.size) return 0;
-  return retrieved.slice(0, k).filter((item) => relevant.has(item.packet_id)).length / relevant.size;
-}
-
-function codingPrecisionAt(retrieved: Array<{ packet_id: string }>, relevant: Set<string>, k: number): number {
-  const rows = retrieved.slice(0, k);
-  return rows.length ? rows.filter((item) => relevant.has(item.packet_id)).length / rows.length : 0;
-}
-
-function codingNdcgAt(retrieved: Array<{ packet_id: string }>, relevant: Set<string>, k: number): number {
-  const dcg = retrieved.slice(0, k).reduce((sum, item, index) => sum + (relevant.has(item.packet_id) ? 1 / Math.log2(index + 2) : 0), 0);
-  const idealHits = Math.min(relevant.size, k);
-  let ideal = 0;
-  for (let index = 0; index < idealHits; index += 1) ideal += 1 / Math.log2(index + 2);
-  return ideal ? dcg / ideal : 0;
-}
-
-function codingMrr(retrieved: Array<{ packet_id: string }>, relevant: Set<string>): number {
-  const index = retrieved.findIndex((item) => relevant.has(item.packet_id));
-  return index >= 0 ? 1 / (index + 1) : 0;
-}
-
 function codingTypeForCategory(category: string): MemoryType {
   if (category === "runbook") return "runbook";
   if (category === "decision") return "decision";
@@ -16101,35 +17498,6 @@ function codingTypeForCategory(category: string): MemoryType {
 
 function codingFileForTopic(topic: string, variant: number): string {
   return `src/${slugify(topic)}-${variant % 3}.ts`;
-}
-
-function averageNumber(values: number[]): number {
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-}
-
-function percentileNumber(values: number[], p: number): number {
-  if (!values.length) return 0;
-  const sorted = values.slice().sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1));
-  return sorted[index];
-}
-
-function roundDecimal(value: number, digits = 2): number {
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
-}
-
-function countByKey<T>(rows: T[], fn: (row: T) => string): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const row of rows) {
-    const key = fn(row);
-    counts[key] = (counts[key] ?? 0) + 1;
-  }
-  return counts;
-}
-
-function titleCase(value: string): string {
-  return value.replace(/\b[a-z]/g, (match) => match.toUpperCase());
 }
 
 function baselineDiscoveryFiles(projectDir: string, task: string): Array<{ path: string; tokens: number; why: string; score: number }> {
@@ -16238,6 +17606,176 @@ export function benchmarkTaskComparison(projectDir: string, task: string): Bench
   };
 }
 
+export interface SavingsBenchmarkReport {
+  schema_version: 1;
+  project_dir: string;
+  generated_at: string;
+  queries: number;
+  reduction_percent: number;
+  baseline_tokens_total: number;
+  kage_tokens_total: number;
+  baseline_tokens_avg: number;
+  kage_tokens_avg: number;
+  tokens_saved_total: number;
+  recall_hit_rate: number;
+  per_query: Array<{ query: string; baseline_tokens: number; kage_tokens: number; reduction_percent: number; recall_hit: boolean }>;
+  caveats: string[];
+}
+
+// Deterministically derive realistic "how do I understand X" queries from the repo's own
+// code graph — the most-referenced exported symbols and declared routes are what an agent
+// actually asks about. No LLM, no hand-picked queries: same repo + same commit => same
+// queries => same number, which is what makes the headline reproducible (and stronger than
+// an embedding benchmark, whose recall drifts with the model).
+function deriveSavingsQueries(projectDir: string, count: number): string[] {
+  const built = currentOrBuildGraphs(projectDir);
+  const graph = built.codeGraph;
+  const queries: string[] = [];
+  if (graph) {
+    const callCounts = new Map<string, number>();
+    for (const call of graph.calls) callCounts.set(call.to_symbol, (callCounts.get(call.to_symbol) ?? 0) + 1);
+    const routes = [...graph.routes]
+      .sort((a, b) => `${a.method} ${a.path}`.localeCompare(`${b.method} ${b.path}`))
+      .slice(0, Math.ceil(count / 3));
+    for (const route of routes) queries.push(`where is ${route.method} ${route.path} handled`);
+    const symbols = graph.symbols
+      .filter((symbol) => symbol.export && (symbol.kind === "function" || symbol.kind === "class"))
+      .map((symbol) => ({ symbol, weight: callCounts.get(symbol.id) ?? 0 }))
+      .sort((a, b) => b.weight - a.weight || a.symbol.name.localeCompare(b.symbol.name));
+    for (const { symbol } of symbols) {
+      if (queries.length >= count) break;
+      queries.push(`how does ${symbol.name} work`);
+    }
+  }
+  // Universal fallbacks so a repo with a thin graph still produces a stable set.
+  for (const q of ["how do I run the tests", "where is the entry point", "how is the project configured"]) {
+    if (queries.length >= count) break;
+    if (!queries.includes(q)) queries.push(q);
+  }
+  return queries.slice(0, count);
+}
+
+// Aggregate, reproducible token-savings benchmark: run the per-query A/B comparison across
+// a deterministic query set and report the headline context-reduction percent. This is
+// Kage's answer to the "save N% on agent tokens" number — measured, not asserted, and
+// re-runnable to the same value on the same commit.
+export function benchmarkSavings(projectDir: string, options: { queries?: number } = {}): SavingsBenchmarkReport {
+  ensureMemoryDirs(projectDir);
+  const count = Math.max(1, Math.min(options.queries ?? 12, 50));
+  const queries = deriveSavingsQueries(projectDir, count);
+  const perQuery = queries.map((query) => {
+    const cmp = benchmarkTaskComparison(projectDir, query);
+    return {
+      query,
+      baseline_tokens: cmp.baseline_without_kage.full_file_tokens,
+      kage_tokens: cmp.with_kage.context_tokens,
+      reduction_percent: cmp.delta.context_reduction_percent,
+      recall_hit: cmp.delta.recall_hit,
+    };
+  });
+  const baselineTotal = perQuery.reduce((sum, q) => sum + q.baseline_tokens, 0);
+  const kageTotal = perQuery.reduce((sum, q) => sum + q.kage_tokens, 0);
+  const savedTotal = Math.max(0, baselineTotal - kageTotal);
+  const hits = perQuery.filter((q) => q.recall_hit).length;
+  return {
+    schema_version: 1,
+    project_dir: projectDir,
+    generated_at: nowIso(),
+    queries: perQuery.length,
+    reduction_percent: baselineTotal > 0 ? percent(savedTotal, baselineTotal) : 0,
+    baseline_tokens_total: baselineTotal,
+    kage_tokens_total: kageTotal,
+    baseline_tokens_avg: perQuery.length ? Math.round(baselineTotal / perQuery.length) : 0,
+    kage_tokens_avg: perQuery.length ? Math.round(kageTotal / perQuery.length) : 0,
+    tokens_saved_total: savedTotal,
+    recall_hit_rate: perQuery.length ? Number((hits / perQuery.length).toFixed(2)) : 0,
+    per_query: perQuery,
+    caveats: [
+      "Measured against full-file reads of the files each query touches — a deterministic, reproducible baseline, NOT a head-to-head vs your agent's actual grep/partial-read behavior (real-world savings run lower).",
+      "Queries are auto-derived from this repo's code graph; same commit reproduces the same number.",
+      "No LLM on the measurement path: rerun on the same commit and the percent is identical.",
+    ],
+  };
+}
+
+export interface TeamMemoryReport {
+  schema_version: 1;
+  project_dir: string;
+  generated_at: string;
+  approved_packets: number;
+  contributors: Array<{ name: string; packets: number }>;
+  unattributed_packets: number;
+  pending_review: number;
+  oldest_pending_days: number | null;
+  stale_withheld: number;
+  contradictions: number;
+  conflicts_preserved: number;
+  freshness_rate: number;
+  caveats: string[];
+}
+
+// The team-facing receipt: not "how much did Kage save me" (that's `savings`) but
+// "is this team's shared memory actually trustworthy right now" — the number a team
+// lead can screenshot. Every field here maps to a real, enforced mechanism audited
+// elsewhere in this file (capture, recall staleness gate, contradiction detection,
+// the merge-driver preservation log) — nothing here is aspirational.
+export function teamMemoryReport(projectDir: string): TeamMemoryReport {
+  ensureMemoryDirs(projectDir);
+  const approved = loadApprovedPackets(projectDir);
+  const pending = loadPendingPackets(projectDir);
+
+  const contributorCounts = new Map<string, number>();
+  let unattributed = 0;
+  for (const packet of approved) {
+    const name = packet.author_name?.trim();
+    if (name) contributorCounts.set(name, (contributorCounts.get(name) ?? 0) + 1);
+    else unattributed += 1;
+  }
+  const contributors = [...contributorCounts.entries()]
+    .map(([name, packets]) => ({ name, packets }))
+    .sort((a, b) => b.packets - a.packets || a.name.localeCompare(b.name));
+
+  const now = Date.now();
+  const pendingAges = pending
+    .map((packet) => Date.parse(packet.created_at || packet.updated_at || ""))
+    .filter((ts) => Number.isFinite(ts))
+    .map((ts) => (now - ts) / 86_400_000);
+  const oldestPendingDays = pendingAges.length ? Math.round(Math.max(...pendingAges)) : null;
+
+  const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
+  const staleWithheld = approved.filter((packet) => recallStaleReason(projectDir, packet, fingerprintCache) !== null).length;
+
+  const conflicts = kageConflicts(projectDir);
+
+  const conflictsPreservedDir = conflictsDir(projectDir);
+  const conflictsPreserved = existsSync(conflictsPreservedDir)
+    ? readdirSync(conflictsPreservedDir).filter((name) => name.endsWith(".md") || name.endsWith(".json")).length
+    : 0;
+
+  const verifiedCount = approved.filter((packet) => packetVerificationLabel(packet) === "verified").length;
+  const freshnessRate = approved.length ? Number((verifiedCount / approved.length).toFixed(2)) : 0;
+
+  return {
+    schema_version: 1,
+    project_dir: projectDir,
+    generated_at: nowIso(),
+    approved_packets: approved.length,
+    contributors,
+    unattributed_packets: unattributed,
+    pending_review: pending.length,
+    oldest_pending_days: oldestPendingDays,
+    stale_withheld: staleWithheld,
+    contradictions: conflicts.count,
+    conflicts_preserved: conflictsPreserved,
+    freshness_rate: freshnessRate,
+    caveats: [
+      "Contributors are keyed by git user.name at capture time — packets from before this feature, or captured with no git identity set, count as unattributed.",
+      "stale_withheld mirrors the live recall gate (recallStaleReason): a packet counted here is invisible to every agent right now, not merely flagged.",
+      "conflicts_preserved counts merge-driver conflict artifacts ever written; it does not know which have already been manually reconciled.",
+    ],
+  };
+}
+
 function kageMetricsShallow(
   projectDir: string,
   inputs: { codeGraph?: CodeGraph; knowledgeGraph?: KnowledgeGraph; validation?: ValidationResult } = {}
@@ -16320,6 +17858,11 @@ function kageMetricsShallow(
 function inferLearningType(input: LearnInput): MemoryType {
   if (input.type) return input.type;
   const text = `${input.title ?? ""} ${input.learning}`.toLowerCase();
+  // Checked early and specifically: proposal language ("we should add retry logic
+  // because requests currently fail silently") legitimately co-occurs with bug/fail
+  // words describing what the proposed work addresses, so it must not lose to the
+  // bug_fix check below just because both patterns happen to match.
+  if (/(feature idea|feature proposal|proposing (a|to)|we should (build|add|create)|rfc:)/.test(text)) return "proposal";
   if (/(issue context|issue|hypothesis|blocked|unresolved|attempted fix)/.test(text)) return "issue_context";
   if (/(bug|fix|error|fail|failure|broken|regression)/.test(text)) return "bug_fix";
   if (/(code explanation|explains|data flow|invariant|coupling|module purpose)/.test(text)) return "code_explanation";
@@ -16412,6 +17955,25 @@ export function learn(input: LearnInput): LearnResult {
     input.evidence ? `\nEvidence: ${input.evidence.trim()}` : "",
     input.verifiedBy ? `\nVerified by: ${input.verifiedBy.trim()}` : "",
   ].join("").trim();
+
+  // A packet with no content is worse than no packet: it is indexed, recalled, and
+  // occupies the slot of the insight it was supposed to carry, while the loss shows
+  // up only as a soft "body is empty" validation warning much later. Reject the write
+  // at capture time, the same way an uncited learning is rejected below.
+  //
+  // Guard `learning` itself, not just the composed body: evidence/verifiedBy alone make
+  // the body non-empty, so a dropped or misnamed `learning` would still write a packet
+  // whose only content is its own provenance. That is the failure this check exists for.
+  if (!input.learning.trim() || !body) {
+    return {
+      ok: false,
+      errors: [
+        "Empty learning: a memory packet needs content. Pass the insight in `learning` "
+          + "(full sentences: what was learned and why it matters to a future session).",
+      ],
+      warnings: [],
+    };
+  }
 
   // Strict (agent/CLI) repo learnings must be grounded: a learning with no cited
   // paths at all is rejected. Citation-free notes are allowed only in the
@@ -16581,8 +18143,14 @@ export function capture(input: CaptureInput): CaptureResult {
     created_at: createdAt,
     updated_at: createdAt,
     author_branch: gitBranch(input.projectDir),
+    author_name: gitUserName(input.projectDir),
   };
   packet.edges = graphEdges;
+  // Only proposal packets carry an SDLC work stage (Phase 1 scope — see WorkStage).
+  // Claimable once approved; an ungrounded proposal routed to pending review still
+  // gets a stage so it's visible in `kage gate list`, just not claimable until a
+  // human approves it (claimWorkItem only reads from the approved packets dir).
+  if (type === "proposal") packet.stage = "proposed";
 
   const validation = validatePacket(packet);
   if (!validation.ok) return { ok: false, errors: validation.errors, warnings };
@@ -16609,7 +18177,23 @@ export function capture(input: CaptureInput): CaptureResult {
     ...evaluateMemoryQuality(input.projectDir, packet),
     ...(contradictions.length ? { contradicts: contradictions.map((c) => c.packet_id) } : {}),
   };
-  const path = writePacket(input.projectDir, packet, routeToPending ? "pending" : "packets");
+  // T2 — derivability gate on the explicit path. A body that merely RESTATES its cited code is the
+  // measured-lowest-value memory class (~0 uses/packet; the reuse A/B measured ~zero value when the
+  // fact is in code). The deliberate capture is still WRITTEN — never lose a human act — but it
+  // lands in pending review instead of trusted recall, with the why spelled out.
+  let routeToPendingFinal = routeToPending;
+  if (!routeToPendingFinal && packet.paths.length) {
+    const admission = evaluateMemoryAdmission(input.projectDir, packet);
+    const restates = admission.risks.find((risk) => risk.includes("restates what the cited code already says"));
+    if (restates) {
+      routeToPendingFinal = true;
+      packet.status = "pending";
+      warnings.push(
+        `Routed to pending review: ${restates}. Add what the code cannot say — the why, the rejected alternative, the trap — to make this durable memory.`,
+      );
+    }
+  }
+  const path = writePacket(input.projectDir, packet, routeToPendingFinal ? "pending" : "packets");
   recordMemoryAudit(input.projectDir, "capture", [packet], {
     type: packet.type,
     status: packet.status,
@@ -16760,7 +18344,7 @@ export function registryRecommendations(projectDir: string): RegistryRecommendat
   return recommendations.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
 }
 
-export function setupAgent(agent: SetupAgent, projectDir: string, options: { write?: boolean; serverPath?: string; homeDir?: string } = {}): AgentSetupResult {
+export function setupAgent(agent: SetupAgent, projectDir: string, options: { write?: boolean; serverPath?: string; homeDir?: string; portableHooks?: boolean } = {}): AgentSetupResult {
   if (!SETUP_AGENTS.includes(agent)) throw new Error(`Unsupported agent: ${agent}`);
   const serverPath = options.serverPath ?? join(__dirname, "index.js");
   // An npx cache path (~/.npm/_npx/<hash>/...) is ephemeral — npx prunes it and
@@ -16815,6 +18399,646 @@ export function setupAgent(agent: SetupAgent, projectDir: string, options: { wri
     const path = join(home, ".claude.json");
     const server = { type: "stdio", command: serverCommand, args: serverArgs, alwaysLoad: true };
     const hookDir = join(home, ".claude", "kage", "hooks");
+    // The hooks used to die on `command -v kage || exit 0`: an npx install puts
+    // nothing on PATH, so every ambient hook silently no-oped for new users.
+    // Resolve the CLI the same way the MCP server config does — PATH first
+    // (fast), then the install-time cli.js (guarded by -f so npx cache pruning
+    // degrades gracefully), then the package runner. The loop never silently dies.
+    // portableHooks (plugin generation): the scripts are committed and shared,
+    // so no machine-specific path may be baked in — PATH then package runner.
+    const hookCliPath = options.portableHooks ? "" : join(dirname(serverPath), "cli.js");
+    const hookKageResolve = `# kage-hooks-v${KAGE_HOOKS_VERSION}
+# Resolve the kage CLI: repo-local, PATH${hookCliPath ? ", baked install path" : ""}, then the package runner.
+export PATH="$CWD/node_modules/.bin:$PATH"
+if command -v kage >/dev/null 2>&1; then
+  :
+${hookCliPath ? `elif [[ -f "${hookCliPath}" ]] && command -v node >/dev/null 2>&1; then
+  kage() { node "${hookCliPath}" "$@"; }
+` : ""}else
+  kage() { npx -y --package=@kage-core/kage-graph-mcp kage "$@"; }
+fi`;
+    // vNext handover. When the local runtime (kaged) is live in "audit" or "assist" mode, the
+    // single vnext adapter hook owns the event: it posts evidence and injects context over the
+    // authenticated loopback API. The legacy script then stands down, or the same event would be
+    // observed and injected twice. Any other mode — and, overwhelmingly, no runtime at all —
+    // leaves the legacy script fully in charge, so existing installs are untouched.
+    //
+    // Trusting status.json on sight is not enough, and getting this wrong disables Kage silently:
+    //   * status.json is removed only on a GRACEFUL close, so SIGKILL, an OOM kill, or a reboot
+    //     leaves it behind. A file-only check then reads mode "audit", every legacy hook stands
+    //     down, the adapter's post is refused — and no path runs at all, forever, while `kage
+    //     doctor` still says healthy. Worse, if any other local process later takes that port, the
+    //     adapter would hand it the raw prompt and the bearer token.
+    //   * status.json and token sit at a repo-relative, checked-out path. A cloned hostile repo can
+    //     ship both and point the harness at a port of its choosing.
+    // So: the files must still look like the runtime's own (0600 in a 0700 dir, owned by us — the
+    // invariants runtime/paths.ts and status.ts enforce when writing them) AND the recorded pid
+    // must still be a live process of ours. Anything unverifiable is "no runtime": when in doubt,
+    // the legacy path runs, because a redundant legacy hook is survivable and silence is not.
+    const hookVnextProbe = `import json, os, stat, subprocess
+
+def dead():
+    raise SystemExit(1)
+
+directory = os.environ.get("KAGE_VNEXT_DIR") or ""
+status_path = os.path.join(directory, "status.json")
+token_path = os.path.join(directory, "token")
+try:
+    uid = os.getuid()
+    entry = os.lstat(directory)
+    if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != uid or (entry.st_mode & 0o077):
+        dead()
+    for path in (status_path, token_path):
+        entry = os.lstat(path)
+        if not stat.S_ISREG(entry.st_mode) or entry.st_uid != uid or (entry.st_mode & 0o077):
+            dead()
+    with open(status_path, "r", encoding="utf-8") as handle:
+        status = json.load(handle)
+    with open(token_path, "r", encoding="utf-8") as handle:
+        token = handle.read().strip()
+except Exception:
+    dead()
+if not isinstance(status, dict) or not token:
+    dead()
+host, port, mode, pid = status.get("host"), status.get("port"), status.get("mode"), status.get("pid")
+if host != "127.0.0.1" or mode not in ("audit", "assist"):
+    dead()
+if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+    dead()
+if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    dead()
+try:
+    os.kill(pid, 0)
+except Exception:
+    dead()
+try:
+    proc = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, timeout=2)
+    comm = os.path.basename(proc.stdout.decode("utf-8", "replace").strip()).lower()
+except Exception:
+    dead()
+if "node" not in comm:
+    dead()
+print("http://127.0.0.1:%d %s" % (port, mode))`;
+    // A legacy script hands its event to the adapter only when BOTH are true: the runtime is
+    // verifiably live, and the adapter actually handles this event. The adapter is wired for six of
+    // the nine events; Stop, PreCompact and SubagentStop have no adapter handler at all, and a
+    // legacy script that stood down for them would take `kage refresh`, `kage pr summarize`, the
+    // reconcile gate and distillation down with it and hand the work to nobody.
+    const hookVnextGuard = `KAGE_VNEXT_ADAPTER_EVENTS=" SessionStart UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure SessionEnd "
+if [[ "$KAGE_VNEXT_ADAPTER_EVENTS" == *" $HOOK_EVENT "* ]] && KAGE_VNEXT_DIR="$CWD/.agent_memory/daemon/vnext" python3 -c '${hookVnextProbe}
+' >/dev/null 2>&1; then
+  exit 0
+fi`;
+    // The vNext adapter: ONE process per hook event, no Kage CLI, no Node start-up. It reads the
+    // hook JSON once, routes it, verifies the runtime is live, posts protocol-v1 evidence, and
+    // prints the daemon's delimited context block when one arrives inside the budget.
+    //
+    // It fails open, always. `set -e` is deliberately NOT used: a dead daemon, a missing python3,
+    // a 401, a hung /v2/context — every one of them must still reach `exit 0`, because a Kage
+    // failure that breaks the user's Claude session is worse than no Kage at all. Every network
+    // call is capped (150 ms for evidence, 500 ms for context), so a stalled daemon costs a small
+    // bounded wait. The raw prompt is never printed, logged, or passed as an argument: it lives in
+    // PAYLOAD and reaches the python child through the environment and the loopback socket only.
+    const vnextAdapterHookScript = `#!/usr/bin/env bash
+# Kage vNext adapter hook — the single fail-open bridge from Claude Code hooks to the local Kage
+# runtime (kaged). Posts protocol-v1 evidence to 127.0.0.1 and injects the runtime's context block.
+# Silent, and exits 0, whenever the runtime is absent, unreachable, slow, or unhappy.
+# kage-hooks-v${KAGE_HOOKS_VERSION}
+set -uo pipefail
+
+PAYLOAD="$(cat || true)"
+
+# Route before doing anything expensive. PreToolUse fires on EVERY tool call — Bash, Grep,
+# TodoWrite — and most of them map to no protocol event, so an unmapped hook must cost one python
+# start-up and nothing else: no git, no probe, no network.
+ROUTE="$(PAYLOAD="$PAYLOAD" python3 -c 'import json, os
+try:
+    d = json.loads(os.environ.get("PAYLOAD") or "{}")
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+
+def line(value, limit):
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\\r", " ").replace("\\n", " ")[:limit]
+
+print(line(d.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "", 4096))
+print(line(d.get("hook_event_name") or d.get("event") or "", 64))
+print(line(d.get("tool_name") or d.get("toolName") or "", 128))
+' 2>/dev/null || echo "")"
+CWD=""
+HOOK_EVENT=""
+TOOL=""
+{ read -r CWD; read -r HOOK_EVENT; read -r TOOL; } <<< "$ROUTE"
+
+[[ -n "$CWD" && -d "$CWD/.agent_memory/daemon/vnext" ]] || exit 0
+case "$HOOK_EVENT" in
+  SessionStart|UserPromptSubmit|PostToolUse|PostToolUseFailure|SessionEnd) ;;
+  PreToolUse)
+    case "$TOOL" in
+      Read|NotebookRead|Edit|Write|MultiEdit|NotebookEdit) ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+
+RUNTIME_DIR="$CWD/.agent_memory/daemon/vnext"
+# The runtime is trusted only while it is verifiably ours and verifiably alive. A status file left
+# behind by a killed daemon is not a runtime: the port it names may since have been taken by any
+# other local process, and this hook would hand that process the raw prompt and the bearer token.
+PROBE="$(KAGE_VNEXT_DIR="$RUNTIME_DIR" python3 -c 'import json, os, stat, subprocess
+
+def dead():
+    raise SystemExit(1)
+
+directory = os.environ.get("KAGE_VNEXT_DIR") or ""
+status_path = os.path.join(directory, "status.json")
+token_path = os.path.join(directory, "token")
+try:
+    uid = os.getuid()
+    entry = os.lstat(directory)
+    if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != uid or (entry.st_mode & 0o077):
+        dead()
+    for path in (status_path, token_path):
+        entry = os.lstat(path)
+        if not stat.S_ISREG(entry.st_mode) or entry.st_uid != uid or (entry.st_mode & 0o077):
+            dead()
+    with open(status_path, "r", encoding="utf-8") as handle:
+        status = json.load(handle)
+    with open(token_path, "r", encoding="utf-8") as handle:
+        token = handle.read().strip()
+except Exception:
+    dead()
+if not isinstance(status, dict) or not token:
+    dead()
+host, port, mode, pid = status.get("host"), status.get("port"), status.get("mode"), status.get("pid")
+if host != "127.0.0.1" or mode not in ("audit", "assist"):
+    dead()
+if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+    dead()
+if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    dead()
+try:
+    os.kill(pid, 0)
+except Exception:
+    dead()
+try:
+    proc = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, timeout=2)
+    comm = os.path.basename(proc.stdout.decode("utf-8", "replace").strip()).lower()
+except Exception:
+    dead()
+if "node" not in comm:
+    dead()
+print("http://127.0.0.1:%d %s" % (port, mode))
+' 2>/dev/null || echo "")"
+CONNECTION=""
+MODE=""
+[[ -n "$PROBE" ]] && read -r CONNECTION MODE <<< "$PROBE"
+[[ -n "$CONNECTION" && -n "$MODE" ]] || { CONNECTION=""; MODE=""; }
+
+TOKEN=""
+if [[ -n "$CONNECTION" ]]; then
+  TOKEN="$(tr -d '\\r\\n' < "$RUNTIME_DIR/token" 2>/dev/null || echo "")"
+  # A runtime we cannot authenticate to is a runtime we cannot reach.
+  [[ -n "$TOKEN" ]] || { CONNECTION=""; MODE=""; }
+fi
+
+# Where a context DELIVERY is recorded. Not an endpoint: the delivery Kage most needs to record is
+# the one where the daemon was unreachable, and there is no posting that to the process that just
+# failed. One 0600 file per delivery, inside the runtime's own 0700 directory, drained into SQLite
+# by the runtime (or by the next \`kage status\` / audit report). It costs no round trip and it cannot
+# fail a session.
+SPOOL="$RUNTIME_DIR/deliveries"
+
+# The runtime is gone. For a hook that WOULD have attached context, that is a failed-open — the one
+# attachment outcome that can never be posted anywhere, and the one an honest audit must still
+# count. Every other hook exits silently, exactly as before.
+if [[ -z "$CONNECTION" ]]; then
+  case "$HOOK_EVENT" in
+    SessionStart|UserPromptSubmit) ;;
+    *) exit 0 ;;
+  esac
+  REMOTE="$(git -C "$CWD" config --get remote.origin.url 2>/dev/null || echo "")"
+  PAYLOAD="$PAYLOAD" KAGE_ROOT="$CWD" KAGE_REMOTE="$REMOTE" KAGE_SPOOL="$SPOOL" python3 -c 'import hashlib, json, os, uuid
+from datetime import datetime, timezone
+
+MAX_SPOOL_FILES = 2000
+
+try:
+    d = json.loads(os.environ.get("PAYLOAD") or "{}")
+except Exception:
+    raise SystemExit(0)
+if not isinstance(d, dict):
+    raise SystemExit(0)
+
+root = os.environ.get("KAGE_ROOT") or ""
+remote = (os.environ.get("KAGE_REMOTE") or "").strip() or None
+spool = os.environ["KAGE_SPOOL"]
+
+def sha(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+session = d.get("session_id") or d.get("sessionId")
+session_id = (session[:256].strip() if isinstance(session, str) else "") or "default"
+repo_id = "repo_" + sha(remote or root)[:32]
+task_id = "task_" + sha(repo_id + "|" + session_id)[:32]
+now = datetime.now(timezone.utc)
+
+# capsule_id is NOT NULL and no capsule was composed: a fixed token says so instead of inventing an
+# id. composition_latency_ms is null for the same reason — a failed round trip is not a composition.
+record = {
+    "delivery_id": "delivery_" + str(uuid.uuid4()),
+    "capsule_id": "capsule_unavailable",
+    "task_id": task_id,
+    "adapter_id": "claude-code-hooks",
+    "injection_location": "none",
+    "delivered_at": now.strftime("%Y-%m-%dT%H:%M:%S.") + ("%03dZ" % (now.microsecond // 1000)),
+    "added_bytes": 0,
+    "added_tokens": None,
+    "measurement_quality": "unavailable",
+    "status": "failed_open",
+    "reason": "unreachable",
+    "composition_latency_ms": None,
+    # provider is null: this hook injects from IDE events and never sees which API the agent calls,
+    # so it cannot know the provider. A guessed "anthropic" would be a fabrication. Only the proxy,
+    # which holds the gateway, records a real provider.
+    "provider": None,
+}
+
+try:
+    os.makedirs(spool, mode=0o700, exist_ok=True)
+    # A dead daemon means a failed-open on every prompt, forever. True, but it must not become an
+    # unbounded directory: past the cap Kage stops recording rather than let measurement eat a disk.
+    if len(os.listdir(spool)) >= MAX_SPOOL_FILES:
+        raise SystemExit(0)
+    name = str(uuid.uuid4())
+    temporary = os.path.join(spool, "." + name + ".tmp")
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(handle, json.dumps(record, separators=(",", ":")).encode("utf-8"))
+    finally:
+        os.close(handle)
+    # Renamed into place, so a reader only ever sees a complete record.
+    os.rename(temporary, os.path.join(spool, name + ".json"))
+except Exception:
+    # A measurement Kage could not record is a gap in a report. Never a broken session.
+    pass
+' 2>/dev/null || true
+  exit 0
+fi
+
+WORK="$(mktemp -d 2>/dev/null || echo "")"
+[[ -n "$WORK" ]] || exit 0
+# EXIT alone is not enough: a hook killed mid-run would leave a temp file holding the raw prompt.
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+
+# Repository identity follows the repo, not the checkout: the remote when there is one, else root.
+REMOTE="$(git -C "$CWD" config --get remote.origin.url 2>/dev/null || echo "")"
+BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+COMMIT="$(git -C "$CWD" rev-parse HEAD 2>/dev/null || echo "")"
+
+# One python pass turns the hook payload into protocol-v1 request bodies. It writes them to files
+# inside the 0700 temp dir rather than printing them: the raw prompt does live in PAYLOAD and is
+# handed to this child through the environment, but it is never printed, logged, or passed as an
+# argument, and it leaves this machine only over the authenticated loopback socket.
+PAYLOAD="$PAYLOAD" KAGE_ROOT="$CWD" KAGE_REMOTE="$REMOTE" KAGE_BRANCH="$BRANCH" KAGE_COMMIT="$COMMIT" KAGE_MODE="$MODE" KAGE_WORK="$WORK" python3 -c 'import hashlib, json, os, uuid
+from datetime import datetime, timezone
+
+MAX_TEXT = 4000
+MAX_PATH = 1024
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+READ_TOOLS = ("Read", "NotebookRead")
+
+try:
+    d = json.loads(os.environ.get("PAYLOAD") or "{}")
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+
+root = os.environ.get("KAGE_ROOT") or ""
+remote = (os.environ.get("KAGE_REMOTE") or "").strip() or None
+branch = (os.environ.get("KAGE_BRANCH") or "").strip() or None
+commit = (os.environ.get("KAGE_COMMIT") or "").strip() or None
+mode = os.environ.get("KAGE_MODE") or ""
+work = os.environ["KAGE_WORK"]
+
+def text(value, limit=MAX_TEXT):
+    return value[:limit] if isinstance(value, str) else ""
+
+def sha(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+# Memory is repo-scoped, and a path is team_metadata — the shareable tier. A Read of ~/.ssh/config,
+# or of a different employer checkout, must never put that path into a shareable event.
+def in_repo(path):
+    if not path or not root:
+        return ""
+    absolute = path if os.path.isabs(path) else os.path.join(root, path)
+    real = os.path.realpath(absolute)
+    base = os.path.realpath(root)
+    if real == base or real.startswith(base + os.sep):
+        return path
+    return ""
+
+repo_id = "repo_" + sha(remote or root)[:32]
+session_id = text(d.get("session_id") or d.get("sessionId"), 256).strip() or "default"
+task_id = "task_" + sha(repo_id + "|" + session_id)[:32]
+repository = {"repo_id": repo_id, "root": root, "remote": remote, "branch": branch, "commit": commit, "worktree": root}
+task = {"task_id": task_id, "session_id": session_id, "user_id": None, "agent_surface": "claude-code"}
+
+hook = text(d.get("hook_event_name") or d.get("event"), 64)
+tool = text(d.get("tool_name") or d.get("toolName"), 128)
+tool_input = d.get("tool_input") or d.get("toolInput") or {}
+if not isinstance(tool_input, dict):
+    tool_input = {}
+path = in_repo(text(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path"), MAX_PATH))
+prompt = text(d.get("prompt") or d.get("user_prompt") or d.get("message"))
+
+# Claude Code has no PostToolUseFailure event: a failed tool call arrives as an ordinary
+# PostToolUse whose tool_response carries the error. Only the verdict is recorded, never the text.
+response = d.get("tool_response") or d.get("toolResponse")
+outcome = "ok"
+if hook == "PostToolUseFailure":
+    outcome = "error"
+elif isinstance(response, dict):
+    if response.get("is_error") is True or response.get("isError") is True or response.get("success") is False:
+        outcome = "error"
+    elif response.get("error"):
+        outcome = "error"
+
+# Protocol v1 is frozen: a hook with no protocol event type is skipped, never coerced into one.
+if hook == "SessionStart":
+    event_type = "session_start"
+elif hook == "UserPromptSubmit":
+    event_type = "prompt"
+elif hook == "PreToolUse" and tool in READ_TOOLS:
+    event_type = "file_open"
+elif hook == "PreToolUse" and tool in EDIT_TOOLS:
+    event_type = "file_edit"
+elif hook in ("PostToolUse", "PostToolUseFailure"):
+    event_type = "tool_result"
+elif hook == "SessionEnd":
+    event_type = "session_end"
+else:
+    event_type = None
+
+# A file event with no in-repo path, or a prompt with no text, is not evidence — it is noise.
+if event_type in ("file_open", "file_edit") and not path:
+    event_type = None
+if event_type == "prompt" and not prompt:
+    event_type = None
+
+# Only paths and tool names are team_metadata. The prompt and tool outcomes stay local_raw, and
+# file content (old_string / new_string / content) never enters an event at all.
+if event_type == "prompt":
+    body, privacy = {"text": prompt}, "local_raw"
+elif event_type == "tool_result":
+    body, privacy = {"tool": tool, "path": path, "outcome": outcome}, "local_raw"
+elif event_type in ("file_open", "file_edit"):
+    body, privacy = {"tool": tool, "path": path}, "team_metadata"
+elif event_type == "session_start":
+    body, privacy = {"agent_surface": "claude-code"}, "team_metadata"
+elif event_type == "session_end":
+    body, privacy = {"agent_surface": "claude-code", "reason": text(d.get("reason"), 128)}, "team_metadata"
+else:
+    body, privacy = None, None
+
+def write(name, value):
+    with open(os.path.join(work, name), "w", encoding="utf-8") as handle:
+        json.dump(value, handle, separators=(",", ":"))
+
+if event_type:
+    now = datetime.now(timezone.utc)
+    occurred_at = now.strftime("%Y-%m-%dT%H:%M:%S.") + ("%03dZ" % (now.microsecond // 1000))
+    # The store deduplicates on source_fingerprint, so it fingerprints the SIGNAL, not this post:
+    # an event retried after a failed-open post must not double-record. event_id is excluded.
+    fingerprint = hashlib.sha256(
+        json.dumps([repo_id, task_id, event_type, occurred_at, body], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    write("event.json", {
+        "protocol_version": 1,
+        "event_id": "event_" + str(uuid.uuid4()),
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "repository_id": repo_id,
+        "task_id": task_id,
+        "privacy_class": privacy,
+        "source_fingerprint": fingerprint,
+        "payload": body,
+    })
+
+if hook == "SessionStart":
+    write("handshake.json", {
+        "protocol_version": 1,
+        "adapter_id": "claude-code-hooks",
+        "agent_surface": "claude-code",
+        "agent_version": None,
+        "repository": repository,
+        "task": task,
+        "capabilities": [
+            "session_start", "prompt", "file_open", "file_edit", "tool_result", "session_end",
+            "inject_system", "inject_user_turn",
+        ],
+    })
+
+# Audit mode NEVER mutates the prompt. It is the measurement baseline: if the hook injected context
+# in audit, the "original" bytes would already contain Kage context and the exact-versus-partial
+# savings number would be meaningless.
+#
+# But audit still MEASURES. It composes the capsule it would have injected and records the attempt
+# as a SKIP — which is how an audit period gets a real context-composition latency and a real,
+# non-null attachment denominator at all. Composing costs the session nothing (the capsule is
+# thrown away); injecting would cost it the baseline, so only assist injects.
+query = prompt[:1000] if hook == "UserPromptSubmit" else ("orient in this repository" if hook == "SessionStart" else "")
+if query:
+    write("context.json", {
+        "repository": repository,
+        "task": task,
+        "query": query,
+        "targets": [],
+        "changed_files": [],
+        "token_budget": 2000,
+    })
+    write("identity.json", {"repo_id": repo_id, "task_id": task_id})
+    # The location the block WOULD go to. It is recorded as the delivery location only when the
+    # block is actually injected; a skipped capsule went nowhere and says "none".
+    if mode == "assist":
+        with open(os.path.join(work, "inject"), "w", encoding="utf-8") as handle:
+            handle.write("systemMessage" if hook == "SessionStart" else "additionalContext")
+' 2>/dev/null || exit 0
+
+post_evidence() {
+  # Evidence delivery is a background write and gets 150 ms — it must never be felt in the session.
+  # -f turns a 4xx/5xx into a nonzero exit we simply ignore.
+  curl -sf --max-time 0.15 -X POST -H "content-type: application/json" -H "authorization: Bearer $TOKEN" --data-binary "@$2" "$CONNECTION$1" 2>/dev/null
+}
+
+post_context() {
+  # Context composition is allowed 500 ms and NO MORE — a cold code-graph build takes tens of
+  # seconds and this hook will not wait for it: it fails open and the warm cache serves the next
+  # prompt. Waiting would hang the user's agent, which is the one thing Kage must never do.
+  #
+  # The body goes to a file and the status line to stdout, so the round trip is MEASURED by the
+  # HTTP client itself (time_total) instead of being estimated by a second python start-up.
+  curl -s -o "$3" -w '%{http_code} %{time_total}' --max-time 0.5 -X POST -H "content-type: application/json" -H "authorization: Bearer $TOKEN" --data-binary "@$2" "$CONNECTION$1" 2>/dev/null
+}
+
+[[ -f "$WORK/handshake.json" ]] && post_evidence /v2/handshakes "$WORK/handshake.json" >/dev/null 2>&1
+[[ -f "$WORK/event.json" ]] && post_evidence /v2/events "$WORK/event.json" >/dev/null 2>&1
+
+if [[ -f "$WORK/context.json" ]]; then
+  TRANSPORT_STATUS=0
+  METRICS="$(post_context /v2/context "$WORK/context.json" "$WORK/capsule.json")" || TRANSPORT_STATUS=$?
+
+  # One pass decides what the session gets AND records what happened. A capsule that is truncated,
+  # off-protocol, or empty prints nothing at all rather than injecting half a block — and is still
+  # recorded, because "Kage tried and attached nothing" is a fact an audit has to be able to count.
+  KAGE_METRICS="$METRICS" KAGE_TRANSPORT_STATUS="$TRANSPORT_STATUS" KAGE_MODE="$MODE" KAGE_WORK="$WORK" KAGE_SPOOL="$SPOOL" python3 -c 'import json, os, uuid
+from datetime import datetime, timezone
+
+MAX_SPOOL_FILES = 2000
+
+work = os.environ["KAGE_WORK"]
+spool = os.environ["KAGE_SPOOL"]
+mode = os.environ.get("KAGE_MODE") or ""
+
+try:
+    with open(os.path.join(work, "identity.json"), "r", encoding="utf-8") as handle:
+        identity = json.load(handle)
+    task_id = identity["task_id"]
+except Exception:
+    raise SystemExit(0)
+
+try:
+    field = open(os.path.join(work, "inject"), "r", encoding="utf-8").read().strip()
+except Exception:
+    field = ""
+
+http_code, seconds = 0, None
+parts = (os.environ.get("KAGE_METRICS") or "").split()
+if len(parts) == 2:
+    try:
+        http_code, seconds = int(parts[0]), float(parts[1])
+    except Exception:
+        http_code, seconds = 0, None
+
+try:
+    transport_status = int(os.environ.get("KAGE_TRANSPORT_STATUS") or "0")
+except Exception:
+    transport_status = 1
+
+capsule = None
+if transport_status == 0 and http_code == 200:
+    try:
+        with open(os.path.join(work, "capsule.json"), "r", encoding="utf-8") as handle:
+            capsule = json.load(handle)
+    except Exception:
+        capsule = None
+    if not isinstance(capsule, dict) or capsule.get("protocol_version") != 1:
+        capsule = None
+    elif not isinstance(capsule.get("sections"), list):
+        capsule = None
+    elif not isinstance(capsule.get("capsule_id"), str) or not capsule.get("capsule_id"):
+        capsule = None
+
+# Every reason is a fixed token — the same vocabulary the TypeScript adapter uses. Nothing derived
+# from a prompt, a file, or a response body ever enters one, because reasons are stored and printed.
+def failure_reason():
+    if transport_status == 28:
+        return "timeout"
+    if transport_status != 0 or http_code == 0:
+        return "unreachable"
+    if http_code in (401, 403):
+        return "unauthorized"
+    if http_code in (400, 409, 413, 415):
+        return "invalid_protocol"
+    if http_code == 200:
+        return "malformed_response"
+    return "runtime_error"
+
+block = ""
+if capsule is not None:
+    rendered = []
+    for section in capsule["sections"]:
+        if not isinstance(section, dict):
+            rendered = []
+            break
+        title, body, kind = section.get("title"), section.get("body"), section.get("kind")
+        if not isinstance(title, str) or not isinstance(body, str) or not isinstance(kind, str):
+            rendered = []
+            break
+        rendered.append("## %s (%s)\\n%s" % (title, kind, body))
+    if rendered:
+        block = "<<<KAGE_CONTEXT>>>\\n" + "\\n\\n".join(rendered) + "\\n<<<END_KAGE_CONTEXT>>>\\n"
+
+injects = bool(block) and mode == "assist" and field in ("systemMessage", "additionalContext")
+
+if capsule is None:
+    status, reason, location = "failed_open", failure_reason(), "none"
+elif not block:
+    status, reason, location = "skipped", "empty_capsule", "none"
+elif not injects:
+    # Audit composed the capsule and threw it away. A skip is NOT an attachment, and it is recorded
+    # as a skip so no report can ever quietly count it as one.
+    status, reason, location = "skipped", "audit_mode_no_injection", "none"
+else:
+    status = "delivered"
+    reason = "delivered"
+    location = "system" if field == "systemMessage" else "user_turn"
+
+now = datetime.now(timezone.utc)
+record = {
+    "delivery_id": "delivery_" + str(uuid.uuid4()),
+    # No capsule was composed => there is no capsule id. A fixed token, never an invented one.
+    "capsule_id": capsule["capsule_id"] if capsule is not None else "capsule_unavailable",
+    "task_id": task_id,
+    "adapter_id": "claude-code-hooks",
+    "injection_location": location if status == "delivered" else "none",
+    "delivered_at": now.strftime("%Y-%m-%dT%H:%M:%S.") + ("%03dZ" % (now.microsecond // 1000)),
+    # Exactly the bytes this hook put into the session. Zero when it put none.
+    "added_bytes": len(block.encode("utf-8")) if status == "delivered" else 0,
+    # Nobody counted the block TOKENS. bytes/4 would be a fabricated number, so this stays null and
+    # the row says "partial": bytes exact, tokens unmeasured.
+    "added_tokens": None,
+    "measurement_quality": "partial" if status == "delivered" else "unavailable",
+    "status": status,
+    "reason": reason,
+    # The MEASURED composition round trip, in milliseconds. Null when nothing was composed: a
+    # timeout is not a composition time, and putting it in the percentiles would invent one.
+    "composition_latency_ms": (seconds * 1000.0) if (capsule is not None and seconds is not None) else None,
+    # provider is null: this hook injects into the agent turn from IDE events and never sees which
+    # API the agent then calls, so it cannot know the provider (a guessed one would be fabricated).
+    # Only the proxy, which holds the gateway, records a real provider. Kept in lockstep with the
+    # TypeScript adapter (client.ts) so both shipped hooks write an identical row shape.
+    "provider": None,
+}
+
+try:
+    os.makedirs(spool, mode=0o700, exist_ok=True)
+    if len(os.listdir(spool)) < MAX_SPOOL_FILES:
+        name = str(uuid.uuid4())
+        temporary = os.path.join(spool, "." + name + ".tmp")
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(handle, json.dumps(record, separators=(",", ":")).encode("utf-8"))
+        finally:
+            os.close(handle)
+        os.rename(temporary, os.path.join(spool, name + ".json"))
+except Exception:
+    # A measurement Kage could not record is a gap in a report. Never a broken session.
+    pass
+
+if injects:
+    print(json.dumps({field: block}))
+' 2>/dev/null || true
+fi
+
+exit 0
+`;
     const hookScript = `#!/usr/bin/env bash
 # Kage SessionStart hook — injects full memory policy as a system message.
 # Silent if Kage is not initialized in the current project.
@@ -16823,6 +19047,34 @@ set -euo pipefail
 CWD="$(cat | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null || echo "")"
 
 [[ -d "$CWD/.agent_memory" ]] || exit 0
+
+# Proxy ensure-up (auto-attach): this repo may route sessions through the kage proxy via
+# ANTHROPIC_BASE_URL in .claude/settings.local.json. If nothing is listening yet (fresh boot),
+# start the background proxy now — idempotent, ~1s bind, the last-used mode is reused from the
+# daemon state (audit-safe default). Fully guarded: this block can never fail the hook.
+if grep -qs "ANTHROPIC_BASE_URL" "$CWD/.claude/settings.local.json" 2>/dev/null; then
+  if ! nc -z 127.0.0.1 8788 >/dev/null 2>&1; then
+    # The pipeline must NEVER trip the hook's set -euo pipefail: proxy.json is absent after a clean
+    # \`kage down\` or on first run, and a failing command substitution in an assignment is fatal
+    # under set -e — so the whole substitution is || true'd and the default applied after.
+    KAGE_UP_MODE="$(sed -n 's/.*"mode": *"\\([a-z]*\\)".*/\\1/p' "$CWD/.agent_memory/daemon/proxy.json" 2>/dev/null | head -1 || true)"
+    [[ -n "$KAGE_UP_MODE" ]] || KAGE_UP_MODE="audit"
+    # Repo-local CLI first (a stale global \`kage\` on PATH may predate \`kage up\`), then PATH,
+    # then the package runner — the same never-silently-die chain the other hooks use.
+    if [[ -f "$CWD/node_modules/@kage-core/kage-graph-mcp/dist/cli.js" ]] && command -v node >/dev/null 2>&1; then
+      (node "$CWD/node_modules/@kage-core/kage-graph-mcp/dist/cli.js" up --project "$CWD" --mode "$KAGE_UP_MODE" >/dev/null 2>&1 &) || true
+    elif [[ -f "$CWD/mcp/dist/cli.js" ]] && command -v node >/dev/null 2>&1; then
+      (node "$CWD/mcp/dist/cli.js" up --project "$CWD" --mode "$KAGE_UP_MODE" >/dev/null 2>&1 &) || true
+    elif command -v kage >/dev/null 2>&1; then
+      (kage up --project "$CWD" --mode "$KAGE_UP_MODE" >/dev/null 2>&1 &) || true
+    else
+      (npx -y --package=@kage-core/kage-graph-mcp kage up --project "$CWD" --mode "$KAGE_UP_MODE" >/dev/null 2>&1 &) || true
+    fi
+  fi
+fi
+
+HOOK_EVENT="SessionStart"
+${hookVnextGuard}
 
 # Read the full policy from AGENTS.md (between the markers) if present.
 POLICY=""
@@ -16847,6 +19099,7 @@ Before finishing a task that changed files: kage_pr_summarize or kage_propose_fr
 If recalled memory helped: kage_feedback helpful. If wrong or stale: kage_feedback wrong or stale."
 fi
 
+${hookKageResolve}
 # Session continuity: append a compact "previously…" digest when prior session data exists.
 if command -v kage >/dev/null 2>&1; then
   PREVIOUSLY="$(kage resume --project "$CWD" 2>/dev/null || true)"
@@ -16868,8 +19121,11 @@ PAYLOAD="$(cat || true)"
 CWD="$(printf "%s" "$PAYLOAD" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null || echo "")"
 
 [[ -d "$CWD/.agent_memory" ]] || exit 0
-# Resolve a repo-local install too, so hooks work without a global kage on PATH.
-export PATH="$CWD/node_modules/.bin:$PATH"
+# Stop has no vNext adapter handler, so this script never hands over — but the guard is kept
+# uniform so the day an adapter handles Stop, one line here is the whole change.
+HOOK_EVENT="Stop"
+${hookVnextGuard}
+${hookKageResolve}
 command -v kage >/dev/null 2>&1 || exit 0
 
 if git -C "$CWD" status --porcelain -uall >/dev/null 2>&1 && [[ -n "$(git -C "$CWD" status --porcelain -uall)" ]]; then
@@ -16926,10 +19182,7 @@ print(d.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "")
 ' 2>/dev/null || echo "")"
 
 [[ -d "$CWD/.agent_memory" ]] || exit 0
-# Resolve a repo-local install too, so hooks work without a global kage on PATH.
-export PATH="$CWD/node_modules/.bin:$PATH"
-command -v kage >/dev/null 2>&1 || exit 0
-
+# The event decides who owns this hook, so it is read before the stand-down guard, not after.
 EVENT="$(PAYLOAD="$PAYLOAD" python3 -c 'import json, os
 try:
     d = json.loads(os.environ.get("PAYLOAD") or "{}")
@@ -16937,6 +19190,10 @@ except Exception:
     d = {}
 print(d.get("hook_event_name") or d.get("event") or "")
 ' 2>/dev/null || echo "")"
+HOOK_EVENT="$EVENT"
+${hookVnextGuard}
+${hookKageResolve}
+command -v kage >/dev/null 2>&1 || exit 0
 
 SESSION="$(PAYLOAD="$PAYLOAD" python3 -c 'import json, os
 try:
@@ -16977,17 +19234,53 @@ tool_response = d.get("tool_response") or d.get("toolResponse") or d.get("result
 prompt = first(d.get("prompt"), d.get("user_prompt"), d.get("message"))
 path = ""
 command = ""
+new_text = ""
+old_text = ""
 if isinstance(tool_input, dict):
     path = first(tool_input.get("file_path"), tool_input.get("path"), tool_input.get("notebook_path"))
     command = first(tool_input.get("command"))
+    new_text = first(tool_input.get("new_string"), tool_input.get("content"), tool_input.get("new_source"))
+    old_text = first(tool_input.get("old_string"))
+    if not new_text and isinstance(tool_input.get("edits"), list):
+        new_text = " ".join(e.get("new_string") or "" for e in tool_input["edits"] if isinstance(e, dict))[:1200]
+
+def prose(value, limit=1200, tail=False):
+    # Plain-text extraction. Serialized dicts read as noise to the signal
+    # scorer (jsonNoiseText), so pull the human-readable field instead of
+    # json.dumps-ing the payload — otherwise every tool observation scores 0.
+    if isinstance(value, dict):
+        for key in ("stdout", "stderr", "output", "error", "message", "content", "text"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                flat = " ".join(candidate.split())
+                return flat[-limit:] if tail else flat[:limit]
+        flat = " ".join(str(v) for v in value.values() if isinstance(v, str) and v.strip())
+        flat = " ".join(flat.split())
+        return flat[:limit]
+    if value is None:
+        return ""
+    flat = " ".join(str(value).split())
+    return flat[-limit:] if tail else flat[:limit]
 
 if event_name == "UserPromptSubmit":
     payload = {"type": "user_prompt", "text": prompt, "summary": compact(prompt, 240)}
 elif event_name == "PostToolUseFailure":
-    payload = {"type": "command_result" if command else "tool_result", "tool": tool, "path": path, "command": command, "summary": "Tool failed: " + compact(tool_response or d, 320), "text": compact(tool_response or d)}
+    err = prose(tool_response or d, 900, tail=True)
+    line = (command or tool or "tool") + " failed: " + err
+    payload = {"type": "command_result" if command else "tool_result", "tool": tool, "path": path, "command": command, "summary": line[:320], "text": line}
 elif event_name == "PostToolUse":
-    obs_type = "file_change" if path else ("command_result" if command else "tool_use")
-    payload = {"type": obs_type, "tool": tool, "path": path, "command": command, "summary": compact(tool_response or tool_input, 320), "text": compact(tool_response or tool_input)}
+    if path and (new_text or old_text):
+        # The edit content is where fixes and conventions live; tool_response
+        # only says "success" and must never displace it.
+        change = ("changed " + path + ": " + old_text[:160] + " -> " + new_text[:480]) if old_text else ("wrote " + path + ": " + new_text[:600])
+        payload = {"type": "file_change", "tool": tool, "path": path, "summary": change[:320], "text": change}
+    elif command:
+        out = prose(tool_response, 900, tail=True)
+        line = command + (": " + out if out else " completed")
+        payload = {"type": "command_result", "tool": tool, "path": path, "command": command, "summary": line[:320], "text": line}
+    else:
+        body = prose(tool_response) or prose(tool_input)
+        payload = {"type": "file_change" if path else "tool_use", "tool": tool, "path": path, "command": command, "summary": ((tool + ": ") if tool else "") + body[:300], "text": body}
 elif event_name == "PreCompact":
     payload = {"type": "session_end", "summary": "Claude Code is compacting context; distill durable observations before compaction."}
 elif event_name == "SessionEnd":
@@ -17008,7 +19301,9 @@ if [[ -n "$OBSERVATION" ]]; then
 fi
 
 if [[ "$EVENT" == "PreCompact" || "$EVENT" == "SessionEnd" || "$EVENT" == "SubagentStop" ]]; then
-  kage distill --project "$CWD" --session "$SESSION" --json >/dev/null 2>&1 || true
+  # --auto is load-bearing: it is the gated path (signal filter, dedupe, pending
+  # review). Without it, distill writes unfiltered packets stamped approved.
+  kage distill --auto --project "$CWD" --session "$SESSION" --json >/dev/null 2>&1 || true
 fi
 
 if [[ "$EVENT" == "UserPromptSubmit" ]]; then
@@ -17047,8 +19342,9 @@ print(d.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or "")
 ' 2>/dev/null || echo "")"
 
 [[ -d "$CWD/.agent_memory" ]] || exit 0
-# Resolve a repo-local install too, so hooks work without a global kage on PATH.
-export PATH="$CWD/node_modules/.bin:$PATH"
+HOOK_EVENT="PreToolUse"
+${hookVnextGuard}
+${hookKageResolve}
 command -v kage >/dev/null 2>&1 || exit 0
 
 FILE_PATH="$(PAYLOAD="$PAYLOAD" python3 -c 'import json, os
@@ -17108,10 +19404,18 @@ exit 0
       .replace('STATE_DIR="/tmp/kage-read-context"', 'STATE_DIR="/tmp/kage-edit-context"')
       .replace("never block the Read.", "never block the edit.");
     const settingsPath = join(home, ".claude", "settings.json");
+    // The vNext adapter is wired alongside the legacy hooks, not instead of them. Exactly one of
+    // the two runs for any given event: the legacy scripts stand down (hookVnextGuard) when the
+    // runtime is live, and the adapter stands down when it is not. Timeout 5 s is generous — the
+    // adapter's own curl budget caps it near 1.5 s.
+    const vnextAdapter = (timeout: number) => ({
+      matcher: "",
+      hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/kage-vnext-adapter.sh", timeout }],
+    });
     const hookEntry = {
       hooks: {
-        SessionStart: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/session-start.sh", timeout: 5 }] }],
-        UserPromptSubmit: [{ hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 12 }] }],
+        SessionStart: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/session-start.sh", timeout: 5 }] }, vnextAdapter(5)],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 12 }] }, vnextAdapter(5)],
         PreToolUse: [
           { matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 5 }] },
           // Verified memory at the moment of relevance: short timeout, never blocks the Read.
@@ -17119,19 +19423,21 @@ exit 0
           // Enforcement: recall before an edit. Injects verified memory + withheld-stale
           // for the file the agent is about to change. Never blocks the edit.
           { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/kage-edit-context.sh", timeout: 6 }] },
+          // Last: the adapter is additive to the legacy matchers, never in front of them.
+          vnextAdapter(5),
         ],
-        PostToolUse: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 5 }] }],
-        PostToolUseFailure: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 5 }] }],
+        PostToolUse: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 5 }] }, vnextAdapter(5)],
+        PostToolUseFailure: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 5 }] }, vnextAdapter(5)],
         PreCompact: [{ hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 20 }] }],
         Stop: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/stop.sh", timeout: 20 }] }],
-        SessionEnd: [{ hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 20 }] }],
+        SessionEnd: [{ hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 20 }] }, vnextAdapter(5)],
         SubagentStop: [{ matcher: "", hooks: [{ type: "command", command: "bash ~/.claude/kage/hooks/observe.sh", timeout: 20 }] }],
       },
     };
     setSnippet(path, JSON.stringify({ mcpServers: { kage: server } }, null, 2), [
       "Add the MCP server to ~/.claude.json, then restart Claude Code.",
       "alwaysLoad: true makes Kage tools immediately visible without requiring ToolSearch.",
-      `Also create ${hookDir}/session-start.sh, observe.sh, kage-read-context.sh, kage-edit-context.sh, and stop.sh with the hook scripts and add SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/Stop/SessionEnd hooks to ~/.claude/settings.json.`,
+      `Also create ${hookDir}/session-start.sh, observe.sh, kage-read-context.sh, kage-edit-context.sh, stop.sh, and kage-vnext-adapter.sh with the hook scripts and add SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/Stop/SessionEnd hooks to ~/.claude/settings.json.`,
       "Run `kage init --project <repo>` inside each repo to install the ambient memory policy.",
     ], true);
     if (options.write) {
@@ -17143,19 +19449,44 @@ exit 0
       writeFileSync(join(hookDir, "kage-read-context.sh"), readContextHookScript, { mode: 0o755 });
       writeFileSync(join(hookDir, "kage-edit-context.sh"), editContextHookScript, { mode: 0o755 });
       writeFileSync(join(hookDir, "stop.sh"), stopHookScript, { mode: 0o755 });
+      writeFileSync(join(hookDir, "kage-vnext-adapter.sh"), vnextAdapterHookScript, { mode: 0o755 });
       upsertJsonSettings(settingsPath, hookEntry);
+      // AUTO-ATTACH (proxy-primary UX): every Claude Code session started in this repo flows
+      // through the kage proxy with no `kage run` and no export — ANTHROPIC_BASE_URL is wired
+      // into the project's PERSONAL settings (.claude/settings.local.json, uncommitted, this
+      // machine only). An existing user-set value is never clobbered (env merge: user wins).
+      // The session-start hook's ensure-up block keeps this safe: a session that starts while
+      // the proxy is down (fresh boot) restarts it instead of failing to reach the API.
+      upsertJsonSettings(join(projectDir, ".claude", "settings.local.json"), {
+        env: { ANTHROPIC_BASE_URL: "http://localhost:8788" },
+      });
       result.wrote = true;
     }
     return result;
   }
 
   if (agent === "gemini-cli") {
-    setSnippet(null, `gemini mcp add kage -- ${serverCommand} ${serverArgs.map((arg) => JSON.stringify(arg)).join(" ")}`, ["Run the command, then restart Gemini CLI if needed."]);
+    const geminiArgs = ["mcp", "add", "kage", "--", serverCommand, ...serverArgs];
+    setSnippet(null, `gemini ${geminiArgs.join(" ")}`, ["Run the command, then restart Gemini CLI if needed."], true);
+    if (options.write) {
+      try {
+        execFileSync("gemini", geminiArgs, { stdio: "ignore" });
+        result.wrote = true;
+      } catch (error) {
+        result.warnings.push(`could not run \`gemini\` automatically (${error instanceof Error ? error.message : String(error)}) — run the printed command yourself`);
+      }
+    }
     return result;
   }
 
   if (agent === "opencode") {
-    setSnippet(join(projectDir, "opencode.json"), JSON.stringify({ mcp: { kage: { type: "stdio", command: serverCommand, args: serverArgs } } }, null, 2), ["Merge this into opencode.json."]);
+    const path = join(projectDir, "opencode.json");
+    const serverEntry = { type: "stdio", command: serverCommand, args: serverArgs };
+    setSnippet(path, JSON.stringify({ mcp: { kage: serverEntry } }, null, 2), ["Merge this into opencode.json."], true);
+    if (options.write) {
+      upsertNestedMcpJson(path, "mcp", serverEntry);
+      result.wrote = true;
+    }
     return result;
   }
 
@@ -17167,6 +19498,12 @@ exit 0
     return result;
   }
 
+  // JSON-config agents: a plain `{ mcpServers: { kage: ... } }` merge is safe to write
+  // automatically. goose is deliberately excluded — its config.yaml is real YAML (may
+  // carry comments/anchors a JSON parser can't round-trip) and Kage has no YAML writer,
+  // so auto-writing there risks silently clobbering unrelated config. generic-mcp has no
+  // known path at all. Both stay print-only.
+  const jsonWriteAgents = new Set(["cursor", "windsurf", "cline", "roo-code", "kilo-code", "claude-desktop", "openclaw", "copilot", "hermes"]);
   const paths: Record<string, string> = {
     cursor: join(projectDir, ".cursor", "mcp.json"),
     windsurf: join(home, ".codeium", "windsurf", "mcp_config.json"),
@@ -17180,7 +19517,12 @@ exit 0
     hermes: join(home, ".hermes", "mcp.json"),
     "generic-mcp": "",
   };
-  setSnippet(paths[agent] || null, universal, [`Merge this MCP stdio config into ${agent}'s MCP settings.`, "Restart the agent after updating config."]);
+  const writeSupported = jsonWriteAgents.has(agent);
+  setSnippet(paths[agent] || null, universal, [`Merge this MCP stdio config into ${agent}'s MCP settings.`, "Restart the agent after updating config."], writeSupported);
+  if (options.write && writeSupported) {
+    upsertNestedMcpJson(paths[agent], "mcpServers", { command: serverCommand, args: serverArgs });
+    result.wrote = true;
+  }
   return result;
 }
 
@@ -17194,7 +19536,7 @@ export function generatePluginHooks(pluginDir: string): { scripts: string[]; rem
   const tmpHome = mkdtempSync(join(tmpdir(), "kage-plugin-home-"));
   const tmpProject = mkdtempSync(join(tmpdir(), "kage-plugin-proj-"));
   try {
-    setupAgent("claude-code", tmpProject, { write: true, homeDir: tmpHome });
+    setupAgent("claude-code", tmpProject, { write: true, homeDir: tmpHome, portableHooks: true });
     const srcHookDir = join(tmpHome, ".claude", "kage", "hooks");
     const settings = JSON.parse(readFileSync(join(tmpHome, ".claude", "settings.json"), "utf8")) as {
       hooks?: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout?: number }> }>>;
@@ -17274,6 +19616,19 @@ function upsertJsonSettings(path: string, patch: Record<string, unknown>): void 
       !Array.isArray(config.hooks)
     ) {
       config.hooks = { ...(config.hooks as Record<string, unknown>), ...(value as Record<string, unknown>) };
+    } else if (
+      key === "env" &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      config.env &&
+      typeof config.env === "object" &&
+      !Array.isArray(config.env)
+    ) {
+      // env merges the other way round from hooks: the USER's existing values always win, ours
+      // only fill gaps — a custom ANTHROPIC_BASE_URL (corporate gateway, another proxy) must
+      // never be clobbered by kage setup. Removing the key detaches; re-running setup re-adds it.
+      config.env = { ...(value as Record<string, unknown>), ...(config.env as Record<string, unknown>) };
     } else if (!(key in config)) {
       config[key] = value;
     }
@@ -17305,6 +19660,26 @@ function upsertTomlMcpBlock(text: string, block: string): string {
   return `${out.join("\n").trimEnd()}\n`;
 }
 
+// Merges a `{ [topKey]: { kage: serverEntry } }` MCP registration into an existing
+// JSON config file, preserving whatever else the tool already stores under topKey.
+// A malformed/non-object existing file is treated as empty rather than failing the
+// whole setup — this only ever ADDS the kage key, never destructively rewrites the
+// rest of the file's content when it does parse.
+function upsertNestedMcpJson(path: string, topKey: string, serverEntry: Record<string, unknown>): void {
+  ensureDir(dirname(path));
+  let config: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
+    } catch { /* unparseable existing file — start from an empty object rather than fail setup */ }
+  }
+  const existingBucket = config[topKey];
+  const bucket = existingBucket && typeof existingBucket === "object" && !Array.isArray(existingBucket) ? (existingBucket as Record<string, unknown>) : {};
+  config[topKey] = { ...bucket, kage: serverEntry };
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
 export function setupDoctor(projectDir: string, options: { homeDir?: string; serverPath?: string } = {}): AgentSetupDoctorItem[] {
   return SETUP_AGENTS.map((agent) => {
     const setup = setupAgent(agent, projectDir, { homeDir: options.homeDir, serverPath: options.serverPath });
@@ -17331,6 +19706,18 @@ function configMentionsKage(path: string | null): boolean {
 
 const CLAUDE_AMBIENT_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "PreCompact", "Stop", "SessionEnd"];
 
+// Bump whenever a hook template changes behavior. Installed scripts carry the
+// stamp; doctor/verify report a mismatch so fixes actually reach existing
+// installs instead of only new setups.
+// v4: the vNext stand-down guard verifies the runtime is LIVE (a stale status file no longer
+// silences the legacy harness) and only stands down for events the adapter actually handles.
+// A v3 script installed on disk carries the unsafe guard, so it must be reported outdated.
+// v5: the vNext adapter RECORDS every context attempt (delivered / skipped / failed_open) to the
+// delivery spool, and composes the capsule in audit mode too so the attempt can be measured. A v4
+// script on disk records nothing, so an audit run against it produces null attachment and null
+// latency forever — exactly the hole this version closes. It must be reported outdated.
+export const KAGE_HOOKS_VERSION = 5;
+
 function claudeHookEventConfigured(settings: Record<string, unknown>, event: string): boolean {
   const hooks = settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
     ? settings.hooks as Record<string, unknown>
@@ -17346,7 +19733,9 @@ function claudeHookEventConfigured(settings: Record<string, unknown>, event: str
 function claudeAmbientHookSummary(homeDir: string): AgentHookSummary {
   const settingsPath = join(homeDir, ".claude", "settings.json");
   const hookDir = join(homeDir, ".claude", "kage", "hooks");
-  const scriptPaths = [join(hookDir, "session-start.sh"), join(hookDir, "observe.sh"), join(hookDir, "kage-read-context.sh"), join(hookDir, "stop.sh")];
+  // The vNext adapter is verified like every other script: it is wired into six hook events, so if
+  // it is missing or stale, bash exits 127 on every prompt — and "ready" would be a lie.
+  const scriptPaths = [join(hookDir, "session-start.sh"), join(hookDir, "observe.sh"), join(hookDir, "kage-read-context.sh"), join(hookDir, "kage-edit-context.sh"), join(hookDir, "stop.sh"), join(hookDir, "kage-vnext-adapter.sh")];
   let settings: Record<string, unknown> = {};
   if (existsSync(settingsPath)) {
     const parsed = readJson<unknown>(settingsPath);
@@ -17354,15 +19743,26 @@ function claudeAmbientHookSummary(homeDir: string): AgentHookSummary {
   }
   const installed = CLAUDE_AMBIENT_HOOK_EVENTS.filter((event) => claudeHookEventConfigured(settings, event));
   const missing = CLAUDE_AMBIENT_HOOK_EVENTS.filter((event) => !installed.includes(event));
+  const outdated: string[] = [];
   for (const scriptPath of scriptPaths) {
-    if (!existsSync(scriptPath)) missing.push(basename(scriptPath));
+    if (!existsSync(scriptPath)) {
+      missing.push(basename(scriptPath));
+      continue;
+    }
+    // A present-but-stale script is worse than a missing one: it runs old
+    // behavior silently. Unstamped scripts predate versioning (v1).
+    const text = safeReadText(scriptPath) ?? "";
+    const stamp = text.match(/^# kage-hooks-v(\d+)$/m);
+    const version = stamp ? Number(stamp[1]) : 1;
+    if (version < KAGE_HOOKS_VERSION) outdated.push(basename(scriptPath));
   }
   return {
     required: [...CLAUDE_AMBIENT_HOOK_EVENTS],
     installed,
     missing: unique(missing),
+    outdated,
     script_paths: scriptPaths,
-    ready: missing.length === 0,
+    ready: missing.length === 0 && outdated.length === 0,
   };
 }
 
@@ -17388,7 +19788,7 @@ export function verifyAgentActivation(
   const mcpToolReachable = Boolean(options.mcpToolReachable);
   const hookSummary = agent === "claude-code"
     ? claudeAmbientHookSummary(options.homeDir ?? process.env.HOME ?? "~")
-    : { required: [], installed: [], missing: [], script_paths: [], ready: true };
+    : { required: [], installed: [], missing: [], outdated: [], script_paths: [], ready: true };
   const ambientHooksPresent = hookSummary.ready;
   const warnings: string[] = [];
   const nextSteps: string[] = [];
@@ -17436,6 +19836,7 @@ export function verifyAgentActivation(
       code_graph_works: codeGraphWorks,
       mcp_tool_reachable: mcpToolReachable,
       ambient_hooks_present: ambientHooksPresent,
+      ambient_hooks_supported: agent === "claude-code",
     },
     hook_summary: agent === "claude-code" ? hookSummary : undefined,
     config_path: setup.config_path,
@@ -17448,6 +19849,34 @@ export function verifyAgentActivation(
 
 function observationPath(projectDir: string, id: string): string {
   return join(observationsDir(projectDir), `${id}.json`);
+}
+
+// Observations are session-scoped raw signal: distill consumes them at session end and
+// the resume digest only reads the recent window. Without retention the directory grows
+// forever (measured: 12k files / 48MB in two months of dogfooding), so refresh prunes
+// records older than the retention window. 0 disables pruning.
+const OBSERVATION_RETENTION_DAYS = (() => {
+  const raw = Number(process.env.KAGE_OBSERVATION_RETENTION_DAYS ?? "30");
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30;
+})();
+
+export function pruneObservations(projectDir: string, maxAgeDays = OBSERVATION_RETENTION_DAYS): { pruned: number } {
+  if (maxAgeDays <= 0) return { pruned: 0 };
+  const dir = observationsDir(projectDir);
+  if (!existsSync(dir)) return { pruned: 0 };
+  const cutoff = Date.now() - maxAgeDays * 86_400_000;
+  let pruned = 0;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    try {
+      if (statSync(path).mtimeMs < cutoff) {
+        unlinkSync(path);
+        pruned += 1;
+      }
+    } catch { /* concurrent removal — skip */ }
+  }
+  return { pruned };
 }
 
 function observationHash(projectDir: string, event: ObservationEvent): string {
@@ -17518,7 +19947,7 @@ export function observe(projectDir: string, event: ObservationEvent): ObserveRes
   return { ok: true, stored: true, duplicate: false, record, path, errors: [] };
 }
 
-function loadObservations(projectDir: string, sessionId?: string): ObservationRecord[] {
+export function loadObservations(projectDir: string, sessionId?: string): ObservationRecord[] {
   ensureMemoryDirs(projectDir);
   return walkFiles(observationsDir(projectDir), (path) => path.endsWith(".json"))
     .map((path) => readJson<ObservationRecord>(path))
@@ -17537,9 +19966,8 @@ export const AUTO_DISTILL_SIGNAL_THRESHOLD = 0.4;
 // Auto-promote gate: a distilled draft jumps straight to trusted (approved, recallable)
 // memory — instead of waiting in the pending inbox — only when it is clearly-good AND
 // code-grounded AND not a duplicate. Everything else still goes to review. This is what
-// makes the capture flywheel actually spin; KAGE_AUTO_PROMOTE=0 disables it. Grounding keeps
-// the verification wedge intact: a promoted memory is still checked against the code, just
-// not gated on a human.
+// makes the capture flywheel actually spin; KAGE_AUTO_PROMOTE=0 disables it. Grounding
+// still keeps every promoted memory checked against the code — just not gated on a human.
 const AUTO_PROMOTE_ENABLED = process.env.KAGE_AUTO_PROMOTE !== "0";
 
 // Markers of hook/system plumbing payloads that sometimes leak into observation text
@@ -17788,6 +20216,15 @@ function reusablePromptObservation(event: ObservationRecord): string {
     "always",
     "never",
     "prefer",
+    // Debugging intent is the highest-signal prompt there is: the session that
+    // follows usually contains the root cause and the fix.
+    "fail",
+    "fix",
+    "error",
+    "broken",
+    "regression",
+    "doesn't work",
+    "not working",
     "avoid",
   ];
   if (!durableSignals.some((signal) => lower.includes(signal))) return "";
@@ -18137,6 +20574,97 @@ export function kageSessionLearningLedger(
   };
 }
 
+function kageContextFilePathHints(query: string): string[] {
+  const matches = query.match(/[A-Za-z0-9_./@-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|rb|php|cs|c|h|cc|cpp|hpp|swift|json|md)\b/g) ?? [];
+  return [...new Set(matches.map((match) => match.replace(/^\.\//, "")).filter((match) => !/^https?:\/\//.test(match)))];
+}
+
+function kageContextWantsDependencyPath(query: string): boolean {
+  return /\b(connect|connected|dependency|depend|depends|path|impact|flow|trace)\b/i.test(query);
+}
+
+function kageContextRiskBlock(result: ReturnType<typeof kageRisk>): string {
+  const targets = Object.values(result.targets);
+  if (!targets.length) return "";
+  const lines = targets.slice(0, 5).map((item) => {
+    const coChange = item.git.co_change_partners.length
+      ? ` Co-change: ${item.git.co_change_partners.slice(0, 3).map((partner) => `${partner.file_path} (${partner.count})`).join(", ")}.`
+      : "";
+    return `- ${item.risk_summary}${coChange}`;
+  });
+  return `\n## Risk Signals\n${lines.join("\n")}`;
+}
+
+// Workflow pseudo-tool: the description itself is the documentation, so agents
+// absorb the loop just by listing tools. The MCP tool and `kage workflow` CLI
+// command both just return this text — it performs no action.
+export const KAGE_WORKFLOW_TEXT =
+  "Kage memory workflow (this tool performs no action; it returns this loop). " +
+  "1) Start every task with kage_context (project_dir + the task as query): it validates memory, recalls relevant packets, and queries the code and knowledge graphs in one call. " +
+  "2) Do the work, preferring repo memory over public context. " +
+  "3) Capture reusable learnings with kage_learn — bug causes and verified fixes, conventions, decisions, gotchas, run/test/build commands. Wrap anything that must never leave the repo in <private>...</private> tags; private spans are stripped before sharing. " +
+  "4) After meaningful file changes, call kage_refresh so indexes, graphs, and stale-memory checks stay current. " +
+  "5) Before finishing a branch, call kage_pr_summarize then kage_pr_check. " +
+  "Recall receipts show estimated tokens saved versus rediscovery; report memory quality with kage_feedback (helpful/wrong/stale).";
+
+// The single session-start entry point: validate + recall + code graph + knowledge
+// graph in one call, replacing the old separate validate/recall/code_graph/graph
+// sequence (see kage_context tool description). Shared by the MCP tool and the
+// `kage context` CLI command so both surfaces produce byte-identical output.
+export function kageContext(
+  projectDir: string,
+  query: string,
+  options: { limit?: number; targets?: string[]; changedFiles?: string[]; sessionId?: string } = {}
+): { context_block: string; validation_ok: boolean } {
+  const limit = options.limit ?? 5;
+  const validation = validateProject(projectDir);
+  const validationText = validation.ok ? "Memory healthy." : `Warnings: ${validation.warnings.join("; ")}`;
+  // recall already includes the code graph + knowledge-graph facts (its "## Related Graph
+  // Facts" section). We deliberately do NOT query the graph a second time here: doing so
+  // emitted a near-duplicate dump of the same edges which, with no size cap, blew past
+  // the response limit.
+  const recallResult = recall(projectDir, query, limit, false);
+  const explicitTargets = [...(options.targets ?? []), ...kageContextFilePathHints(query)];
+  const changedFiles = options.changedFiles ?? [];
+  const riskResult = explicitTargets.length || changedFiles.length ? kageRisk(projectDir, explicitTargets, changedFiles) : null;
+  const pathHints = kageContextFilePathHints(query);
+  const dependencyResult = kageContextWantsDependencyPath(query) && pathHints.length >= 2
+    ? kageDependencyPath(projectDir, pathHints[0], pathHints[1])
+    : null;
+  const reconciliation = kageMemoryReconciliation(projectDir, { sessionId: options.sessionId, limit: 5 });
+  const teammateBrief = kageTeammateBrief(projectDir, {
+    query,
+    targets: explicitTargets,
+    changedFiles,
+    recallResult,
+    riskResult,
+    reconciliation,
+  });
+  const learningLedger = options.sessionId && options.sessionId.trim()
+    ? kageSessionLearningLedger(projectDir, { sessionId: options.sessionId, limit: 20 })
+    : null;
+  const body = [
+    recallResult.context_block,
+    teammateBrief.context_block,
+    learningLedger ? learningLedger.context_block : "",
+    riskResult ? kageContextRiskBlock(riskResult) : "",
+    dependencyResult ? `\n## Dependency Path\n${dependencyResult.summary}${dependencyResult.path.length ? `\nPath: ${dependencyResult.path.join(" -> ")}` : ""}` : "",
+    reconciliation.unresolved_count ? `\n## Memory Reconciliation\n${reconciliation.agent_instruction}` : "",
+    `\n_${validationText}_`,
+  ].filter(Boolean).join("");
+  const gains = valueSummary(projectDir).today;
+  const gainsLine = gains.stale_withheld > 0
+    ? `\n\n_${gains.stale_withheld} stale memor${gains.stale_withheld === 1 ? "y" : "ies"} withheld today (cited code changed; run \`kage doctor\` to review)._`
+    : "";
+  // Backstop: per-field clamping + graph dedup keep this compact in practice, but never
+  // let a pathological repo overflow the response again. ~24k chars ≈ 6k tokens.
+  const MAX_CONTEXT_CHARS = 24000;
+  const cappedBody = body.length > MAX_CONTEXT_CHARS
+    ? `${body.slice(0, MAX_CONTEXT_CHARS)}\n\n_…kage context truncated to keep the response within limits; narrow your query for more specific memory._`
+    : body;
+  return { context_block: `${cappedBody}${gainsLine}`, validation_ok: validation.ok };
+}
+
 // Mechanical packets (branch change memory, prior auto-distilled drafts) never count as the
 // agent having captured memory; only deliberate captures/learns/distills suppress the
 // Stop-hook auto-distill fallback.
@@ -18155,10 +20683,13 @@ export function distillSession(projectDir: string, sessionId: string, options: {
   const auto = Boolean(options.auto);
   const mode = auto ? ("auto" as const) : ("manual" as const);
   const observations = loadObservations(projectDir, sessionId);
-  if (auto && observations.length === 0) {
+  if (observations.length === 0) {
     return { ok: true, session_id: sessionId, observations: 0, candidates: [], errors: [], mode, skipped_reason: "no_observations", skipped_low_signal: 0 };
   }
-  if (auto && sessionAlreadyCaptured(projectDir, sessionId, observations)) {
+  // Dedupe guards both modes: SessionEnd + PreCompact + SubagentStop can all
+  // fire for one session, and re-distilling the same material wrote duplicate
+  // packets for years.
+  if (sessionAlreadyCaptured(projectDir, sessionId, observations)) {
     return { ok: true, session_id: sessionId, observations: observations.length, candidates: [], errors: [], mode, skipped_reason: "session_already_captured", skipped_low_signal: 0 };
   }
   const candidates: CaptureResult[] = [];
@@ -18177,7 +20708,9 @@ export function distillSession(projectDir: string, sessionId: string, options: {
       {
         kind: "observation_session",
         session_id: sessionId,
-        observation_ids: observationIds,
+        // A sample is enough provenance; full arrays made single packets 112KB
+        // and every teammate clones them.
+        observation_ids: observationIds.slice(0, 20),
         observation_count: observations.length,
       },
     ];
@@ -18216,12 +20749,12 @@ export function distillSession(projectDir: string, sessionId: string, options: {
     return result;
   };
   const autoTags = auto ? [AUTO_DISTILL_TAG] : [];
-  // Auto-distill quality gate: drafts may only be seeded by observations scoring at
+  // Distill quality gate: drafts may only be seeded by observations scoring at
   // least AUTO_DISTILL_SIGNAL_THRESHOLD. Events tagged low_signal at ingestion skip
-  // cheaply; untagged (older) records are scored here. Manual distill is not gated.
+  // cheaply; untagged (older) records are scored here. Both modes are gated —
+  // ungated manual distill is how 116KB dumps got stamped approved+verified.
   let skippedLowSignal = 0;
   const signalGate = (events: ObservationRecord[]): ObservationRecord[] => {
-    if (!auto) return events;
     return events.filter((event) => {
       const lowSignal = event.low_signal === true
         || (event.low_signal === undefined && observationSignalScore(event) < AUTO_DISTILL_SIGNAL_THRESHOLD);
@@ -18232,6 +20765,29 @@ export function distillSession(projectDir: string, sessionId: string, options: {
   const commandEvents = signalGate(observations.filter((event) => event.type === "command_result" && event.command));
   const fileEvents = signalGate(observations.filter((event) => event.type === "file_change" && event.path));
   const promptEvents = signalGate(observations.filter((event) => event.type === "user_prompt" && (event.text || event.summary)));
+
+  // A fail→pass pair on the same command is the strongest evidence a session
+  // produced a real fix. Stamp it on the drafts: it is true, it is checkable
+  // from the observations, and it lets grounded fixes cross the promote bar.
+  // Scanned pre-gate: the failing run often carries error text the gate keeps,
+  // but the passing run can be terse.
+  const failThenPassed: string[] = (() => {
+    const failedAt = new Map<string, number>();
+    const proven: string[] = [];
+    observations.forEach((event, index) => {
+      if (event.type !== "command_result" || !event.command) return;
+      const cmd = normalizeCommandText(event.command);
+      const failed = typeof event.exit_code === "number"
+        ? event.exit_code !== 0
+        : /\bfail(ed|ure|ing)?\b|\berror\b/i.test(`${event.summary ?? ""} ${event.text ?? ""}`);
+      if (failed) failedAt.set(cmd, index);
+      else if (failedAt.has(cmd) && (failedAt.get(cmd) as number) < index && !proven.includes(cmd)) proven.push(cmd);
+    });
+    return proven;
+  })();
+  const verificationLine = failThenPassed.length
+    ? `\n\nVerified: \`${failThenPassed[0]}\` failed then passed after the change — reproduced in session ${sessionId}.`
+    : "";
 
   const meaningfulCommandEvents = commandEvents
     .map((event) => ({ event, reusable: reusableCommandObservation(event, knownRepoCommands(projectDir)) }))
@@ -18244,11 +20800,13 @@ export function distillSession(projectDir: string, sessionId: string, options: {
       projectDir,
       title: `Runbook: ${lead}`,
       summary: `Observed commands: ${commands.slice(0, 3).join(", ")}`,
-      body: `Reusable command observation distilled from session ${sessionId}:\n\n${meaningfulCommandEvents.map((item) => `- ${item.reusable.command}: ${item.reusable.learning}`).join("\n")}\n\nReview before approving as a durable runbook.`,
+      body: `Reusable command observation distilled from session ${sessionId}:\n\n${meaningfulCommandEvents.map((item) => `- ${item.reusable.command}: ${item.reusable.learning}`).join("\n")}${verificationLine}\n\nReview before approving as a durable runbook.`,
       type: "runbook",
       tags: ["observed-session", "commands", "runbook", ...autoTags],
       paths: unique(meaningfulCommandEvents.map((item) => item.event.path).filter(Boolean) as string[]),
-      pendingReview: auto,
+      // Distilled drafts are born pending in every mode; only the grounded
+      // high-signal auto-promotion path may lift them to approved.
+      pendingReview: true,
     })));
   }
 
@@ -18263,23 +20821,25 @@ export function distillSession(projectDir: string, sessionId: string, options: {
       projectDir,
       title: `Workflow: ${lead}`,
       summary: lead,
-      body: `Reusable file observation distilled from session ${sessionId}:\n\n${meaningfulFileEvents.map((item) => `- ${item.event.path}: ${item.learning}`).join("\n")}\n\nReview before approving as durable repo memory.`,
+      body: `Reusable file observation distilled from session ${sessionId}:\n\n${meaningfulFileEvents.map((item) => `- ${item.event.path}: ${item.learning}`).join("\n")}${verificationLine}\n\nReview before approving as durable repo memory.`,
       type: "workflow",
       tags: ["observed-session", "workflow", ...autoTags],
       paths,
-      pendingReview: auto,
+      pendingReview: true,
     })));
   }
 
   if (promptEvents.length) {
-    const text = promptEvents.map(reusablePromptObservation).filter(Boolean).join("\n").trim();
+    // Prompt-derived text is the least grounded input: clamp per prompt and
+    // joined, and always land it in the pending inbox.
+    const text = promptEvents.map((event) => clampInline(reusablePromptObservation(event), 500)).filter(Boolean).join("\n").trim().slice(0, 4000);
     if (text) candidates.push(annotate(learn({
       projectDir,
       title: titleFromLearning(text),
-      learning: text,
+      learning: `${text}${verificationLine}`,
       evidence: `Observation session: ${sessionId}`,
       tags: ["observed-session", "intent", ...autoTags],
-      pendingReview: auto,
+      pendingReview: true,
     })));
   }
 
@@ -18414,6 +20974,24 @@ export function kageResume(projectDir: string): ResumeReport {
   };
 }
 
+// The subset of `paths` git tracks (committed or staged). One `git ls-files` call, set
+// membership after — never a per-file subprocess. On any git failure, returns the input
+// unchanged: degrading to the old behavior beats dropping grounding entirely.
+function gitTrackedSubset(projectDir: string, paths: string[]): string[] {
+  try {
+    const tracked = new Set(
+      execFileSync("git", ["ls-files", "-z"], { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .split("\0")
+        .filter(Boolean),
+    );
+    // An all-untracked change set grounds to nothing — an empty list is the honest answer,
+    // and the packet then routes as ungrounded rather than citing phantom paths.
+    return paths.filter((path) => tracked.has(path));
+  } catch {
+    return paths;
+  }
+}
+
 function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary): { packet: MemoryPacket; path: string } {
   const branch = summary.branch ?? "detached";
   const head = summary.head ?? "unknown";
@@ -18441,7 +21019,20 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
   const verifyCommands = npmScriptCommands(projectDir)
     .filter((command) => /(test|check|lint|build|type|verify)/i.test(command))
     .slice(0, 8);
-  const changedList = summary.changed_files.slice(0, 40).map((file) => `- ${file}`).join("\n");
+  // Change-memory carries the substance of a change, not Kage's own
+  // bookkeeping: memory files, git plumbing, and Kage-written policy files are
+  // excluded — git already stores those diffs, and lists of packet filenames
+  // were the whole body of the worst change-memory packets.
+  const kagePolicyFiles = new Set(
+    ["CLAUDE.md", "AGENTS.md"].filter((name) => (safeReadText(join(projectDir, name)) ?? "").includes("KAGE_MEMORY_POLICY"))
+  );
+  const meaningfulChanged = summary.changed_files.filter((file) =>
+    !file.startsWith(".agent_memory/")
+    && file !== ".gitattributes"
+    && !kagePolicyFiles.has(file));
+  const listedChanged = meaningfulChanged.length ? meaningfulChanged : summary.changed_files;
+  const changedList = listedChanged.slice(0, 25).map((file) => `- ${file}`).join("\n")
+    + (listedChanged.length > 25 ? `\n- … ${listedChanged.length - 25} more` : "");
   const verifyList = verifyCommands.length
     ? verifyCommands.map((command) => `- ${command}`).join("\n")
     : "- Add the exact test, build, or manual verification command when you refine this memory.";
@@ -18457,7 +21048,7 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     "```text",
     // Clamp the diff stat: a huge diff would otherwise produce a dump-sized change-memory
     // body. This path builds the packet directly (not via capture()), so bound it here.
-    clampBlock(summary.diff_stat, 4000),
+    clampBlock(summary.diff_stat, 1500),
     "```",
     "",
     "How to verify:",
@@ -18476,7 +21067,7 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     schema_version: PACKET_SCHEMA_VERSION,
     id: stableId,
     title,
-    summary: `Repo-local context for ${summary.changed_files.length} changed repo path${summary.changed_files.length === 1 ? "" : "s"} on ${branch}.`,
+    summary: `Repo-local context for ${listedChanged.length} changed repo path${listedChanged.length === 1 ? "" : "s"} on ${branch}.`,
     body,
     type: "workflow",
     scope: "repo",
@@ -18485,7 +21076,11 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     status: "approved",
     confidence: 0.62,
     tags: unique(["change-memory", "diff-proposal", "repo-local", branch ? `branch:${slugify(branch)}` : "branch:detached"]),
-    paths: summary.changed_files.slice(0, 40),
+    // Grounding paths must exist in a CLEAN CHECKOUT, or the packet goes hard-stale the
+    // moment CI validates it: `git status -uall` includes untracked local tooling
+    // (scratch dirs, editor state) that only this working tree has. The body may still
+    // mention them as context; the packet's verifiable grounding is tracked files only.
+    paths: gitTrackedSubset(projectDir, listedChanged).slice(0, 40),
     stack: inferStack(projectDir),
     source_refs: [
       {
@@ -18493,12 +21088,12 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
         branch,
         head,
         merge_base: summary.merge_base,
-        changed_files: summary.changed_files,
+        changed_files: summary.changed_files.slice(0, 100),
         summary_path: join(reviewDir(projectDir), `branch-summary-${slugify(branch)}.json`),
       },
     ],
     context: {
-      fact: `Current branch ${branch} changes ${summary.changed_files.length} repo path${summary.changed_files.length === 1 ? "" : "s"}.`,
+      fact: `Current branch ${branch} changes ${listedChanged.length} repo path${listedChanged.length === 1 ? "" : "s"}.`,
       why: "Branch change memory gives future agents durable context from the git diff when they continue, review, or verify this work.",
       trigger: "Recall when asking what changed on this branch, preparing a PR review, or resuming this work.",
       action: "Use the changed file list and diff summary as orientation, then inspect the actual diff and source files before making further edits.",
@@ -18862,6 +21457,25 @@ export function prCheck(projectDir: string): PrCheckResult {
   if (!memoryPacketChanges.length && overlay.changed_files.some((path) => !path.startsWith(".agent_memory/"))) {
     warnings.push("No repo memory packet changed for this branch. If durable knowledge was learned, run kage propose --from-diff or kage learn.");
   }
+  // The Minimal Change Guard participates only when vNext policy is enabled (default: disabled). It is
+  // advisory by default — findings become warnings, never errors. Only `enforced` mode with selected
+  // deterministic rules can fail the gate; a model-opinion finding can never reach the blocking set.
+  const minimalChange = minimalChangeReport(projectDir);
+  if (minimalChange) {
+    if (!minimalChange.ok) {
+      errors.push(
+        `Minimal Change Guard (enforced): ${minimalChange.blocking.length} blocking finding(s) — ${minimalChange.blocking.map((finding) => finding.kind).join(", ")}.`,
+      );
+      requiredActions.push(
+        "Resolve or justify the blocking minimal-change findings (kage minimal-change check), then re-run.",
+      );
+    } else if (minimalChange.findings.length) {
+      warnings.push(
+        `Minimal Change Guard (${minimalChange.mode}): ${minimalChange.findings.length} advisory finding(s) — review with kage minimal-change check (not blocking).`,
+      );
+    }
+  }
+
   if (!requiredActions.length) requiredActions.push("PR memory and graph checks passed.");
 
   return {
@@ -18879,6 +21493,7 @@ export function prCheck(projectDir: string): PrCheckResult {
     errors,
     warnings,
     required_actions: requiredActions,
+    ...(minimalChange ? { minimal_change: minimalChange } : {}),
   };
 }
 
@@ -19170,10 +21785,14 @@ function recallFromPackets(query: string, packets: MemoryPacket[], limit: number
       return { packet, score, why_matched: why };
     })
     .filter((result) => result.score > 0)
-    .sort((a, b) => b.score - a.score || b.packet.updated_at.localeCompare(a.packet.updated_at))
-    .slice(0, limit);
+    .sort((a, b) => b.score - a.score || b.packet.updated_at.localeCompare(a.packet.updated_at));
+  const injection = decideRecallInjection(
+    scored.map((entry) => entry.score),
+    scored.length ? countDistinctTermMatches(terms, scored[0].packet) : 0,
+  );
+  const limited = scored.slice(0, limit);
 
-  const context = scored.map((result, index) => {
+  const context = limited.map((result, index) => {
     const packet = result.packet;
     return [
       `### ${label} ${index + 1}: ${packet.title}`,
@@ -19192,7 +21811,8 @@ function recallFromPackets(query: string, packets: MemoryPacket[], limit: number
   return {
     query,
     context_block: context.length ? `# Kage ${label} Recall\n\n${context.join("\n\n---\n\n")}` : `No ${label.toLowerCase()} memory found for "${query}".`,
-    results: scored,
+    injection,
+    results: limited,
   };
 }
 
@@ -19501,29 +22121,81 @@ export interface MergePacketResult {
   ok: boolean;
   winner: "ours" | "theirs" | null;
   detail: string;
+  preserved_path?: string;
+  /** Fields both sides changed away from base differently — the only places a side actually lost. */
+  conflicted_fields?: string[];
 }
 
-export function mergePacketFiles(oursPath: string, basePath: string, theirsPath: string): MergePacketResult {
+// A field-level three-way merge over two packet versions and their common ancestor.
+//
+// Whole-file newest-wins discarded a teammate's work whenever two people touched the same packet,
+// even when they touched DIFFERENT fields — one refining the summary while the other explained the
+// cause is not a conflict, but the old driver silently kept only the newer file. Per field:
+//   - only one side moved       -> take that side (no conflict; both edits survive)
+//   - both moved, same value    -> take it (agreement is not a conflict)
+//   - both moved, different     -> a real conflict; newest updated_at wins THAT field and the field
+//                                  is reported so the loss is visible rather than silent
+function mergePacketObjects(
+  base: Partial<MemoryPacket>,
+  ours: Partial<MemoryPacket>,
+  theirs: Partial<MemoryPacket>,
+  newest: "ours" | "theirs",
+): { merged: Record<string, unknown>; conflicted: string[] } {
+  const merged: Record<string, unknown> = {};
+  const conflicted: string[] = [];
+  const asRecord = (value: Partial<MemoryPacket>): Record<string, unknown> => value as Record<string, unknown>;
+  const [baseRec, oursRec, theirsRec] = [asRecord(base), asRecord(ours), asRecord(theirs)];
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  for (const key of unique([...Object.keys(oursRec), ...Object.keys(theirsRec), ...Object.keys(baseRec)])) {
+    const [b, o, t] = [baseRec[key], oursRec[key], theirsRec[key]];
+    const oursMoved = !same(o, b);
+    const theirsMoved = !same(t, b);
+    if (oursMoved && theirsMoved && !same(o, t)) {
+      conflicted.push(key);
+      merged[key] = newest === "ours" ? o : t;
+    } else if (oursMoved) {
+      merged[key] = o;
+    } else if (theirsMoved) {
+      merged[key] = t;
+    } else {
+      merged[key] = same(o, b) ? (key in oursRec ? o : t) : o;
+    }
+    if (merged[key] === undefined) delete merged[key];
+  }
+  // The merge itself is an update, and `updated_at` drives recency everywhere downstream, so it must
+  // be the newer of the two rather than whichever side happened to win the last field.
+  const recency = [packetRecency(ours), packetRecency(theirs)].sort();
+  if (recency[1]) merged.updated_at = recency[1];
+  return { merged, conflicted };
+}
+
+export function mergePacketFiles(oursPath: string, basePath: string, theirsPath: string, projectDir?: string): MergePacketResult {
   void basePath; // Reserved for a future field-level three-way merge.
   const readSide = (path: string): { raw: string; packet: Partial<MemoryPacket> } | null => {
     const raw = safeReadText(path);
     if (raw === null) return null;
-    if (path.endsWith(".md")) {
-      const packet = okfConceptToPacket(raw);
-      return packet ? { raw, packet } : null;
-    }
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return { raw, packet: parsed as Partial<MemoryPacket> };
+    // Sniff content, never the extension: git merge temp files may keep or
+    // drop the original extension depending on the flow, and .md packet files
+    // have held both raw JSON and OKF frontmatter. Routing raw-JSON .md files
+    // to the OKF parser made every sync-bot race a manual conflict.
+    if (raw.trimStart().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return { raw, packet: parsed as Partial<MemoryPacket> };
+        }
+      } catch {
+        // fall through to the other parsers
       }
-    } catch {
-      // A side that carries committed conflict markers (the exact failure mode
-      // this driver exists to end) can often be recovered with repair's
-      // conflict-splitting logic before giving up on it.
-      const recovered = resolveConflictedPacket(raw);
-      if (recovered) return { raw: `${JSON.stringify(recovered, null, 2)}\n`, packet: recovered };
     }
+    const okf = okfConceptToPacket(raw);
+    if (okf) return { raw, packet: okf };
+    // A side that carries committed conflict markers (the exact failure mode
+    // this driver exists to end) can often be recovered with repair's
+    // conflict-splitting logic before giving up on it.
+    const recovered = resolveConflictedPacket(raw);
+    if (recovered) return { raw: `${JSON.stringify(recovered, null, 2)}\n`, packet: recovered };
     return null;
   };
   const ours = readSide(oursPath);
@@ -19538,16 +22210,55 @@ export function mergePacketFiles(oursPath: string, basePath: string, theirsPath:
     winner = ours ? "ours" : "theirs";
   }
   const winning = winner === "ours" ? ours! : theirs!;
+  const losing = winner === "ours" ? theirs : ours;
+  // With a readable base and BOTH sides present, merge field by field so non-conflicting edits from
+  // each teammate survive. Anything less (a missing side, an unreadable base) falls back to the
+  // whole-file winner, which is the old behaviour and still correct for a genuine race.
+  const baseSide = readSide(basePath);
+  let conflictedFields: string[] | undefined;
+  let mergedRaw: string | null = null;
+  if (ours && theirs && baseSide) {
+    const { merged, conflicted } = mergePacketObjects(baseSide.packet, ours.packet, theirs.packet, winner);
+    conflictedFields = conflicted;
+    mergedRaw = `${JSON.stringify(merged, null, 2)}\n`;
+  }
   try {
-    writeFileSync(oursPath, winning.raw, "utf8");
+    writeFileSync(oursPath, mergedRaw ?? winning.raw, "utf8");
   } catch (error) {
     return { ok: false, winner: null, detail: `kage merge-packet: failed to write merge result: ${error instanceof Error ? error.message : String(error)}` };
   }
   const recency = packetRecency(winning.packet);
+  // This driver is last-write-wins by self-reported updated_at, NOT a field-level
+  // three-way merge — so when both sides genuinely diverge (not just a race where
+  // one side is a stale copy of the other), the losing side's edits would otherwise
+  // vanish with no trace. Preserve it as a review artifact instead of discarding it;
+  // best-effort only, and never blocks the merge if writing it fails.
+  let preservedPath: string | undefined;
+  // With a real three-way merge, only a genuine field conflict actually loses anything — so preserve
+  // the losing side when there was one, or when we could not merge and fell back to whole-file.
+  const lostSomething = mergedRaw === null || (conflictedFields?.length ?? 0) > 0;
+  if (lostSomething && losing && losing.raw !== winning.raw && projectDir) {
+    try {
+      const dir = conflictsDir(projectDir);
+      mkdirSync(dir, { recursive: true });
+      const id = String(winning.packet.id ?? basename(oursPath)).replace(/[^a-z0-9._-]/gi, "-");
+      const stamp = nowIso().replace(/[^0-9]/g, "");
+      const file = join(dir, `${id}-lost-${stamp}.md`);
+      writeFileSync(file, losing.raw, "utf8");
+      preservedPath = file;
+    } catch { /* best-effort preservation; a failure here must not fail the merge */ }
+  }
+  const detail = mergedRaw === null
+    ? `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`
+    : conflictedFields && conflictedFields.length
+      ? `kage merge-packet: merged both sides; ${conflictedFields.length} field(s) conflicted (${conflictedFields.join(", ")}) and took the ${winner} side.`
+      : "kage merge-packet: merged both sides field by field; no field conflicted, so no edit was lost.";
   return {
     ok: true,
     winner,
-    detail: `kage merge-packet: kept ${winner} side (newest updated_at${recency ? ` ${recency}` : ""}).`,
+    detail: detail + (preservedPath ? ` Losing side preserved for review: ${preservedPath}` : ""),
+    ...(preservedPath ? { preserved_path: preservedPath } : {}),
+    ...(conflictedFields ? { conflicted_fields: conflictedFields } : {}),
   };
 }
 
@@ -19943,6 +22654,7 @@ export interface ReverifyMemoryResult {
   packet_id: string;
   refreshed_paths: string[];
   missing_paths: string[];
+  changed_paths: string[];
   was_stale: boolean;
   errors: string[];
 }
@@ -20116,7 +22828,73 @@ export function generateSkills(
 // supersede churn when code changed but the memory's claim did not. Refuses
 // when ALL cited evidence is gone — that memory needs supersede or stale, not
 // a rubber stamp.
-export function reverifyMemory(projectDir: string, packetId: string): ReverifyMemoryResult {
+export interface ReanchorResult {
+  ok: boolean;
+  project_dir: string;
+  refreshed: string[];
+  skipped_changed: string[];
+  errors: string[];
+}
+
+// Sharpen grounding from whole-file to symbol level for packets that predate an anchor
+// improvement — WITHOUT re-asserting anything. The safety rule is exact: only when every
+// cited file is byte-identical to the stored fingerprint, because then the symbols
+// computed now are provably the symbols that existed at capture. If a file has already
+// moved, symbols computed from today's source would describe code the author never saw,
+// and stamping that as grounding would launder an unchecked claim — so those are
+// refused and left to reverifyMemory, which demands evidence.
+//
+// `last_verified_at` is deliberately untouched: nothing was verified, so the TTL clock
+// must not restart. Only `path_fingerprints` and `updated_at` move.
+export function reanchorUnchangedPackets(projectDir: string): ReanchorResult {
+  ensureMemoryDirs(projectDir);
+  const result: ReanchorResult = { ok: true, project_dir: projectDir, refreshed: [], skipped_changed: [], errors: [] };
+  for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
+    const packet = entry.packet;
+    const stored = packetStoredPathFingerprints(packet);
+    if (!stored.length) continue;
+    const anchorable = stored.filter((print) => pathSupportsSymbolAnchors(print.path));
+    if (!anchorable.some((print) => !(print.symbols && print.symbols.length))) continue;
+
+    const storedShas = new Map(stored.map((print) => [print.path, print.sha256]));
+    const presentPaths = stored.map((print) => print.path).filter((path) => existsSync(join(projectDir, path)));
+    if (!presentPaths.length) continue;
+
+    const next = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+    const nextByPath = new Map(next.map((print) => [print.path, print]));
+    // Per PATH, not per packet: a sibling file moving says nothing about whether THIS
+    // file's symbols are still the ones the author anchored to. Unchanged paths adopt
+    // the sharper fingerprint; changed paths keep the stored one so they stay stale.
+    let changedHere = false;
+    const merged = stored.map((print) => {
+      const fresh = nextByPath.get(print.path);
+      if (!fresh) return print;
+      if (fresh.sha256 !== print.sha256) {
+        changedHere = true;
+        return print;
+      }
+      return fresh;
+    });
+    if (changedHere) result.skipped_changed.push(packet.id);
+
+    const priorAnchorCount = stored.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    const nextAnchorCount = merged.reduce((total, print) => total + (print.symbols?.length ?? 0), 0);
+    if (nextAnchorCount <= priorAnchorCount) continue;
+
+    const freshness = { ...(packet.freshness ?? {}) } as Record<string, unknown>;
+    freshness.path_fingerprints = merged;
+    try {
+      writeJson(entry.path, { ...packet, freshness, updated_at: nowIso() });
+      result.refreshed.push(packet.id);
+    } catch (error) {
+      result.ok = false;
+      result.errors.push(`${packet.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return result;
+}
+
+export function reverifyMemory(projectDir: string, packetId: string, options: { evidence?: string; verifiedBy?: string } = {}): ReverifyMemoryResult {
   ensureMemoryDirs(projectDir);
   const result: ReverifyMemoryResult = {
     ok: false,
@@ -20124,6 +22902,7 @@ export function reverifyMemory(projectDir: string, packetId: string): ReverifyMe
     packet_id: packetId,
     refreshed_paths: [],
     missing_paths: [],
+    changed_paths: [],
     was_stale: false,
     errors: [],
   };
@@ -20150,13 +22929,53 @@ export function reverifyMemory(projectDir: string, packetId: string): ReverifyMe
   const presentPaths = citedPaths.filter((path) => !result.missing_paths.includes(path));
   const now = nowIso();
   const freshness = { ...(packet.freshness ?? {}) } as Record<string, unknown>;
-  freshness.path_fingerprints = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+  const nextPrints = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+  // Evidence gate: when cited code changed since the stored fingerprints, a
+  // bare re-stamp would launder a possibly-false claim back to "verified".
+  // Byte-identical files may refresh freely; changed files demand evidence.
+  const storedShas = new Map(packetStoredPathFingerprints(packet).map((print) => [print.path, print.sha256]));
+  const changedPaths = nextPrints
+    .filter((print) => storedShas.has(print.path) && storedShas.get(print.path) !== print.sha256)
+    .map((print) => print.path);
+  result.changed_paths = changedPaths;
+  const evidence = (options.evidence ?? "").trim();
+  const verifiedBy = (options.verifiedBy ?? "").trim();
+  if (changedPaths.length && !evidence && !verifiedBy) {
+    result.errors.push(
+      `Cited code changed since the last verification (${changedPaths.join(", ")}). `
+      + "Re-stamping without evidence would mark an unchecked claim verified: rerun with "
+      + "--evidence \"<what you checked>\" or --verified-by \"<command/test that proved it>\", "
+      + "or supersede the packet if the claim no longer holds.",
+    );
+    return result;
+  }
+  freshness.path_fingerprints = nextPrints;
   freshness.last_verified_at = now;
+  // Only an evidence-backed recheck upgrades verification; a clean fingerprint
+  // refresh keeps whatever verification the packet already had.
+  if (evidence || verifiedBy) freshness.verification = "evidence_reverification";
   const { stale: _stale, stale_reasons: _staleReasons, suggested_action: _suggestedAction, ...nextQuality } = quality;
+  const sourceRefs = changedPaths.length
+    ? [
+        ...(packet.source_refs ?? []),
+        {
+          kind: "reverification",
+          at: now,
+          ...(verifiedBy ? { verified_by: verifiedBy } : {}),
+          ...(evidence ? { evidence } : {}),
+          changed_paths: changedPaths.map((path) => ({
+            path,
+            prior_sha256: storedShas.get(path),
+            sha256: nextPrints.find((print) => print.path === path)?.sha256,
+          })),
+        } as unknown as MemoryPacket["source_refs"][number],
+      ]
+    : packet.source_refs;
   writeJson(entry.path, {
     ...packet,
     paths: presentPaths.length ? presentPaths : packet.paths,
     freshness,
+    source_refs: sourceRefs,
     quality: { ...nextQuality, reverified_at: now },
     updated_at: now,
   });
@@ -20269,6 +23088,338 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     errors: [],
     warnings,
   };
+}
+
+// ---- SDLC work items (Phase 1) ----
+//
+// A work item IS a `type: "proposal"` memory packet carrying a `stage`. `status`
+// (trust: is this recall-worthy) and `stage` (SDLC position) are deliberately
+// independent axes — a `stage: "done"` proposal can still later become
+// `status: "superseded"` by a better one. Conflating them repeats the exact
+// fragility MemoryStatus already has (42+ scattered `.status = "..."` writers,
+// no single source of truth) — transitionWorkStage() below is the ONLY function
+// allowed to write `.stage`/`.claimed_by`/`.claimed_at`, on purpose.
+
+const WORK_STAGE_TRANSITIONS: Record<WorkStage, WorkStage[]> = {
+  proposed: ["claimed"],
+  claimed: ["in_review", "proposed"],
+  in_review: ["done", "claimed"],
+  done: [],
+};
+
+// Exclusive lock file per packet id, held for the duration of a stage
+// read-check-write. Guards against two callers (e.g. two agent pollers both
+// trying to claim the same proposal) racing on a check-then-write — a likely
+// first bug once multiple agent runners are actually polling for claimable
+// work, not a hypothetical edge case. Zero new dependencies: a plain exclusive
+// file create (the `wx` flag fails if the file already exists), consistent
+// with the rest of this package.
+function withWorkItemLock<T>(projectDir: string, packetId: string, fn: () => T): T {
+  const lockDir = join(memoryRoot(projectDir), "locks");
+  ensureDir(lockDir);
+  const lockPath = join(lockDir, `work-${createHash("sha256").update(packetId).digest("hex").slice(0, 16)}.lock`);
+  let fd: number;
+  try {
+    fd = openSync(lockPath, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`Another process is already claiming or transitioning ${packetId} — try again in a moment.`);
+    }
+    throw error;
+  }
+  try {
+    return fn();
+  } finally {
+    closeSync(fd);
+    try { unlinkSync(lockPath); } catch { /* already gone */ }
+  }
+}
+
+export interface WorkStageTransitionResult {
+  ok: boolean;
+  project_dir: string;
+  packet_id: string;
+  from_stage: WorkStage | null;
+  to_stage: WorkStage;
+  actor: string;
+  errors: string[];
+}
+
+// The only function allowed to write MemoryPacket.stage/claimed_by/claimed_at.
+// Validates the transition table and blocks the actor who claimed a work item
+// from advancing it to "done" themselves — the terminal, human-approved gate.
+// This local check is a plain string comparison (spoofable by anything that can
+// pass --actor); the cryptographically stronger gate is cloud-server.ts's
+// approve/reject (bearer-token-hash based, see kageCloudApprove-adjacent code).
+// Present the two as different strength levels to callers, never as equivalent.
+export function transitionWorkStage(
+  projectDir: string,
+  packetId: string,
+  toStage: WorkStage,
+  options: { actor: string; evidence?: string },
+): WorkStageTransitionResult {
+  return withWorkItemLock(projectDir, packetId, () => {
+    ensureMemoryDirs(projectDir);
+    const result: WorkStageTransitionResult = {
+      ok: false,
+      project_dir: projectDir,
+      packet_id: packetId,
+      from_stage: null,
+      to_stage: toStage,
+      actor: options.actor,
+      errors: [],
+    };
+    const entries = loadPacketEntriesFromDir(packetsDir(projectDir));
+    const entry = entries.find((item) => item.packet.id === packetId);
+    if (!entry) {
+      result.errors.push(`Packet not found or not yet approved: ${packetId}`);
+      return result;
+    }
+    const packet = entry.packet;
+    if (packet.type !== "proposal") {
+      result.errors.push(`Only proposal packets carry a work stage (this packet is type: ${packet.type}).`);
+      return result;
+    }
+    const fromStage = packet.stage ?? "proposed";
+    result.from_stage = fromStage;
+    if (toStage === "claimed" && fromStage === "claimed" && packet.claimed_by) {
+      result.errors.push(`Already claimed by ${packet.claimed_by}.`);
+      return result;
+    }
+    if (fromStage === toStage) {
+      result.errors.push(`Already at stage ${toStage}.`);
+      return result;
+    }
+    const allowed = WORK_STAGE_TRANSITIONS[fromStage] ?? [];
+    if (!allowed.includes(toStage)) {
+      result.errors.push(`Cannot transition ${fromStage} -> ${toStage}. Allowed from ${fromStage}: ${allowed.join(", ") || "(terminal)"}`);
+      return result;
+    }
+    if (toStage === "done" && options.actor === packet.claimed_by) {
+      result.errors.push(
+        "self_transition_blocked: the actor who claimed this work item cannot advance it to done themselves " +
+          "— have someone else review it (kage gate review, or the cloud approve gate).",
+      );
+      return result;
+    }
+    const at = nowIso();
+    packet.stage = toStage;
+    packet.updated_at = at;
+    // Claiming (only from "proposed") sets who owns it; sending in_review back to
+    // claimed for changes preserves the existing claimant instead of reassigning
+    // it to whoever sent it back. Releasing back to "proposed" clears the claim.
+    if (toStage === "claimed" && fromStage === "proposed") {
+      packet.claimed_by = options.actor;
+      packet.claimed_at = at;
+    } else if (toStage === "proposed") {
+      packet.claimed_by = null;
+      packet.claimed_at = null;
+    }
+    writeJson(entry.path, packet);
+    recordMemoryAudit(projectDir, toStage === "claimed" ? "claim" : "transition", [packet], {
+      from_stage: fromStage,
+      to_stage: toStage,
+      actor: options.actor,
+      evidence: options.evidence ?? "",
+    });
+    buildIndexes(projectDir);
+    result.ok = true;
+    return result;
+  });
+}
+
+export interface ClaimWorkItemResult {
+  ok: boolean;
+  project_dir: string;
+  packet_id: string;
+  claimed_by: string;
+  errors: string[];
+}
+
+export function claimWorkItem(projectDir: string, packetId: string, actor: string): ClaimWorkItemResult {
+  const transition = transitionWorkStage(projectDir, packetId, "claimed", { actor, evidence: "claimed" });
+  return {
+    ok: transition.ok,
+    project_dir: projectDir,
+    packet_id: packetId,
+    claimed_by: actor,
+    errors: transition.errors,
+  };
+}
+
+export interface LinkImplementsResult {
+  ok: boolean;
+  project_dir: string;
+  output_packet_id: string;
+  proposal_packet_id: string;
+  auto_advanced: boolean;
+  errors: string[];
+}
+
+// Links an output packet (whatever type already fits — decision, bug_fix,
+// runbook...) back to the proposal it implements, via the same bidirectional
+// upsertPacketEdge() pattern supersedeMemory() already uses for
+// superseded_by/supersedes. No new packet type needed for the output — that's
+// the biggest reuse win in this design. Auto-advances the proposal claimed ->
+// in_review, since a linked output is the natural "ready for review" signal.
+export function linkImplements(
+  projectDir: string,
+  outputPacketId: string,
+  proposalPacketId: string,
+  evidence: string,
+): LinkImplementsResult {
+  ensureMemoryDirs(projectDir);
+  const result: LinkImplementsResult = {
+    ok: false,
+    project_dir: projectDir,
+    output_packet_id: outputPacketId,
+    proposal_packet_id: proposalPacketId,
+    auto_advanced: false,
+    errors: [],
+  };
+  if (outputPacketId === proposalPacketId) {
+    result.errors.push("A packet cannot implement itself.");
+    return result;
+  }
+  const entries = loadPacketEntriesFromDir(packetsDir(projectDir));
+  const outputEntry = entries.find((item) => item.packet.id === outputPacketId);
+  const proposalEntry = entries.find((item) => item.packet.id === proposalPacketId);
+  if (!outputEntry) result.errors.push(`Output packet not found: ${outputPacketId}`);
+  if (!proposalEntry) result.errors.push(`Proposal packet not found: ${proposalPacketId}`);
+  if (proposalEntry && proposalEntry.packet.type !== "proposal") {
+    result.errors.push(`${proposalPacketId} is type ${proposalEntry.packet.type}, not proposal — implements links only make sense against a proposal.`);
+  }
+  if (result.errors.length) return result;
+  const outputPacket = outputEntry!.packet;
+  const proposalPacket = proposalEntry!.packet;
+  const at = nowIso();
+  upsertPacketEdge(outputPacket, "implements", proposalPacket.id, evidence, at);
+  upsertPacketEdge(proposalPacket, "implemented_by", outputPacket.id, evidence, at);
+  outputPacket.updated_at = at;
+  proposalPacket.updated_at = at;
+  writeJson(outputEntry!.path, outputPacket);
+  writeJson(proposalEntry!.path, proposalPacket);
+  recordMemoryAudit(projectDir, "transition", [outputPacket, proposalPacket], {
+    relation: "implements",
+    output_packet_id: outputPacket.id,
+    proposal_packet_id: proposalPacket.id,
+    evidence,
+  });
+  buildIndexes(projectDir);
+  const stage = proposalPacket.stage ?? "proposed";
+  if (stage === "claimed") {
+    const transition = transitionWorkStage(projectDir, proposalPacket.id, "in_review", {
+      actor: outputPacket.author_name ?? "unknown",
+      evidence: `implemented by ${outputPacket.id}`,
+    });
+    result.auto_advanced = transition.ok;
+    if (!transition.ok) result.errors.push(...transition.errors.map((e) => `auto-advance skipped: ${e}`));
+  }
+  result.ok = true;
+  return result;
+}
+
+export interface WorkItemSummary {
+  id: string;
+  title: string;
+  stage: WorkStage;
+  claimed_by: string | null;
+  status: MemoryStatus;
+  updated_at: string;
+}
+
+export interface WorkItemBrief {
+  ok: boolean;
+  project_dir: string;
+  work_item: { id: string; title: string; body: string } | null;
+  stage: WorkStage | null;
+  claimed_by: string | null;
+  /** Files the proposal cites plus what the code graph says depends on them. */
+  blast_radius: string[];
+  /** The assembled, agent-ready text. */
+  brief: string;
+  errors: string[];
+}
+
+// The missing half of the work-item pipeline. `kage gate list` shows an agent WHAT to pick up, and
+// the stage machine tracks where it got to — but nothing ever told the agent what the team already
+// knows about the code it is about to touch. So a claimed proposal started from zero, which is the
+// exact rediscovery this product exists to prevent.
+//
+// Everything here is assembled from existing parts (recall + risk + the packet store) rather than a
+// new store: a brief is a QUERY, not a document to maintain.
+export function workItemBrief(projectDir: string, packetId: string): WorkItemBrief {
+  ensureMemoryDirs(projectDir);
+  const result: WorkItemBrief = {
+    ok: false, project_dir: projectDir, work_item: null, stage: null, claimed_by: null,
+    blast_radius: [], brief: "", errors: [],
+  };
+  const packet = loadPacketsFromDir(packetsDir(projectDir)).find((entry) => entry.id === packetId);
+  if (!packet) {
+    result.errors.push(`Work item not found: ${packetId}`);
+    return result;
+  }
+  if (packet.type !== "proposal") {
+    result.errors.push(`${packetId} is a ${packet.type}, not a work item. Only proposals are briefed.`);
+    return result;
+  }
+  result.work_item = { id: packet.id, title: packet.title, body: packet.body };
+  result.stage = packet.stage ?? "proposed";
+  result.claimed_by = packet.claimed_by ?? null;
+
+  // What the team knows that bears on this work. Query by the proposal's own words so the brief
+  // reflects the task, not the whole store.
+  const recalled = recall(projectDir, `${packet.title}\n${packet.summary}`, 6)
+    .results.filter((entry) => entry.packet.id !== packet.id);
+
+  const cited = packet.paths.filter((path) => meaningfulMemoryPath(path));
+  let risk: KageRiskReport | null = null;
+  try { risk = kageRisk(projectDir, cited); } catch { /* risk is advisory; a brief without it still helps */ }
+  result.blast_radius = unique([
+    ...cited,
+    ...Object.values(risk?.targets ?? {}).flatMap((target) => target.dependents ?? []),
+  ]);
+
+  result.brief = [
+    `# Work item: ${packet.title}`,
+    "",
+    packet.body,
+    "",
+    `Stage: ${result.stage}${result.claimed_by ? ` · claimed by ${result.claimed_by}` : ""}`,
+    "",
+    "## What the team already knows about this code",
+    ...(recalled.length
+      ? recalled.flatMap((entry) => [
+          "",
+          `- ${memoryProvenanceLabel(entry.packet)} ${entry.packet.title}`,
+          `  ${entry.packet.summary}`,
+          ...(entry.packet.paths.length ? [`  (${entry.packet.paths.slice(0, 3).join(", ")})`] : []),
+        ])
+      : ["", "_No prior memory cites this code. You are the first — capture what you learn._"]),
+    "",
+    "## Blast radius",
+    ...(result.blast_radius.length
+      ? result.blast_radius.slice(0, 20).map((path) => `- ${path}`)
+      : ["_The proposal cites no code yet; name the files it touches before claiming it._"]),
+  ].join("\n");
+  result.ok = true;
+  return result;
+}
+
+export function listWorkItems(projectDir: string, options: { stage?: WorkStage } = {}): WorkItemSummary[] {
+  ensureMemoryDirs(projectDir);
+  const packets = loadPacketsFromDir(packetsDir(projectDir)).filter((packet) => packet.type === "proposal");
+  return packets
+    .map((packet) => ({
+      id: packet.id,
+      title: packet.title,
+      stage: packet.stage ?? "proposed",
+      claimed_by: packet.claimed_by ?? null,
+      status: packet.status,
+      updated_at: packet.updated_at,
+    }))
+    .filter((item) => !options.stage || item.stage === options.stage)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 }
 
 export function kageMemoryLineage(projectDir: string): MemoryLineageReport {
@@ -20608,6 +23759,57 @@ function personalRecallEntries(projectDir: string, terms: string[], limit = 3): 
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.packet.title.localeCompare(b.packet.title))
     .slice(0, Math.max(1, limit));
+}
+
+export interface TeamRecallEntry {
+  packet: MemoryPacket;
+  score: number;
+  why_matched: string[];
+}
+
+// Team-memory candidates pulled from a Kage Cloud namespace (`kage cloud pull`, see
+// cloud-server.ts). Same "verified sync" discipline as personalRecallEntries: the server
+// only ever hands over packets + fingerprints, and it is THIS check — re-verifying every
+// cited path's fingerprint against the local checkout — that decides whether a teammate's
+// claim is trusted here. A packet approved on a review-gated team could still be withheld
+// on a machine whose checkout has since diverged; the server has no way to know that, and
+// is never asked to.
+function teamRecallEntries(projectDir: string, terms: string[], limit = 3): TeamRecallEntry[] {
+  const packets = loadPacketsFromDir(teamPacketsDir(projectDir));
+  if (!packets.length) return [];
+  const cache = new Map<string, MemoryPathFingerprint | null>();
+  const eligible = packets.filter((packet) => recallStaleReason(projectDir, packet, cache) === null);
+  if (!eligible.length) return [];
+  const scores = scorePacketsBm25(terms, eligible);
+  return eligible
+    .map((packet) => {
+      const { score, why } = scores.get(packet.id) ?? { score: 0, why: [] };
+      return { packet, score, why_matched: why };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.packet.title.localeCompare(b.packet.title))
+    .slice(0, Math.max(1, limit));
+}
+
+// Write one packet pulled from a Kage Cloud team namespace into the local pull cache.
+// Exported for cloud-client.ts (`kage cloud pull`) — kept separate from writePacket() so
+// the repo-packet write path's statusDir type ("packets" | "pending") is untouched.
+export function writeTeamPacket(projectDir: string, packet: MemoryPacket): string {
+  const dir = teamPacketsDir(projectDir);
+  ensureDir(dir);
+  const path = join(dir, packetFileName(packet));
+  writePacketToDisk(path, packet);
+  return path;
+}
+
+// `kage cloud pull` calls this before rewriting the cache, so a packet the server no longer
+// considers approved (superseded, rejected after the fact) does not linger locally forever.
+export function clearTeamPackets(projectDir: string): void {
+  const dir = teamPacketsDir(projectDir);
+  if (!existsSync(dir)) return;
+  for (const name of readdirSync(dir)) {
+    if (isPacketFile(name)) rmSync(join(dir, name), { force: true });
+  }
 }
 
 // --- kage sync: git-remote transport for the personal store ---------------

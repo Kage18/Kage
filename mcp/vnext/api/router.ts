@@ -1,0 +1,260 @@
+// The portal read-model router: a pure mapping from a matched `/v2/...` read route to a
+// `{ status, body }` result over the repository model. It owns NO transport — server.ts matches the
+// route, proves the machine token, builds a `Repository`, and calls `handlePortalRoute`. Keeping the
+// dispatch pure makes every route unit-testable without a live socket and keeps the honesty gates in
+// one place (read-models.ts), never smeared across the HTTP handler.
+
+import type { Repository } from "../repo-model/repository.js";
+import type { ReceiptStore } from "../storage/receipt-store.js";
+import type { EntityKind } from "../repo-model/types.js";
+import type { SystemMapView, TeamMetricsPanelDto } from "./types.js";
+import { buildSystemMap } from "./system-map.js";
+import {
+  buildOverview,
+  decisionDetail,
+  entityDetail,
+  entityList,
+  featureList,
+  findTaskSummary,
+  listTaskSummaries,
+  reviewItems,
+  runbookDetail,
+} from "./read-models.js";
+
+export type PortalRouteKind =
+  | "overview"
+  | "system_map"
+  | "features"
+  | "entity_list"
+  | "entity_detail"
+  | "feature"
+  | "component"
+  | "flow"
+  | "runbook"
+  | "decision"
+  | "review_items"
+  | "tasks"
+  | "task"
+  | "integrations"
+  | "team_report";
+
+export interface PortalRoute {
+  kind: PortalRouteKind;
+  slug?: string;
+  taskId?: string;
+  /** For "entity_list": which kind of entity to list (components, flows, runbooks, decisions). */
+  entityKind?: EntityKind;
+}
+
+// Every portal read route is GET. `undefined` means "not a portal route" — server.ts falls through to
+// its existing matcher (content, receipts, minimal-change) or 404s.
+export function matchPortalRoute(pathname: string): PortalRoute | undefined {
+  if (pathname === "/v2/overview") return { kind: "overview" };
+  if (pathname === "/v2/system-map") return { kind: "system_map" };
+  if (pathname === "/v2/features") return { kind: "features" };
+  // Browse-list tabs for the other kinds. Bare path only — the `/v2/<kind>/<slug>` detail routes are
+  // matched by the regex below, so these never collide.
+  if (pathname === "/v2/components") return { kind: "entity_list", entityKind: "component" };
+  if (pathname === "/v2/flows") return { kind: "entity_list", entityKind: "flow" };
+  if (pathname === "/v2/runbooks") return { kind: "entity_list", entityKind: "runbook" };
+  if (pathname === "/v2/decisions") return { kind: "entity_list", entityKind: "decision" };
+  // The knowledge-bearing kinds the model has always stored but never surfaced: they existed in the
+  // database and appeared as plain text on other pages, so a contract or an invariant was
+  // unreachable from the UI. `document` is new — design docs and PRDs, anchored to symbols like
+  // everything else, so a document goes stale when what it describes changes.
+  //
+  // The remaining kinds (repository, owner, dependency, test_surface) stay off the browse surface
+  // deliberately: they are relations between things, best read on the detail page of the thing they
+  // relate to, not as top-level lists a person scrolls.
+  if (pathname === "/v2/contracts") return { kind: "entity_list", entityKind: "contract" };
+  if (pathname === "/v2/data-models") return { kind: "entity_list", entityKind: "data_model" };
+  if (pathname === "/v2/invariants") return { kind: "entity_list", entityKind: "invariant" };
+  if (pathname === "/v2/incidents") return { kind: "entity_list", entityKind: "incident" };
+  if (pathname === "/v2/documents") return { kind: "entity_list", entityKind: "document" };
+  if (pathname === "/v2/review-items") return { kind: "review_items" };
+  if (pathname === "/v2/tasks") return { kind: "tasks" };
+  if (pathname === "/v2/integrations") return { kind: "integrations" };
+  if (pathname === "/v2/team-report") return { kind: "team_report" };
+
+  const entity = /^\/v2\/(features|components|flows|runbooks|decisions|contracts|data-models|invariants|incidents|documents)\/([^/]+)$/.exec(pathname);
+  if (entity) {
+    const slug = decodeSlug(entity[2]);
+    if (slug === undefined) return undefined;
+    switch (entity[1]) {
+      case "features":
+        return { kind: "feature", slug };
+      case "components":
+        return { kind: "component", slug };
+      case "flows":
+        return { kind: "flow", slug };
+      case "runbooks":
+        return { kind: "runbook", slug };
+      case "decisions":
+        return { kind: "decision", slug };
+      // The newly-surfaced kinds reuse the generic entity detail shape: an entity with its claims,
+      // evidence and relations is the same page regardless of which kind it is.
+      case "contracts":
+        return { kind: "entity_detail", slug, entityKind: "contract" };
+      case "data-models":
+        return { kind: "entity_detail", slug, entityKind: "data_model" };
+      case "invariants":
+        return { kind: "entity_detail", slug, entityKind: "invariant" };
+      case "incidents":
+        return { kind: "entity_detail", slug, entityKind: "incident" };
+      case "documents":
+        return { kind: "entity_detail", slug, entityKind: "document" };
+    }
+  }
+
+  const task = /^\/v2\/tasks\/([^/]+)$/.exec(pathname);
+  if (task) {
+    const taskId = decodeSlug(task[1]);
+    if (taskId === undefined) return undefined;
+    return { kind: "task", taskId };
+  }
+
+  return undefined;
+}
+
+function decodeSlug(raw: string): string | undefined {
+  try {
+    const value = decodeURIComponent(raw);
+    if (!value || value.includes("/")) return undefined;
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface PortalContext {
+  model: Repository;
+  receiptStore: ReceiptStore;
+  /**
+   * The team panel a connected workspace last answered with, or null/absent when this install has no
+   * workspace (or the workspace is unreachable). It is a VALUE, never a fetch: the portal read path must
+   * never wait on the network, so the caller supplies whatever the workspace link has cached and the
+   * local overview is computed identically either way. Null renders as "no workspace connected".
+   */
+  team?: TeamMetricsPanelDto | null;
+  /**
+   * T5 — the lead-facing team value report (kage report team), supplied as a VALUE by the caller
+   * exactly like `team`: the portal read path never fetches or recomputes; server.ts assembles it
+   * from the local ledgers per request. Null renders as "report unavailable".
+   */
+  teamReport?: unknown;
+}
+
+export interface PortalResult {
+  status: number;
+  body: unknown;
+}
+
+const VIEWS: ReadonlySet<string> = new Set(["feature", "runtime", "sequence", "ownership", "impact"]);
+
+// The distinct repository ids that have entities in the model, in stable order. A fresh repo has none;
+// the caller then returns an honest empty overview rather than a 500.
+function repositoryIds(model: Repository): string[] {
+  const rows = model.database
+    .prepare(`SELECT DISTINCT repository_id FROM entities ORDER BY repository_id`)
+    .all() as unknown as Array<{ repository_id: string }>;
+  return rows.map((r) => r.repository_id);
+}
+
+function notFound(): PortalResult {
+  return { status: 404, body: { ok: false, error: "not_found" } };
+}
+
+function entityKindFor(kind: PortalRoute["kind"]): EntityKind | null {
+  switch (kind) {
+    case "feature":
+      return "feature";
+    case "component":
+      return "component";
+    case "flow":
+      return "flow";
+    case "runbook":
+      return "runbook";
+    case "decision":
+      return "decision";
+    default:
+      return null;
+  }
+}
+
+export function handlePortalRoute(
+  route: PortalRoute,
+  ctx: PortalContext,
+  search: URLSearchParams,
+): PortalResult {
+  const { model, receiptStore } = ctx;
+  const repoId = repositoryIds(model)[0] ?? null;
+  const receiptCount = (taskId: string): number => receiptStore.forTask(taskId).length;
+
+  switch (route.kind) {
+    case "overview":
+      // `ctx.team ?? null` keeps the fail-open contract explicit: no workspace, or a workspace that
+      // did not answer, yields null — never a zeroed team panel.
+      return { status: 200, body: buildOverview(model, repoId, receiptStore.list(), ctx.team ?? null) };
+
+    case "system_map": {
+      const requested = search.get("view") ?? "feature";
+      const view: SystemMapView = (VIEWS.has(requested) ? requested : "feature") as SystemMapView;
+      const focus = search.get("focus");
+      return { status: 200, body: buildSystemMap(model, repoId, view, focus) };
+    }
+
+    case "features":
+      return { status: 200, body: repoId ? featureList(model, repoId) : { features: [] } };
+
+    case "entity_list": {
+      const kind = route.entityKind!;
+      return { status: 200, body: repoId ? entityList(model, repoId, kind) : { kind, entities: [] } };
+    }
+
+    case "entity_detail": {
+      if (!repoId) return notFound();
+      const entity = model.findEntity(repoId, route.entityKind!, route.slug!);
+      if (!entity) return notFound();
+      return { status: 200, body: entityDetail(model, entity) };
+    }
+
+    case "feature":
+    case "component":
+    case "flow":
+    case "runbook":
+    case "decision": {
+      if (!repoId) return notFound();
+      const kind = entityKindFor(route.kind)!;
+      const entity = model.findEntity(repoId, kind, route.slug!);
+      if (!entity) return notFound();
+      if (route.kind === "decision") return { status: 200, body: decisionDetail(model, entity) };
+      if (route.kind === "runbook") return { status: 200, body: runbookDetail(model, entity) };
+      return { status: 200, body: entityDetail(model, entity) };
+    }
+
+    case "review_items": {
+      const statusParam = search.get("status");
+      const status = statusParam === "open" || statusParam === "accepted" || statusParam === "rejected" || statusParam === "superseded"
+        ? statusParam
+        : undefined;
+      return { status: 200, body: { review_items: repoId ? reviewItems(model, repoId, status) : [] } };
+    }
+
+    case "tasks":
+      return { status: 200, body: { tasks: listTaskSummaries(model, receiptCount) } };
+
+    case "task": {
+      const task = findTaskSummary(model, route.taskId!, receiptCount);
+      if (!task) return notFound();
+      return { status: 200, body: { task, receipt_count: task.receipt_count } };
+    }
+
+    case "integrations":
+      // Integration state is wired in Task 9; an honest empty list, never a fabricated "all healthy".
+      return { status: 200, body: { integrations: [] } };
+    case "team_report":
+      // Measured-or-null, same honesty contract as the CLI report; null means the caller could not
+      // assemble it (never a fabricated empty report shaped like a healthy one).
+      return { status: 200, body: { report: ctx.teamReport ?? null } };
+  }
+}

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { buildWorkBoard } from "./vnext/orchestrator/board.js";
+import { appendCommandEvent } from "./vnext/orchestrator/events.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { retrieveFromProject } from "./vnext/api/retrieve.js";
 import {
   SETUP_AGENTS,
   auditProject,
@@ -25,8 +28,13 @@ import {
   installAgentPolicy,
   kageCleanupCandidates,
   kageCapabilityAudit,
+  kageContext,
   kageContributors,
   kageContextSlots,
+  kageFetchPublicGraphNode,
+  kageListPublicDomains,
+  kageSearchPublicGraph,
+  KAGE_WORKFLOW_TEXT,
   kageDecisionIntelligence,
   kageDependencyPath,
   kageGraphInsights,
@@ -70,88 +78,27 @@ import {
   generateSkills,
   refreshProject,
   registryRecommendations,
+  reverifyMemory,
   setupAgent,
   setupDoctor,
   setContextSlot,
   supersedeMemory,
+  transitionWorkStage,
+  claimWorkItem,
+  workItemBrief,
+  linkImplements,
+  listWorkItems,
   validateProject,
   valueSummary,
-  formatTokenCount,
   verifyAgentActivation,
   writeCodeIndex,
   type MemoryType,
   type ObservationEvent,
   type SetupAgent,
+  type WorkStage,
 } from "./kernel.js";
+import { driftCheck, formatCheckReport } from "./check.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
-
-const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
-
-async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
-  return res.text();
-}
-
-async function fetchJSON<T>(url: string): Promise<T> {
-  const text = await fetchText(url);
-  return JSON.parse(text) as T;
-}
-
-interface CatalogDomain {
-  nodes?: number;
-  node_count?: number;
-  top_tags?: string[];
-}
-
-interface Catalog {
-  domains: Record<string, CatalogDomain>;
-}
-
-interface IndexNode {
-  id: string;
-  title: string;
-  type: string;
-  tags: string[];
-  summary: string;
-  score: number;
-  updated: string;
-}
-
-interface DomainIndex {
-  nodes: IndexNode[];
-}
-
-function domainNodeCount(domain: CatalogDomain): number {
-  return catalogDomainNodeCount(domain);
-}
-
-function domainTopTags(domain: CatalogDomain): string[] {
-  return domain.top_tags ?? [];
-}
-
-function scoreMatch(query: string, node: IndexNode): number {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  let score = 0;
-  const title = node.title.toLowerCase();
-  const summary = (node.summary || "").toLowerCase();
-  const tags = (node.tags ?? []).map((t) => t.toLowerCase());
-
-  for (const term of terms) {
-    if (title.includes(term)) score += 3;
-    if (tags.some((t) => t.includes(term))) score += 2;
-    if (summary.includes(term)) score += 1;
-  }
-  return score;
-}
-
-function scoreDomainMatch(query: string, domain: CatalogDomain): number {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const tags = domainTopTags(domain);
-  return terms.reduce((sum, term) => {
-    return sum + tags.filter((t) => t.includes(term)).length;
-  }, 0);
-}
 
 function arrayArg(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String);
@@ -159,42 +106,10 @@ function arrayArg(value: unknown): string[] {
   return [];
 }
 
-function filePathHints(query: string): string[] {
-  const matches = query.match(/[A-Za-z0-9_./@-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|rb|php|cs|c|h|cc|cpp|hpp|swift|json|md)\b/g) ?? [];
-  return [...new Set(matches.map((match) => match.replace(/^\.\//, "")).filter((match) => !/^https?:\/\//.test(match)))];
-}
-
-function wantsDependencyPath(query: string): boolean {
-  return /\b(connect|connected|dependency|depend|depends|path|impact|flow|trace)\b/i.test(query);
-}
-
-function riskContextBlock(result: ReturnType<typeof kageRisk>): string {
-  const targets = Object.values(result.targets);
-  if (!targets.length) return "";
-  const lines = targets.slice(0, 5).map((item) => {
-    const coChange = item.git.co_change_partners.length
-      ? ` Co-change: ${item.git.co_change_partners.slice(0, 3).map((partner) => `${partner.file_path} (${partner.count})`).join(", ")}.`
-      : "";
-    return `- ${item.risk_summary}${coChange}`;
-  });
-  return `\n## Risk Signals\n${lines.join("\n")}`;
-}
-
 const server = new Server(
-  { name: "kage-graph", version: "2.0.0" },
+  { name: "kage-graph", version: "3.3.0" },
   { capabilities: { tools: {} } }
 );
-
-// Workflow pseudo-tool: the description itself is the documentation, so agents
-// absorb the loop just by listing tools. The handler returns the same text.
-const KAGE_WORKFLOW_TEXT =
-  "Kage memory workflow (this tool performs no action; it returns this loop). " +
-  "1) Start every task with kage_context (project_dir + the task as query): it validates memory, recalls relevant packets, and queries the code and knowledge graphs in one call. " +
-  "2) Do the work, preferring repo memory over public context. " +
-  "3) Capture reusable learnings with kage_learn — bug causes and verified fixes, conventions, decisions, gotchas, run/test/build commands. Wrap anything that must never leave the repo in <private>...</private> tags; private spans are stripped before sharing. " +
-  "4) After meaningful file changes, call kage_refresh so indexes, graphs, and stale-memory checks stay current. " +
-  "5) Before finishing a branch, call kage_pr_summarize then kage_pr_check. " +
-  "Recall receipts show estimated tokens saved versus rediscovery; report memory quality with kage_feedback (helpful/wrong/stale).";
 
 // Agent-facing core: the verbs an agent actually uses in the loop (recall,
 // capture, stay-honest, refresh, codify). Everything else is operator/diagnostic
@@ -202,6 +117,7 @@ const KAGE_WORKFLOW_TEXT =
 // mode (KAGE_TOOLS=full) or via the CLI. Keeping the default small enough that
 // the client always-loads it removes the per-call ToolSearch round-trip.
 export const CORE_TOOLS = new Set([
+  "kage_check",
   "kage_context",
   "kage_learn",
   "kage_supersede",
@@ -218,12 +134,101 @@ export const CORE_TOOLS = new Set([
   "kage_docs_search",
 ]);
 
-export function listTools() {
-  const all = [
+// The v4 DEFAULT MCP surface: the three verbs a vNext agent needs — recall context, retrieve an exact
+// reversible original, and give feedback. As of Phase E Task 10 this is the DEFAULT (the product-surface
+// cutover), not just an opt-in: capture/refresh/review now flow through the ambient proxy + the portal,
+// so the model's default tool list is exactly these three. Ordered on purpose — listTools() returns them
+// in this order so the surface is stable and asserted deterministically.
+export const DEFAULT_V4_TOOLS = ["kage_context", "kage_retrieve", "kage_feedback"] as const;
+// Back-compat alias: the previous name for the default vNext surface.
+export const VNEXT_TOOLS = new Set(DEFAULT_V4_TOOLS);
+
+// The pre-vNext core (12 tools). It is NO LONGER the default surface — it is the body of KAGE_TOOLS=legacy,
+// which keeps every legacy tool reachable for one major version with a deprecation note in each description.
+// KAGE_TOOLS=full remains the complete internal registry (no deprecation notes) for development.
+
+export type ToolSurfaceMode = "default" | "legacy" | "full";
+
+function resolveMode(explicit?: ToolSurfaceMode): ToolSurfaceMode {
+  if (explicit) return explicit;
+  if (process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") return "full";
+  if (process.env.KAGE_TOOLS === "legacy") return "legacy";
+  // KAGE_TOOLS=vnext is retained as an explicit spelling of the default surface.
+  return "default";
+}
+
+// One deterministic deprecation prefix on every legacy tool description so `KAGE_TOOLS=legacy` is
+// honestly labeled: the tool still works, but the description says it is deprecated and points at the
+// migration doc. The three survivors keep their normal descriptions.
+const LEGACY_TOOL_DEPRECATION =
+  "Deprecated in v4, removed in v5. Prefer kage_context, kage_retrieve, or kage_feedback; see docs/migration/v4-command-map.md. ";
+
+export function listTools(opts?: { mode?: ToolSurfaceMode }) {
+  const all = allTools();
+  const mode = resolveMode(opts?.mode);
+  if (mode === "full") return all;
+  if (mode === "legacy") {
+    const survivors = new Set<string>(DEFAULT_V4_TOOLS);
+    return all.map((tool) =>
+      survivors.has(tool.name)
+        ? tool
+        : { ...tool, description: LEGACY_TOOL_DEPRECATION + tool.description }
+    );
+  }
+  // default: exactly the three v4 verbs, in their canonical order.
+  const byName = new Map(all.map((tool) => [tool.name, tool]));
+  return DEFAULT_V4_TOOLS.map((name) => byName.get(name)).filter((tool): tool is NonNullable<typeof tool> => Boolean(tool));
+}
+
+function allTools() {
+  return [
     {
       // Combined entry-point tool: validate + recall + code_graph + graph in one call.
       // Agents should load this schema first (one ToolSearch) instead of loading four
       // separate deferred schemas. Cuts session start from 4 schema loads to 1.
+      name: "kage_queue",
+      description:
+        "The work an agent can pick up: ready items with their derived stage, who holds them, and what code each touches. Stages come from commits and commands, never from a status someone typed. Call this to find work, then kage_brief before starting it.",
+      annotations: { title: "List claimable work with derived stage", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          unclaimed_only: { type: "boolean", description: "Only items nobody has claimed (default true)" },
+        },
+        required: ["project_dir"],
+      },
+    },
+    {
+      name: "kage_brief",
+      description:
+        "Everything known about a work item before touching it: what the team already learned about that code, the blast radius, and its stage. Call this after claiming and before the first edit — it is the difference between starting informed and rediscovering what someone already solved.",
+      annotations: { title: "Get the brief for a work item", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          work_id: { type: "string", description: "The work item id, from kage_queue" },
+        },
+        required: ["project_dir", "work_id"],
+      },
+    },
+    {
+      name: "kage_claim",
+      description:
+        "Claim a work item so other agents do not collide on it. Takes a per-item lock and records the claim as an event, which is what moves the item to `claimed` on every surface. Claim before you work, not after.",
+      annotations: { title: "Claim a work item", readOnlyHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the project root" },
+          work_id: { type: "string", description: "The work item id, from kage_queue" },
+          actor: { type: "string", description: "Who is claiming it — your agent identity" },
+        },
+        required: ["project_dir", "work_id", "actor"],
+      },
+    },
+    {
       name: "kage_context",
       description:
         "Primary kage entry point. Validates memory health, recalls relevant packets, and queries both the code graph and knowledge graph — all in one call. Call this at the start of every task; it answers caller/usage questions from the code graph too, so you rarely need a separate graph tool.",
@@ -237,6 +242,8 @@ export function listTools() {
           session_id: { type: "string", description: "Optional active agent session id for memory reconciliation" },
           targets: { type: "array", items: { type: "string" }, description: "Optional files the agent may edit or explain; used for risk context" },
           changed_files: { type: "array", items: { type: "string" }, description: "Optional changed files for pre-edit or PR risk context" },
+          json: { type: "boolean", description: "Return the full structured result instead of the rendered context block." },
+          explain: { type: "boolean", description: "Return the full structured result, including why each memory was recalled." },
         },
         required: ["project_dir", "query"],
       },
@@ -605,6 +612,7 @@ export function listTools() {
           project_dir: { type: "string", description: "Workspace root directory to scan for git repos" },
           query: { type: "string", description: "Question or task to recall across repos" },
           limit: { type: "number", description: "Max combined hits to return (default 8)" },
+          json: { type: "boolean", description: "Return the full structured result instead of the rendered context block." },
         },
         required: ["project_dir", "query"],
       },
@@ -677,6 +685,20 @@ export function listTools() {
         type: "object",
         properties: {
           project_dir: { type: "string", description: "Absolute path to the repository root." },
+        },
+        required: ["project_dir"],
+      },
+    },
+    {
+      name: "kage_check",
+      description:
+        "Verify the claims in agent-context files (CLAUDE.md, AGENTS.md, .cursor/rules, README, docs) against the code: cited paths, npm scripts, make targets, CLI subcommands. Reports confirmed drift / verified true / unverifiable — every number is a reproducible check, never an estimate. Pass base to gate only drift introduced since that ref.",
+      annotations: { title: "Verify agent-context files against the code", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          base: { type: "string", description: "Optional git ref: only report drift attributable to changes since this ref (diff-aware mode for PRs)." },
         },
         required: ["project_dir"],
       },
@@ -783,6 +805,83 @@ export function listTools() {
           reason: { type: "string", description: "Optional human note recorded on the lineage edge explaining why it was superseded." },
         },
         required: ["project_dir", "packet_id", "replacement_packet_id"],
+      },
+    },
+    {
+      name: "kage_reverify",
+      description:
+        "Re-verify a still-true repo-local memory packet in place: re-checks its cited paths, refreshes fingerprints and last_verified_at, and clears any stale flag. Use this instead of kage_supersede when the code a packet cites changed but the packet's actual claim is still correct — e.g. a cited file was edited for an unrelated reason. Refuses when every cited path is gone; that needs kage_supersede or marking the packet stale instead.",
+      annotations: { title: "Re-verify a memory packet against current code", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          packet_id: { type: "string", description: "Id of the packet to re-verify." },
+          evidence: { type: "string", description: "What you checked and why the packet's claim still holds (e.g. what changed in the cited file and why it's unrelated)." },
+          verified_by: { type: "string", description: "How you verified it, e.g. a test command and its result." },
+        },
+        required: ["project_dir", "packet_id"],
+      },
+    },
+    {
+      name: "kage_list_work_items",
+      description:
+        "List SDLC work items — proposal packets and their stage (proposed/claimed/in_review/done). Use this to find claimable work (stage: proposed) or check what's in review.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          stage: { type: "string", enum: ["proposed", "claimed", "in_review", "done"], description: "Filter to one stage. Omit to list all." },
+        },
+        required: ["project_dir"],
+      },
+    },
+    {
+      name: "kage_claim_work_item",
+      description:
+        "Claim a proposed work item (a type: proposal packet at stage 'proposed') so you can implement it. Fails if it's already claimed by someone else. After implementing, call kage_link_implements to link your output and advance it to review.",
+      annotations: { title: "Claim a work item", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          packet_id: { type: "string", description: "Id of the proposal packet to claim." },
+          actor: { type: "string", description: "Your identity — used later to block you from self-approving your own work to done." },
+        },
+        required: ["project_dir", "packet_id", "actor"],
+      },
+    },
+    {
+      name: "kage_link_implements",
+      description:
+        "Link an output packet (whatever type already fits — decision, bug_fix, runbook, etc., captured with kage_learn/kage_capture) to the proposal it implements. Auto-advances the proposal from 'claimed' to 'in_review' once linked, signaling it's ready for a human (or a different agent) to review. This does not require a new packet type — capture your work normally, then link it.",
+      annotations: { title: "Link an output packet to the proposal it implements", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          output_packet_id: { type: "string", description: "Id of the packet documenting the completed work." },
+          proposal_packet_id: { type: "string", description: "Id of the proposal packet this implements." },
+          evidence: { type: "string", description: "What was done — files touched, tests run, etc." },
+        },
+        required: ["project_dir", "output_packet_id", "proposal_packet_id", "evidence"],
+      },
+    },
+    {
+      name: "kage_transition_work_item",
+      description:
+        "Move a work item between stages: proposed<->claimed, claimed<->in_review. This tool NEVER performs the terminal in_review -> done transition — that approval gate is deliberately human-only (kage gate review, TTY-interactive) or cryptographically-authenticated (kage cloud approve), never reachable by an agent through the MCP surface, so an agent can never approve its own work by calling a tool.",
+      annotations: { title: "Transition a work item's stage (not to done)", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          packet_id: { type: "string", description: "Id of the work item (proposal packet)." },
+          to_stage: { type: "string", enum: ["proposed", "claimed", "in_review"], description: "Target stage. 'done' is rejected — see description." },
+          actor: { type: "string", description: "Your identity." },
+          evidence: { type: "string", description: "Why this transition, optional." },
+        },
+        required: ["project_dir", "packet_id", "to_stage", "actor"],
       },
     },
     {
@@ -1067,6 +1166,21 @@ export function listTools() {
       },
     },
     {
+      name: "kage_retrieve",
+      description:
+        "Retrieve the exact, fingerprint-verified original bytes behind a kage-content:<sha256> reference produced by the Kage vNext gateway when it reversibly compressed a payload. Reads ONLY the local content store for the given task — it never fetches a public or team asset. Use it to recover a tool_result, log, or diff that was compressed in the request so you can inspect the untouched original. Returns the original content plus its SHA-256 fingerprint; refuses content owned by another task and refuses any object whose bytes no longer match their fingerprint.",
+      annotations: { title: "Retrieve an exact reversible original by content reference", readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string", description: "Absolute path to the repository root." },
+          retrieval_id: { type: "string", description: "The kage-content:<sha256> reference embedded next to a compressed payload." },
+          task_id: { type: "string", description: "The task that owns the stored original (the task the transform ran for)." },
+        },
+        required: ["project_dir", "retrieval_id", "task_id"],
+      },
+    },
+    {
       name: "kage_install_policy",
       description:
         "Install or update the repo AGENTS.md policy that tells coding agents to use Kage automatically.",
@@ -1127,186 +1241,118 @@ export function listTools() {
       },
     },
   ];
-  if (process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") return all;
-  return all.filter((tool) => CORE_TOOLS.has(tool.name));
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: listTools(),
 }));
 
-export async function callTool(name: string, args: Record<string, unknown> | undefined) {
-  await ensureTreeSitterLanguages();
-  if (name === "kage_list_domains") {
-    const catalog = await fetchJSON<Catalog>(`${BASE_URL}/catalog.json`);
-    const lines = Object.entries(catalog.domains)
-      .filter(([, d]) => domainNodeCount(d) > 0)
-      .sort(([, a], [, b]) => domainNodeCount(b) - domainNodeCount(a))
-      .map(
-        ([domain, d]) =>
-          `**${domain}** — ${domainNodeCount(d)} nodes | tags: ${domainTopTags(d).slice(0, 5).join(", ")}`
-      );
+// Every tool reads its arguments as `args?.some_key`, so a caller that misnames a parameter
+// gets it silently dropped and the tool runs on the default. That is how a kage_learn call
+// carrying its insight under the wrong key wrote a packet with an empty body: the insight was
+// discarded, no error was raised, and the loss only surfaced later as a soft validation
+// warning. Unknown keys are a caller bug every time — fail loudly instead of writing something
+// useless.
+function unknownToolArgs(name: string, args: Record<string, unknown> | undefined): string[] {
+  if (!args) return [];
+  const tool = allTools().find((candidate) => candidate.name === name);
+  const schema = tool?.inputSchema as { properties?: Record<string, unknown> } | undefined;
+  if (!schema?.properties) return [];
+  const allowed = new Set(Object.keys(schema.properties));
+  return Object.keys(args).filter((key) => !allowed.has(key)).sort();
+}
 
+export async function callTool(name: string, args: Record<string, unknown> | undefined) {
+  const unknown = unknownToolArgs(name, args);
+  if (unknown.length) {
+    const tool = allTools().find((candidate) => candidate.name === name);
+    const allowed = Object.keys((tool?.inputSchema as { properties: Record<string, unknown> }).properties).sort();
     return {
       content: [
         {
           type: "text",
-          text: `# kage-graph Domains\n\n${lines.join("\n")}`,
+          text: `${name} does not accept: ${unknown.join(", ")}.\n`
+            + `Supported parameters: ${allowed.join(", ")}.\n`
+            + "Nothing was written. Re-send the call with the intended parameter name.",
         },
       ],
+      isError: true,
     };
+  }
+  await ensureTreeSitterLanguages();
+  if (name === "kage_list_domains") {
+    return { content: [{ type: "text", text: await kageListPublicDomains() }] };
   }
 
   if (name === "kage_search") {
     const query = String(args?.query ?? "");
     const domainFilter = args?.domain ? String(args.domain) : null;
-
-    const catalog = await fetchJSON<Catalog>(`${BASE_URL}/catalog.json`);
-
-    let domainsToSearch: string[];
-    if (domainFilter) {
-      domainsToSearch = [domainFilter];
-    } else {
-      domainsToSearch = Object.entries(catalog.domains)
-        .filter(([, d]) => domainNodeCount(d) > 0)
-        .map(([name, d]) => ({ name, score: scoreDomainMatch(query, d) }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3)
-        .filter((d) => d.score > 0)
-        .map((d) => d.name);
-
-      if (domainsToSearch.length === 0) {
-        domainsToSearch = Object.entries(catalog.domains)
-          .filter(([, d]) => domainNodeCount(d) > 0)
-          .map(([name]) => name);
-      }
-    }
-
-    const indexResults = await Promise.allSettled(
-      domainsToSearch.map(async (domain) => {
-        const index = await fetchJSON<DomainIndex>(
-          `${BASE_URL}/domains/${domain}/index.json`
-        );
-        return { domain, nodes: index.nodes };
-      })
-    );
-
-    const scored: Array<{ domain: string; node: IndexNode; score: number }> = [];
-    for (const result of indexResults) {
-      if (result.status === "fulfilled") {
-        const { domain, nodes } = result.value;
-        for (const node of nodes) {
-          const s = scoreMatch(query, node);
-          if (s > 0) scored.push({ domain, node, score: s });
-        }
-      }
-    }
-
-    scored.sort((a, b) => b.score - a.score || b.node.score - a.node.score);
-    const top = scored.slice(0, 5);
-
-    if (top.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `No nodes found matching "${query}". Try kage_list_domains to see what's available.`,
-          },
-        ],
-      };
-    }
-
-    const lines = top.map((r, i) => {
-      const n = r.node;
-      return [
-        `### [${i + 1}] ${n.title}`,
-        `**Domain:** ${r.domain} | **Type:** ${n.type} | **Score:** ${n.score} | **Updated:** ${n.updated}`,
-        `**Tags:** ${(n.tags ?? []).join(", ")}`,
-        n.summary ? `**Summary:** ${n.summary}` : "",
-        `**Fetch:** domain="${r.domain}" node_id="${n.id}"`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `# kage-graph results for "${query}"\n\n${lines.join("\n\n---\n\n")}`,
-        },
-      ],
-    };
+    return { content: [{ type: "text", text: await kageSearchPublicGraph(query, domainFilter) }] };
   }
 
   if (name === "kage_fetch") {
     const domain = String(args?.domain ?? "");
     const nodeId = String(args?.node_id ?? "");
-    const content = await fetchText(
-      `${BASE_URL}/domains/${domain}/nodes/${nodeId}.md`
-    );
+    return { content: [{ type: "text", text: await kageFetchPublicGraphNode(domain, nodeId) }] };
+  }
+
+  if (name === "kage_queue") {
+    const project = String(args?.project_dir ?? "");
+    const unclaimedOnly = args?.unclaimed_only !== false;
+    const board = buildWorkBoard(project);
+    const items = board.items.filter((item) => (unclaimedOnly ? !item.claimed_by : true) && item.stage !== "done");
+    const lines = items.length
+      ? items.map((item) => [
+          `${item.stage.padEnd(9)} ${item.title}`,
+          `  id: ${item.work_id}`,
+          item.blast_paths.length ? `  touches: ${item.blast_paths.slice(0, 5).join(", ")}` : "  touches: (not grounded yet)",
+          item.claimed_by ? `  claimed by: ${item.claimed_by}` : "  unclaimed — kage_claim to take it",
+        ].join("\n"))
+      : ["No claimable work. Create some with `kage plan --intent \"…\"`."];
+    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+  }
+
+  if (name === "kage_brief") {
+    const result = workItemBrief(String(args?.project_dir ?? ""), String(args?.work_id ?? ""));
+    return { content: [{ type: "text", text: result.ok ? result.brief : result.errors.join("; ") }] };
+  }
+
+  if (name === "kage_claim") {
+    const project = String(args?.project_dir ?? "");
+    const workId = String(args?.work_id ?? "");
+    const actor = String(args?.actor ?? "").trim();
+    if (!actor) {
+      return { content: [{ type: "text", text: "A claim needs an actor — it records who is responsible for the item." }] };
+    }
+    const claimed = claimWorkItem(project, workId, actor);
+    if (!claimed.ok) {
+      return { content: [{ type: "text", text: `Claim refused: ${claimed.errors.join("; ")}` }] };
+    }
+    // The claim is also an EVENT: that is what moves the item to `claimed` on the board,
+    // in attention, and in `kage work`. Without it the lock exists and no surface knows.
+    try {
+      appendCommandEvent(project, { kind: "task.claimed", work_id: workId, actor });
+    } catch (error) {
+      return { content: [{ type: "text", text: `Claimed, but the event was refused: ${error instanceof Error ? error.message : String(error)}` }] };
+    }
+    const brief = workItemBrief(project, workId);
     return {
-      content: [{ type: "text", text: content }],
+      content: [{
+        type: "text",
+        text: `Claimed ${workId} as ${actor}.\n\n${brief.ok ? brief.brief : "(no brief available)"}`,
+      }],
     };
   }
 
   if (name === "kage_context") {
-    const projectDir = String(args?.project_dir ?? "");
-    const query = String(args?.query ?? "");
-    const limit = Number(args?.limit ?? 5);
-    // validate
-    const validation = validateProject(projectDir);
-    const validationText = validation.ok
-      ? "Memory healthy."
-      : `Warnings: ${validation.warnings.join("; ")}`;
-    // recall already includes the code graph + knowledge-graph facts (its "## Related Graph
-    // Facts" section). We deliberately do NOT query the graph a second time here: doing so
-    // emitted a near-duplicate dump of the same edges which, with no size cap, blew
-    // kage_context past 270k chars and overflowed the response.
-    const recallResult = recall(projectDir, query, limit, false);
-    const explicitTargets = [...arrayArg(args?.targets), ...filePathHints(query)];
-    const changedFiles = arrayArg(args?.changed_files);
-    const riskResult = explicitTargets.length || changedFiles.length ? kageRisk(projectDir, explicitTargets, changedFiles) : null;
-    const pathHints = filePathHints(query);
-    const dependencyResult = wantsDependencyPath(query) && pathHints.length >= 2
-      ? kageDependencyPath(projectDir, pathHints[0], pathHints[1])
-      : null;
-    const reconciliation = kageMemoryReconciliation(projectDir, {
+    const result = kageContext(String(args?.project_dir ?? ""), String(args?.query ?? ""), {
+      limit: Number(args?.limit ?? 5),
+      targets: arrayArg(args?.targets),
+      changedFiles: arrayArg(args?.changed_files),
       sessionId: typeof args?.session_id === "string" ? args.session_id : undefined,
-      limit: 5,
     });
-    const teammateBrief = kageTeammateBrief(projectDir, {
-      query,
-      targets: explicitTargets,
-      changedFiles,
-      recallResult,
-      riskResult,
-      reconciliation,
-    });
-    const learningLedger = typeof args?.session_id === "string" && args.session_id.trim()
-      ? kageSessionLearningLedger(projectDir, { sessionId: args.session_id, limit: 20 })
-      : null;
-    const body = [
-      recallResult.context_block,
-      teammateBrief.context_block,
-      learningLedger ? learningLedger.context_block : "",
-      riskResult ? riskContextBlock(riskResult) : "",
-      dependencyResult ? `\n## Dependency Path\n${dependencyResult.summary}${dependencyResult.path.length ? `\nPath: ${dependencyResult.path.join(" -> ")}` : ""}` : "",
-      reconciliation.unresolved_count ? `\n## Memory Reconciliation\n${reconciliation.agent_instruction}` : "",
-      `\n_${validationText}_`,
-    ].filter(Boolean).join("");
-    // Visible receipt: surface what the harness saved today so agents relay it. Kept
-    // outside the size cap so it always survives.
-    const gains = valueSummary(projectDir).today;
-    const gainsLine = `\n\nGains: ~${formatTokenCount(gains.tokens_saved)} tokens saved this session · stale memories withheld: ${gains.stale_withheld}`;
-    // Backstop: per-field clamping + graph dedup keep this compact in practice, but never
-    // let a pathological repo overflow the MCP response again. ~24k chars ≈ 6k tokens.
-    const MAX_CONTEXT_CHARS = 24000;
-    const cappedBody = body.length > MAX_CONTEXT_CHARS
-      ? `${body.slice(0, MAX_CONTEXT_CHARS)}\n\n_…kage_context truncated to keep the response within limits; narrow your query for more specific memory._`
-      : body;
     return {
-      content: [{ type: "text", text: `${cappedBody}${gainsLine}` }],
+      content: [{ type: "text", text: result.context_block }],
     };
   }
 
@@ -1320,11 +1366,11 @@ export async function callTool(name: string, args: Record<string, unknown> | und
       const docsSection = docsRecallSection(String(args?.project_dir ?? ""), String(args?.query ?? ""), 3);
       if (docsSection) result.context_block = `${result.context_block}\n\n${docsSection}`;
     }
-    // Visible receipt: in text mode, surface what this recall saved so the agent
-    // can relay it. Value is otherwise invisible; an unseen win is a churned user.
+    // Counts only: stale-withheld is an observable event; estimated token
+    // savings are not a measurement and do not ship.
     const receipt = result.value_receipt;
-    const gainsLine = receipt && (receipt.tokens_saved > 0 || receipt.stale_withheld > 0)
-      ? `\n\nGains: ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall${receipt.stale_withheld ? ` · stale memories withheld: ${receipt.stale_withheld}` : ""}`
+    const gainsLine = receipt && receipt.stale_withheld > 0
+      ? `\n\n_${receipt.stale_withheld} stale memor${receipt.stale_withheld === 1 ? "y" : "ies"} withheld by this recall (cited code changed)._`
       : "";
     return {
       content: [{ type: "text", text: args?.json || args?.explain ? JSON.stringify(result, null, 2) : `${result.context_block}${gainsLine}` }],
@@ -1533,6 +1579,75 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     };
   }
 
+  if (name === "kage_reverify") {
+    const result = reverifyMemory(String(args?.project_dir ?? ""), String(args?.packet_id ?? ""), {
+      evidence: typeof args?.evidence === "string" ? args.evidence : undefined,
+      verifiedBy: typeof args?.verified_by === "string" ? args.verified_by : undefined,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_list_work_items") {
+    const result = listWorkItems(String(args?.project_dir ?? ""), {
+      stage: typeof args?.stage === "string" ? (args.stage as WorkStage) : undefined,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+
+  if (name === "kage_claim_work_item") {
+    const result = claimWorkItem(String(args?.project_dir ?? ""), String(args?.packet_id ?? ""), String(args?.actor ?? ""));
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_link_implements") {
+    const result = linkImplements(
+      String(args?.project_dir ?? ""),
+      String(args?.output_packet_id ?? ""),
+      String(args?.proposal_packet_id ?? ""),
+      String(args?.evidence ?? ""),
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_transition_work_item") {
+    const toStage = String(args?.to_stage ?? "");
+    if (toStage === "done") {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: false,
+            errors: [
+              "kage_transition_work_item never performs the terminal in_review -> done transition. " +
+                "That approval gate is human-only (kage gate review) or token-authenticated (kage cloud approve) — " +
+                "not reachable through the MCP surface, on purpose.",
+            ],
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+    const result = transitionWorkStage(String(args?.project_dir ?? ""), String(args?.packet_id ?? ""), toStage as WorkStage, {
+      actor: String(args?.actor ?? ""),
+      evidence: typeof args?.evidence === "string" ? args.evidence : undefined,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
+    };
+  }
+
   if (name === "kage_conflicts") {
     const result = kageConflicts(String(args?.project_dir ?? ""));
     return {
@@ -1640,6 +1755,15 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_check") {
+    const report = driftCheck(String(args?.project_dir ?? ""), {
+      base: typeof args?.base === "string" ? args.base : undefined,
+    });
+    return {
+      content: [{ type: "text", text: formatCheckReport(report) }],
     };
   }
 
@@ -1849,6 +1973,32 @@ export async function callTool(name: string, args: Record<string, unknown> | und
         },
       ],
       isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_retrieve") {
+    const result = retrieveFromProject(
+      String(args?.project_dir ?? ""),
+      String(args?.retrieval_id ?? ""),
+      String(args?.task_id ?? ""),
+    );
+    if (result.status === 200 && result.body) {
+      // Return the exact original alongside its fingerprint. content_base64 preserves the bytes
+      // exactly (binary-safe); content is a best-effort UTF-8 view for text payloads.
+      const envelope = {
+        ok: true,
+        retrieval_id: result.headers["x-kage-retrieval-id"],
+        sha256: result.headers["x-kage-sha256"],
+        media_type: result.headers["content-type"],
+        byte_length: result.body.byteLength,
+        content: result.body.toString("utf8"),
+        content_base64: result.body.toString("base64"),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }] };
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ ok: false, status: result.status, error: result.error }, null, 2) }],
+      isError: true,
     };
   }
 

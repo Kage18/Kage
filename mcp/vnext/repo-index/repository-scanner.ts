@@ -1,0 +1,104 @@
+import type { RepositoryIdentity } from "../protocol/index.js";
+import { claudeRepositoryIdentity } from "../adapters/claude.js";
+import { codeGraphEvidence } from "./legacy-code-graph.js";
+import { DEFAULT_INDEX_KERNEL, type LegacyIndexKernel } from "./legacy-code-graph.js";
+import { contributorEvidence } from "./git-index.js";
+import { documentFacts } from "./document-index.js";
+import type {
+  FeatureProposal,
+  IndexedFact,
+  IndexedRelation,
+  RepositoryIndexSource,
+  RepositorySnapshot,
+} from "./source.js";
+
+export interface ScanOptions {
+  kernel?: LegacyIndexKernel;
+  // Optional explicit identity; otherwise derived from the code graph's repo state.
+  repository?: RepositoryIdentity;
+}
+
+function dedupeFacts(facts: IndexedFact[]): IndexedFact[] {
+  const byId = new Map<string, IndexedFact>();
+  for (const fact of facts) if (!byId.has(fact.fact_id)) byId.set(fact.fact_id, fact);
+  return [...byId.values()].sort((a, b) => (a.fact_id < b.fact_id ? -1 : a.fact_id > b.fact_id ? 1 : 0));
+}
+
+function dedupeRelations(relations: IndexedRelation[]): IndexedRelation[] {
+  const byKey = new Map<string, IndexedRelation>();
+  for (const relation of relations) {
+    const key = `${relation.from}\u0000${relation.type}\u0000${relation.to}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      // Merge evidence for the same logical edge so the edge stays single but keeps all evidence.
+      existing.evidence_fact_ids = [...new Set([...existing.evidence_fact_ids, ...relation.evidence_fact_ids])];
+      continue;
+    }
+    byKey.set(key, { ...relation, evidence_fact_ids: [...relation.evidence_fact_ids] });
+  }
+  return [...byKey.values()].sort((a, b) => {
+    const left = `${a.from}\u0000${a.type}\u0000${a.to}`;
+    const right = `${b.from}\u0000${b.type}\u0000${b.to}`;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
+// Feature grouping is an *inference*: a route, the handler it exposes, and any test that verifies
+// the handler probably form one feature. That guess is never a fact — it is emitted as a `proposed`
+// grouping the compiler must still verify before anything about it becomes injectable.
+function inferFeatureProposals(facts: IndexedFact[], relations: IndexedRelation[]): FeatureProposal[] {
+  const proposals: FeatureProposal[] = [];
+  const routeFacts = facts.filter((fact) => fact.kind === "route");
+  for (const route of routeFacts) {
+    const evidence = new Set<string>([route.fact_id]);
+    const exposes = relations.filter((relation) => relation.from === route.fact_id && relation.type === "exposes");
+    for (const edge of exposes) {
+      evidence.add(edge.to);
+      const verifiedBy = relations.filter((relation) => relation.from === edge.to && relation.type === "verified_by");
+      for (const testEdge of verifiedBy) {
+        for (const id of testEdge.evidence_fact_ids) evidence.add(id);
+      }
+    }
+    proposals.push({
+      kind: "feature",
+      name: route.name,
+      evidence_fact_ids: [...evidence].sort(),
+      trust_state: "proposed",
+    });
+  }
+  return proposals.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+function repositoryIdentity(projectDir: string, repoState: { branch: string | null; head: string | null }): RepositoryIdentity {
+  return claudeRepositoryIdentity(projectDir, { branch: repoState.branch, commit: repoState.head });
+}
+
+export async function scanRepository(projectDir: string, options: ScanOptions = {}): Promise<RepositorySnapshot> {
+  const kernel = options.kernel ?? DEFAULT_INDEX_KERNEL;
+  const graph = kernel.buildCodeGraph(projectDir);
+  const docs = kernel.buildDocsIndex(projectDir);
+  const contributors = kernel.kageContributors(projectDir);
+
+  const code = codeGraphEvidence(graph);
+  const documents = documentFacts(docs);
+  const git = contributorEvidence(contributors);
+
+  const facts = dedupeFacts([...code.facts, ...documents, ...git.facts]);
+  const relations = dedupeRelations([...code.relations, ...git.relations]);
+  const proposals = inferFeatureProposals(facts, relations);
+
+  return {
+    repository: options.repository ?? repositoryIdentity(projectDir, graph.repo_state),
+    facts,
+    relations,
+    proposals,
+  };
+}
+
+export class RepositoryScanner implements RepositoryIndexSource {
+  constructor(private readonly projectDir: string, private readonly options: ScanOptions = {}) {}
+
+  scan(): Promise<RepositorySnapshot> {
+    return scanRepository(this.projectDir, this.options);
+  }
+}

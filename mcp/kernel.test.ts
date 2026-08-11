@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, delimiter, join } from "node:path";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, join } from "node:path";
 import { availableParallelism, tmpdir } from "node:os";
 import vm from "node:vm";
 import {
   SETUP_AGENTS,
   benchmarkTaskComparison,
+  benchmarkSavings,
   benchmarkCodingMemoryQuality,
   benchmarkMemoryScale,
   benchmarkProject,
@@ -53,6 +54,8 @@ import {
   installAgentPolicy,
   kageCleanupCandidates,
   kageCapabilityAudit,
+  agentSurfaceCertificationGate,
+  REQUIRED_AUTOMATIC_SURFACES,
   kageContributors,
   kageContextSlots,
   kageDecisionIntelligence,
@@ -81,23 +84,34 @@ import {
   kageWorkspace,
   kageWorkspaceRecall,
   learn,
+  bootstrapStarterMemory,
+  codeIndexerStatus,
+  workItemBrief,
   loadApprovedPackets,
+  reanchorUnchangedPackets,
   loadPendingPackets,
   memoryInbox,
   mergePacketFiles,
+  conflictsDir,
+  teamMemoryReport,
+  readTeamLink,
+  writeTeamLink,
   ensurePacketMergeAttributes,
   PACKET_MERGE_ATTRIBUTE_LINE,
   observe,
   observationsDir,
+  pruneObservations,
   packetsDir,
   stripPrivateSpans,
   pendingDir,
+  minimalChangeReport,
   prCheck,
   prSummarize,
   proposeFromDiff,
   queryCodeGraph,
   queryGraph,
   recall,
+  recallRecencyScore,
   recallWithEmbeddings,
   buildDocsIndex,
   searchDocs,
@@ -115,6 +129,8 @@ import {
   formatStaleCatch,
   valueSummary,
   formatTokenCount,
+  formatValueGains,
+  formatRecallValueReceipt,
   recordFeedback,
   refreshProject,
   reverifyMemory,
@@ -130,6 +146,10 @@ import {
   setupDoctor,
   setContextSlot,
   supersedeMemory,
+  transitionWorkStage,
+  claimWorkItem,
+  linkImplements,
+  listWorkItems,
   structuralIndexDir,
   truthReport,
   truthScorecardSvg,
@@ -138,6 +158,7 @@ import {
   evaluateMemoryAdmission,
   isUngroundedConversationalCapture,
   verifyAgentActivation,
+  KAGE_HOOKS_VERSION,
   validatePacket,
   validateProject,
   writeCodeIndex,
@@ -287,6 +308,10 @@ test("installs and updates Codex agent policy idempotently", () => {
   const first = readFileSync(join(project, "AGENTS.md"), "utf8");
   assert.match(first, /Automatic Recall/);
   assert.match(first, /kage_context/);
+  // The no-tools fallback: an agent without the MCP server must still be pointed
+  // at the packet store itself (tracked in git, unlike the okf/ export), so a
+  // fresh clone inherits memory with zero install.
+  assert.match(first, /\.agent_memory\/packets\//);
 
   const second = installAgentPolicy(project);
   assert.equal(second.created, false);
@@ -450,6 +475,39 @@ test("recall uses BM25 lexical ranking for repeated body evidence", () => {
   assert.equal(result.results[0]?.packet.title, "Z repeated unrelated note");
   assert.equal(result.explanations?.[0]?.provider, "bm25");
   assert.equal((result.results[0]?.score_breakdown?.bm25 ?? 0) > 0, true);
+});
+
+test("natural-language filler words do not outrank a rare exact term", () => {
+  const project = tempProject();
+  // Decoy: a rich, high-quality packet whose only overlap with the query is filler
+  // words ("what", "can", "we"). Before the stopword + prior-gating fix, its
+  // unconditional quality/freshness/graph credit beat the packet literally titled
+  // with the queried term.
+  capture({
+    projectDir: project,
+    title: "What reviewers can check before we edit risky files",
+    summary: "Checklist explaining what we can verify before edits",
+    body: "Before you edit, check what the blast radius is and what tests cover it. We can gate risky edits. Evidence: reviewed against viewer risk page behavior. Verified by: npm test.",
+    type: "decision",
+    tags: ["review", "risk"],
+  });
+  capture({
+    projectDir: project,
+    title: "zling sprint outcome and integration stance",
+    summary: "zling is an external markdown memory tool; interop over replace",
+    body: "zling stores agent memory as markdown. Our stance: import zling bundles instead of competing head-on. Verified by: gh queries.",
+    type: "reference",
+  });
+
+  // Hooks pass raw prompts as queries — the rare term must win despite the filler.
+  const result = recall(project, "what is zling? can we replace it", 3, true);
+  assert.equal(result.results[0]?.packet.title, "zling sprint outcome and integration stance");
+  // The decoy matches nothing but stopwords, so gated priors must not float it.
+  const decoy = result.results.find((entry) => entry.packet.title.startsWith("What reviewers"));
+  if (decoy) {
+    assert.equal((decoy.score_breakdown?.bm25 ?? 0) === 0, true);
+    assert.equal(decoy.score < (result.results[0]?.score ?? 0), true);
+  }
 });
 
 test("recall tokenizes multilingual memory without requiring spaces", () => {
@@ -684,6 +742,181 @@ test("memory supersession records lineage and removes old packet from active rec
   assert.equal(lineage.totals.chains, 1);
   assert.ok(lineage.chains.some((chain) => chain.current_packet_id === replacement.packet!.id && chain.superseded_packet_ids.includes(oldPacket.packet!.id)));
   assert.ok(lineage.recommendations.some((item) => item.includes("current replacement")));
+});
+
+test("capturing a proposal auto-initializes stage: proposed; other types get no stage", () => {
+  const project = tempProject();
+  const proposal = capture({
+    projectDir: project,
+    title: "Add retry logic to sync client",
+    body: "We should add retry logic because transient network errors currently fail sync silently.",
+    type: "proposal",
+  });
+  assert.equal(proposal.packet?.stage, "proposed");
+  assert.equal(proposal.packet?.claimed_by, undefined);
+
+  const decision = capture({
+    projectDir: project,
+    title: "Use idempotency keys for retries",
+    body: "Decision: retries use idempotency keys to avoid double-charging.",
+    type: "decision",
+  });
+  assert.equal(decision.packet?.stage, undefined);
+});
+
+test("claimWorkItem: proposed -> claimed sets claimed_by, and blocks a second claim", () => {
+  const project = tempProject();
+  const proposal = capture({
+    projectDir: project,
+    title: "Add retry logic to sync client",
+    body: "We should add retry logic to the sync client for transient network errors.",
+    type: "proposal",
+  });
+  const packetId = proposal.packet!.id;
+
+  const claim = claimWorkItem(project, packetId, "agent-a");
+  assert.equal(claim.ok, true);
+  assert.equal(claim.claimed_by, "agent-a");
+
+  const items = listWorkItems(project);
+  const item = items.find((i) => i.id === packetId);
+  assert.equal(item?.stage, "claimed");
+  assert.equal(item?.claimed_by, "agent-a");
+
+  const secondClaim = claimWorkItem(project, packetId, "agent-b");
+  assert.equal(secondClaim.ok, false);
+  assert.match(secondClaim.errors.join(" "), /already claimed by agent-a/i);
+});
+
+test("transitionWorkStage rejects an invalid jump and enforces the transition table", () => {
+  const project = tempProject();
+  const proposal = capture({
+    projectDir: project,
+    title: "Add caching layer",
+    body: "We should add a caching layer for repeated recall queries.",
+    type: "proposal",
+  });
+  const packetId = proposal.packet!.id;
+
+  const invalidJump = transitionWorkStage(project, packetId, "done", { actor: "agent-a" });
+  assert.equal(invalidJump.ok, false);
+  assert.match(invalidJump.errors.join(" "), /Cannot transition proposed -> done/);
+
+  const nonProposalType = capture({ projectDir: project, title: "A decision", body: "Some decision body text here.", type: "decision" });
+  const nonProposalResult = transitionWorkStage(project, nonProposalType.packet!.id, "claimed", { actor: "agent-a" });
+  assert.equal(nonProposalResult.ok, false);
+  assert.match(nonProposalResult.errors.join(" "), /Only proposal packets carry a work stage/);
+});
+
+test("transitionWorkStage blocks the claimant from self-approving to done, allows a different actor", () => {
+  const project = tempProject();
+  const proposal = capture({
+    projectDir: project,
+    title: "Add rate limiting",
+    body: "We should add rate limiting to the proxy to avoid hammering the upstream API.",
+    type: "proposal",
+  });
+  const packetId = proposal.packet!.id;
+  claimWorkItem(project, packetId, "agent-a");
+  transitionWorkStage(project, packetId, "in_review", { actor: "agent-a", evidence: "implementation done" });
+
+  const selfApprove = transitionWorkStage(project, packetId, "done", { actor: "agent-a" });
+  assert.equal(selfApprove.ok, false);
+  assert.match(selfApprove.errors.join(" "), /self_transition_blocked/);
+
+  const humanApprove = transitionWorkStage(project, packetId, "done", { actor: "a-human-reviewer" });
+  assert.equal(humanApprove.ok, true);
+  assert.equal(humanApprove.from_stage, "in_review");
+  assert.equal(humanApprove.to_stage, "done");
+});
+
+test("in_review -> claimed (send-back) preserves the original claimant, does not reassign to the reviewer", () => {
+  const project = tempProject();
+  const proposal = capture({
+    projectDir: project,
+    title: "Add structured logging",
+    body: "We should add structured logging to the daemon for easier debugging.",
+    type: "proposal",
+  });
+  const packetId = proposal.packet!.id;
+  claimWorkItem(project, packetId, "agent-a");
+  transitionWorkStage(project, packetId, "in_review", { actor: "agent-a" });
+
+  const sentBack = transitionWorkStage(project, packetId, "claimed", { actor: "a-human-reviewer", evidence: "needs changes" });
+  assert.equal(sentBack.ok, true);
+  const items = listWorkItems(project);
+  const item = items.find((i) => i.id === packetId);
+  assert.equal(item?.claimed_by, "agent-a", "send-back must not reassign the claim to the reviewer");
+});
+
+test("linkImplements creates bidirectional edges and auto-advances claimed -> in_review", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "sync-client.ts"), "export function sync() { return true; }\n", "utf8");
+  const proposal = capture({
+    projectDir: project,
+    title: "Add retry logic to sync client",
+    body: "We should add retry logic because transient network errors currently fail sync silently.",
+    type: "proposal",
+  });
+  const proposalId = proposal.packet!.id;
+  claimWorkItem(project, proposalId, "agent-a");
+
+  const output = capture({
+    projectDir: project,
+    title: "Sync client retry logic",
+    body: "Implemented retry logic in the sync client, 3 attempts, exponential backoff.",
+    type: "decision",
+    paths: ["src/sync-client.ts"],
+  });
+  const outputId = output.packet!.id;
+
+  const link = linkImplements(project, outputId, proposalId, "src/sync-client.ts, tests green");
+  assert.equal(link.ok, true);
+  assert.equal(link.auto_advanced, true);
+
+  const items = listWorkItems(project);
+  const proposalItem = items.find((i) => i.id === proposalId);
+  assert.equal(proposalItem?.stage, "in_review");
+
+  const approved = loadApprovedPackets(project);
+  const outputPacket = approved.find((p) => p.id === outputId)!;
+  const proposalPacket = approved.find((p) => p.id === proposalId)!;
+  assert.equal(outputPacket.edges.some((e) => e.relation === "implements" && e.to === proposalId), true);
+  assert.equal(proposalPacket.edges.some((e) => e.relation === "implemented_by" && e.to === outputId), true);
+});
+
+test("linkImplements refuses to link against a non-proposal packet, and refuses self-linking", () => {
+  const project = tempProject();
+  const decisionA = capture({ projectDir: project, title: "Decision A", body: "Body A text here for the test.", type: "decision" });
+  const decisionB = capture({ projectDir: project, title: "Decision B", body: "Body B text here for the test.", type: "decision" });
+  const wrongType = linkImplements(project, decisionA.packet!.id, decisionB.packet!.id, "evidence");
+  assert.equal(wrongType.ok, false);
+  assert.match(wrongType.errors.join(" "), /not proposal/);
+
+  const proposal = capture({ projectDir: project, title: "A proposal", body: "We should add feature X to the system.", type: "proposal" });
+  const selfLink = linkImplements(project, proposal.packet!.id, proposal.packet!.id, "evidence");
+  assert.equal(selfLink.ok, false);
+  assert.match(selfLink.errors.join(" "), /cannot implement itself/);
+});
+
+test("listWorkItems only returns proposal packets and filters by stage", () => {
+  const project = tempProject();
+  capture({ projectDir: project, title: "Proposal one", body: "We should add feature one to the system.", type: "proposal" });
+  const p2 = capture({ projectDir: project, title: "Proposal two", body: "We should add feature two to the system.", type: "proposal" });
+  capture({ projectDir: project, title: "Unrelated decision", body: "Some decision body text goes here for the test.", type: "decision" });
+  claimWorkItem(project, p2.packet!.id, "agent-a");
+
+  const all = listWorkItems(project);
+  assert.equal(all.length, 2);
+  assert.equal(all.every((item) => item.id !== undefined), true);
+
+  const claimed = listWorkItems(project, { stage: "claimed" });
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0].id, p2.packet!.id);
+
+  const proposed = listWorkItems(project, { stage: "proposed" });
+  assert.equal(proposed.length, 1);
 });
 
 test("memory lineage report flags superseded packets without replacement links", () => {
@@ -2182,6 +2415,46 @@ test("setup generates all-agent MCP configuration and writes Codex config idempo
   const observeHookPath = join(home, ".claude", "kage", "hooks", "observe.sh");
   execFileSync("bash", ["-n", observeHookPath]);
   execFileSync("bash", ["-n", join(home, ".claude", "kage", "hooks", "stop.sh")]);
+  // The ambient loop must never silently die: every hook resolves the CLI via
+  // PATH -> baked install path -> package runner (npx installs put nothing on PATH).
+  for (const hookName of ["session-start.sh", "observe.sh", "stop.sh"]) {
+    const hookText = readFileSync(join(home, ".claude", "kage", "hooks", hookName), "utf8");
+    assert.match(hookText, /--package=@kage-core\/kage-graph-mcp kage/, `${hookName} missing package-runner fallback`);
+    assert.match(hookText, /\[\[ -f ".*cli\.js" \]\]/, `${hookName} missing baked cli path fallback`);
+  }
+  // The vNext adapter ships with the install: one fail-open script that talks to the local runtime
+  // instead of spawning a Kage CLI per hook. Legacy scripts hand over to it only when kaged is up.
+  const vnextAdapterPath = join(home, ".claude", "kage", "hooks", "kage-vnext-adapter.sh");
+  const vnextAdapter = readFileSync(vnextAdapterPath, "utf8");
+  execFileSync("bash", ["-n", vnextAdapterPath]);
+  // Evidence gets 150 ms, context 500 ms — the two budgets Phase A commits to.
+  assert.match(vnextAdapter, /curl -sf --max-time 0\.15/);
+  // The context call also MEASURES itself (%{time_total}) and keeps the response code, because a
+  // context delivery records the real composition latency and the real failure reason.
+  assert.match(vnextAdapter, /curl -s -o "\$3" -w '%\{http_code\} %\{time_total\}' --max-time 0\.5 /);
+  assert.match(vnextAdapter, /exit 0/);
+  // Every context attempt leaves a delivery record — the evidence that attachment happened at all.
+  assert.match(vnextAdapter, /SPOOL="\$RUNTIME_DIR\/deliveries"/);
+  assert.match(vnextAdapter, /"status": "failed_open"/, "a dead daemon is recorded, not silently dropped");
+  // The adapter is stamped like every other hook, so a stale copy on disk is reported, not run.
+  assert.match(vnextAdapter, new RegExp(`^# kage-hooks-v${KAGE_HOOKS_VERSION}$`, "m"));
+  for (const hookName of ["session-start.sh", "observe.sh", "stop.sh", "kage-read-context.sh", "kage-edit-context.sh"]) {
+    const guarded = readFileSync(join(home, ".claude", "kage", "hooks", hookName), "utf8");
+    assert.match(guarded, /KAGE_VNEXT_DIR="\$CWD\/\.agent_memory\/daemon\/vnext"/, `${hookName} missing the vNext stand-down guard`);
+    // The guard is event-aware: it may only hand over events the adapter actually handles, and it
+    // must verify the runtime is ALIVE (os.kill) rather than trusting a leftover status file.
+    assert.match(guarded, /KAGE_VNEXT_ADAPTER_EVENTS=/, `${hookName} stands down without checking the event`);
+    assert.match(guarded, /os\.kill\(pid, 0\)/, `${hookName} trusts a status file without checking liveness`);
+  }
+  // Stop, PreCompact and SubagentStop have no adapter handler: they must never appear in the
+  // hand-over set, or refresh, pr summarize, the reconcile gate and distillation all die silently.
+  const standDownEvents = vnextAdapter.length && readFileSync(join(home, ".claude", "kage", "hooks", "observe.sh"), "utf8")
+    .match(/KAGE_VNEXT_ADAPTER_EVENTS="([^"]*)"/);
+  assert.ok(standDownEvents);
+  for (const orphan of ["Stop", "PreCompact", "SubagentStop"]) {
+    assert.ok(!standDownEvents[1].includes(` ${orphan} `), `${orphan} has no adapter handler and must not be handed over`);
+  }
+
   // PreToolUse(Read) memory injection: dedicated script + a "Read"-matcher hook entry.
   const readContextHookPath = join(home, ".claude", "kage", "hooks", "kage-read-context.sh");
   const readContextHook = readFileSync(readContextHookPath, "utf8");
@@ -2189,7 +2462,9 @@ test("setup generates all-agent MCP configuration and writes Codex config idempo
   assert.match(readContextHook, /kage file-context --project "\$CWD" --path "\$FILE_PATH"/);
   assert.match(readContextHook, /hookSpecificOutput/);
   assert.match(readContextHook, /additionalContext/);
-  assert.equal(claudeSettings.hooks.PreToolUse.length, 3);
+  // Three legacy entries plus the vNext adapter, which is appended last and never displaces them.
+  assert.equal(claudeSettings.hooks.PreToolUse.length, 4);
+  assert.match(claudeSettings.hooks.PreToolUse[3].hooks[0].command, /kage-vnext-adapter\.sh/);
   assert.equal(claudeSettings.hooks.PreToolUse[1].matcher, "Read");
   assert.match(claudeSettings.hooks.PreToolUse[1].hooks[0].command, /kage-read-context\.sh/);
   // Enforcement: recall before an edit. Dedicated script + an Edit|Write|MultiEdit matcher.
@@ -2252,7 +2527,32 @@ esac
   assert.equal(cliVerify.checks.recall_works, true);
   const claudeVerify = verifyAgentActivation("claude-code", project, { homeDir: home });
   assert.equal(claudeVerify.checks.ambient_hooks_present, true);
+  assert.equal(claudeVerify.checks.ambient_hooks_supported, true);
   assert.equal(claudeVerify.hook_summary?.missing.length, 0);
+  assert.equal(claudeVerify.hook_summary?.ready, true);
+
+  // The adapter is wired into six hook events. If it is missing, bash exits 127 on every prompt;
+  // if it is stale, it runs last release's behavior. Either way "ready" would be a lie, so the
+  // adapter is verified exactly like the five legacy scripts.
+  const adapterPath = join(home, ".claude", "kage", "hooks", "kage-vnext-adapter.sh");
+  assert.ok(claudeVerify.hook_summary?.script_paths.includes(adapterPath), "the adapter is a verified script");
+  const adapterBody = readFileSync(adapterPath, "utf8");
+  writeFileSync(adapterPath, adapterBody.replace(`# kage-hooks-v${KAGE_HOOKS_VERSION}`, "# kage-hooks-v1"), "utf8");
+  const staleAdapter = verifyAgentActivation("claude-code", project, { homeDir: home, serverPath: "/tmp/kage/dist/index.js" });
+  assert.equal(staleAdapter.hook_summary?.outdated.includes("kage-vnext-adapter.sh"), true, "a stale adapter is reported");
+  assert.equal(staleAdapter.hook_summary?.ready, false, "verify-agent never says ready with a stale adapter");
+  unlinkSync(adapterPath);
+  const missingAdapter = verifyAgentActivation("claude-code", project, { homeDir: home, serverPath: "/tmp/kage/dist/index.js" });
+  assert.equal(missingAdapter.hook_summary?.missing.includes("kage-vnext-adapter.sh"), true, "a missing adapter is reported");
+  assert.equal(missingAdapter.hook_summary?.ready, false, "verify-agent never says ready without the adapter");
+  writeFileSync(adapterPath, adapterBody, { mode: 0o755 });
+
+  // Cursor has no hook mechanism at all — ambient_hooks_present is vacuously true
+  // (nothing was required), but ambient_hooks_supported must say so isn't the same
+  // as claude-code's real, checked automation.
+  const cursorVerify = verifyAgentActivation("cursor", project, { homeDir: home });
+  assert.equal(cursorVerify.checks.ambient_hooks_present, true);
+  assert.equal(cursorVerify.checks.ambient_hooks_supported, false);
 
   const brokenClaudeHome = mkdtempSync(join(tmpdir(), "kage-broken-claude-home-"));
   mkdirSync(brokenClaudeHome, { recursive: true });
@@ -2271,6 +2571,56 @@ esac
 
   const mcpVerify = verifyAgentActivation("codex", project, { homeDir: home, mcpToolReachable: true });
   assert.equal(mcpVerify.status, "ready");
+});
+
+test("setup --write actually writes config for JSON-config agents, not just codex/claude-code", () => {
+  const project = tempProject();
+  const home = mkdtempSync(join(tmpdir(), "kage-home-"));
+
+  // Home-scoped JSON agents: merge into ~/... without clobbering pre-existing content.
+  const claudeDesktopPath = join(home, ".config", "claude", "claude_desktop_config.json");
+  mkdirSync(dirname(claudeDesktopPath), { recursive: true });
+  writeFileSync(claudeDesktopPath, JSON.stringify({ mcpServers: { "other-tool": { command: "foo" } }, unrelatedSetting: true }), "utf8");
+  const claudeDesktop = setupAgent("claude-desktop", project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+  assert.equal(claudeDesktop.write_supported, true);
+  assert.equal(claudeDesktop.wrote, true);
+  const claudeDesktopConfig = JSON.parse(readFileSync(claudeDesktopPath, "utf8"));
+  assert.equal(claudeDesktopConfig.mcpServers.kage.command, "node");
+  assert.equal(claudeDesktopConfig.mcpServers["other-tool"].command, "foo", "must not clobber a pre-existing MCP server entry");
+  assert.equal(claudeDesktopConfig.unrelatedSetting, true, "must not clobber unrelated top-level config");
+
+  for (const agent of ["cursor", "windsurf", "cline", "roo-code", "kilo-code", "openclaw", "copilot", "hermes"] as const) {
+    const r = setupAgent(agent, project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+    assert.equal(r.write_supported, true, `${agent} should be write-capable`);
+    assert.equal(r.wrote, true, `${agent} should report wrote:true`);
+    assert.equal(r.config_path !== null, true);
+    const written = JSON.parse(readFileSync(r.config_path as string, "utf8"));
+    assert.equal(written.mcpServers.kage.command, "node", `${agent} config missing kage server entry`);
+  }
+
+  // Project-scoped: opencode uses a different top-level key (`mcp`, not `mcpServers`).
+  const opencode = setupAgent("opencode", project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+  assert.equal(opencode.wrote, true);
+  const opencodeConfig = JSON.parse(readFileSync(join(project, "opencode.json"), "utf8"));
+  assert.equal(opencodeConfig.mcp.kage.type, "stdio");
+  assert.equal(opencodeConfig.mcp.kage.command, "node");
+
+  // Deliberately excluded: goose (real YAML, no safe writer) and generic-mcp (no known path).
+  const goose = setupAgent("goose", project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+  assert.equal(goose.write_supported, false);
+  assert.equal(goose.wrote, false);
+  assert.equal(existsSync(join(home, ".config", "goose", "config.yaml")), false);
+  const genericMcp = setupAgent("generic-mcp", project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+  assert.equal(genericMcp.write_supported, false);
+  assert.equal(genericMcp.wrote, false);
+
+  // gemini-cli: writes by invoking the `gemini` CLI itself, not a config file. In this
+  // sandboxed test env `gemini` is not on PATH, so it must fail gracefully with a
+  // warning rather than throwing — write_supported still reflects the mechanism exists.
+  const geminiCli = setupAgent("gemini-cli", project, { serverPath: "/tmp/kage/dist/index.js", homeDir: home, write: true });
+  assert.equal(geminiCli.write_supported, true);
+  assert.equal(geminiCli.wrote, false);
+  assert.equal(geminiCli.warnings.some((w) => w.includes("gemini")), true);
 });
 
 test("git hook manager installs status and uninstall while preserving existing hooks", () => {
@@ -2530,11 +2880,24 @@ test("auto distill quietly skips empty sessions and sessions where the agent alr
   assert.equal(skipped.skipped_reason, "session_already_captured");
   assert.equal(loadPendingPackets(project).length, 0);
 
-  // Manual distill is unchanged: candidates are written as approved repo memory without the auto tag.
+  // Manual distill is safe by default now: it dedupes like auto (SessionEnd +
+  // PreCompact + SubagentStop can all fire for one session), and drafts are
+  // born pending — nothing lands approved without review or auto-promotion.
   const manual = distillSession(project, "captured-session");
   assert.equal(manual.mode, "manual");
-  const packet = manual.candidates[0]?.packet;
-  assert.equal(packet?.status, "approved");
+  assert.equal(manual.skipped_reason, "session_already_captured");
+
+  assert.equal(observe(project, {
+    type: "command_result",
+    session_id: "manual-session",
+    command: "npm run lint",
+    exit_code: 0,
+    summary: "Run this because CI requires lint before push; it guards src/index.ts formatting.",
+  }).ok, true);
+  const manualFresh = distillSession(project, "manual-session");
+  assert.equal(manualFresh.candidates.length > 0, true);
+  const packet = manualFresh.candidates[0]?.packet;
+  assert.equal(packet?.status, "pending");
   assert.equal(packet?.tags.includes("auto-distill"), false);
 });
 
@@ -2819,6 +3182,29 @@ test("recall explanations, quality, and benchmark expose proof metrics", () => {
   assert.equal(comparison.evidence.kage_memory.length > 0, true);
 });
 
+test("savings benchmark yields a reproducible percent from auto-derived queries", () => {
+  const project = tempProject();
+  capture({
+    projectDir: project,
+    title: "Payment retry is idempotent via the ledger key",
+    summary: "Retries dedupe on ledger idempotency key",
+    body: "processPayment in src/pay.ts must pass the ledger idempotency key so retries dedupe. Verified by: npm test.",
+    type: "decision",
+    allowMissingPaths: true,
+  });
+  const a = benchmarkSavings(project, { queries: 6 });
+  assert.equal(a.queries > 0, true);
+  assert.equal(a.reduction_percent >= 0 && a.reduction_percent <= 100, true);
+  // savedTotal is floored at 0, so the percent is always well-formed even on a trivial
+  // temp repo where the compact context can exceed the tiny baseline (real repos invert this).
+  assert.equal(a.tokens_saved_total >= 0, true);
+  assert.equal(a.per_query.length, a.queries);
+  // The whole credibility claim is determinism: same commit -> identical number.
+  const b = benchmarkSavings(project, { queries: 6 });
+  assert.equal(a.reduction_percent, b.reduction_percent);
+  assert.deepEqual(a.per_query.map((q) => q.query), b.per_query.map((q) => q.query));
+});
+
 test("coding memory quality benchmark is package-callable", () => {
   const report = benchmarkCodingMemoryQuality({ packetsPerTopic: 2, distractorsPerTopic: 1, topK: 5 });
 
@@ -2989,6 +3375,29 @@ test("learn captures actual session learning with inferred type", () => {
   assert.match(result.packet?.body ?? "", /Verified by: npm test/);
   assert.match(result.packet?.context?.why ?? "", /cause and rationale/);
   assert.equal(result.packet?.context?.verification, "npm test");
+});
+
+test("learn infers the proposal type from prospective feature-idea language, distinct from decision", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "mcp"), { recursive: true });
+  writeFileSync(join(project, "mcp", "index.ts"), "", "utf8");
+  const result = learn({
+    projectDir: project,
+    learning: "Feature proposal: we should add a lightweight webhook-retry queue to mcp/index.ts so failed deliveries are replayed instead of dropped.",
+    paths: ["mcp/index.ts"],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.packet?.type, "proposal");
+
+  // "diff proposal" (referring to the existing propose-from-diff mechanism) must
+  // not false-positive into type:proposal — this is the same text the sibling
+  // "learn captures actual session learning with inferred type" test above uses.
+  const decisionResult = learn({
+    projectDir: project,
+    learning: "Decision: agents should use kage_learn for actual session discoveries and diff proposal only as a fallback. Why: session learnings can capture cause and rationale that raw diffs cannot.",
+    paths: ["mcp/index.ts"],
+  });
+  assert.equal(decisionResult.packet?.type, "decision");
 });
 
 test("graph command extraction ignores prose and file references", () => {
@@ -3191,6 +3600,26 @@ test("observe sanitizes private spans before writing observation events", () => 
   assert.equal(stored.length, 1);
 });
 
+test("refresh prunes observations past the retention window but keeps recent ones", () => {
+  const project = tempProject();
+  const oldResult = observe(project, { type: "user_prompt", session_id: "s1", text: "an old prompt from a finished session" });
+  const newResult = observe(project, { type: "user_prompt", session_id: "s2", text: "a fresh prompt from the current session" });
+  assert.equal(oldResult.stored, true);
+  assert.equal(newResult.stored, true);
+  // Backdate the first record past the 30-day default window.
+  const past = new Date(Date.now() - 45 * 86_400_000);
+  utimesSync(oldResult.path!, past, past);
+
+  const { pruned } = pruneObservations(project);
+  assert.equal(pruned, 1);
+  assert.equal(existsSync(oldResult.path!), false);
+  assert.equal(existsSync(newResult.path!), true);
+  // 0 disables pruning entirely.
+  utimesSync(newResult.path!, past, past);
+  assert.equal(pruneObservations(project, 0).pruned, 0);
+  assert.equal(existsSync(newResult.path!), true);
+});
+
 test("non-tagged capture text is stored untouched by the private sanitizer", () => {
   const project = tempProject();
   const body = "Plain reference text with angle brackets like Array<string> and <div> markup.";
@@ -3253,6 +3682,26 @@ test("project validation ignores retired packet quality warnings", () => {
   const validation = validateProject(project);
   assert.equal(validation.ok, true);
   assert.equal(validation.warnings.some((warning) => warning.includes("none of the referenced paths exist")), false);
+});
+
+test("change memory grounds only to git-tracked paths, never untracked local dirs", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  writeFileSync(join(project, "tracked.ts"), "export const tracked = true;\n", "utf8");
+  execFileSync("git", ["add", "tracked.ts"], { cwd: project, stdio: "ignore" });
+  // Untracked local tooling — present in a working tree, absent from every clean checkout.
+  // Citing it made the packet hard-stale in CI ("none of the referenced paths exist").
+  mkdirSync(join(project, ".superpowers", "scratch"), { recursive: true });
+  writeFileSync(join(project, ".superpowers", "scratch", "state.html"), "<p>local</p>", "utf8");
+
+  const result = proposeFromDiff(project);
+  assert.equal(result.ok, true);
+  assert.ok(result.packet!.paths.includes("tracked.ts"), "tracked changes ground the packet");
+  assert.equal(
+    result.packet!.paths.some((path) => path.startsWith(".superpowers/")),
+    false,
+    "untracked paths must never be grounding — they do not exist in a clean checkout",
+  );
 });
 
 test("project validation ignores duplicate warnings between generated branch change memories", () => {
@@ -3454,6 +3903,10 @@ test("diff proposal from a package directory stores project-relative paths", () 
   commitAll(root, "initial");
   const project = join(root, "packages", "ai");
   writeFileSync(join(project, "src", "client.ts"), "export const client = true;\n", "utf8");
+  // Grounding is commit-adjacent: a new file grounds the proposal once it is staged to
+  // travel with the commit. A never-added file is exactly the phantom-path class that
+  // made a shipped packet hard-stale in CI.
+  execFileSync("git", ["add", "-A"], { cwd: root, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
 
@@ -3484,12 +3937,17 @@ test("diff proposal includes repo memory packet-only changes", () => {
     paths: ["README.md"],
   });
   assert.equal(learned.ok, true);
+  // Stage the new packet so it is commit-adjacent — unstaged brand-new files no longer
+  // ground a proposal (they would not exist in the checkout the packet ships with).
+  execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore" });
 
   const result = proposeFromDiff(project);
   assert.equal(result.ok, true);
   assert.equal(result.changedFiles.some((path) => path.startsWith(".agent_memory/packets/")), true);
   assert.equal(result.packet?.paths.some((path) => path.startsWith(".agent_memory/packets/")), true);
-  assert.match(result.summary?.diff_stat ?? "", /\.agent_memory\/packets\//);
+  // git --stat abbreviates long staged paths (".../gotcha-release-…md"), so match the
+  // packet's filename rather than the directory prefix.
+  assert.match(result.summary?.diff_stat ?? "", /gotcha-release-workflow-gotcha/);
 });
 
 test("diff proposal stat includes untracked files alongside tracked diffs", () => {
@@ -3871,6 +4329,95 @@ test("pr check marks graphs stale when source content changes after refresh", ()
   assert.match(check.errors.join("\n"), /graph artifacts/);
 });
 
+// Write a minimal, legible vNext config that enables the Minimal Change Guard for a test project.
+function writeMinimalChangeConfig(
+  project: string,
+  minimal_change: { enabled: boolean; mode: string; enforced_rules?: string[] },
+): void {
+  const dir = join(project, ".agent_memory", "daemon", "vnext");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify(
+      { vnext: { protocol_version: 1, runtime: "audit", gateway: "audit", adapters: [], minimal_change } },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+test("minimal change guard is absent from pr check by default (opt-in only)", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "package.json"), JSON.stringify({ name: "demo", dependencies: {} }), "utf8");
+  writeFileSync(join(project, "src", "runner.js"), "export function run() { return 'ok'; }\n", "utf8");
+  commitAll(project, "initial");
+  refreshProject(project);
+
+  const check = prCheck(project);
+  // No vNext policy config => the guard does not participate at all.
+  assert.equal(check.minimal_change, undefined);
+  // And the standalone helper returns null when disabled.
+  assert.equal(minimalChangeReport(project), null);
+});
+
+test("minimal change guard surfaces advisory findings as warnings, never errors", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "package.json"), JSON.stringify({ name: "demo", dependencies: { alpha: "^1.0.0", zeta: "^2.0.0" } }, null, 2), "utf8");
+  writeFileSync(join(project, "src", "runner.js"), "export function run() { return 'ok'; }\n", "utf8");
+  commitAll(project, "initial");
+  refreshProject(project);
+  writeMinimalChangeConfig(project, { enabled: true, mode: "advisory" });
+
+  // Add a brand-new dependency in the working tree — a deterministic new_dependency finding.
+  writeFileSync(
+    join(project, "package.json"),
+    JSON.stringify({ name: "demo", dependencies: { alpha: "^1.0.0", "left-pad": "^1.3.0", zeta: "^2.0.0" } }, null, 2),
+    "utf8",
+  );
+
+  const report = minimalChangeReport(project);
+  assert.ok(report, "expected a report when the guard is enabled");
+  assert.equal(report?.enabled, true);
+  assert.equal(report?.findings.some((finding) => finding.kind === "new_dependency"), true);
+  assert.equal(report?.ok, true); // advisory never fails
+
+  const check = prCheck(project);
+  assert.ok(check.minimal_change, "pr check should attach the report");
+  // Advisory findings contribute a warning, never an error.
+  assert.equal(check.errors.some((error) => error.includes("Minimal Change Guard")), false);
+  assert.equal(check.warnings.some((warning) => warning.includes("Minimal Change Guard")), true);
+});
+
+test("minimal change guard in enforced mode fails pr check for a selected deterministic rule", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "package.json"), JSON.stringify({ name: "demo", dependencies: { alpha: "^1.0.0", zeta: "^2.0.0" } }, null, 2), "utf8");
+  writeFileSync(join(project, "src", "runner.js"), "export function run() { return 'ok'; }\n", "utf8");
+  commitAll(project, "initial");
+  refreshProject(project);
+  writeMinimalChangeConfig(project, { enabled: true, mode: "enforced", enforced_rules: ["new_dependency"] });
+
+  writeFileSync(
+    join(project, "package.json"),
+    JSON.stringify({ name: "demo", dependencies: { alpha: "^1.0.0", "left-pad": "^1.3.0", zeta: "^2.0.0" } }, null, 2),
+    "utf8",
+  );
+
+  const report = minimalChangeReport(project);
+  assert.equal(report?.ok, false);
+  assert.deepEqual(report?.blocking.map((finding) => finding.kind), ["new_dependency"]);
+
+  const check = prCheck(project);
+  assert.equal(check.ok, false);
+  assert.equal(check.errors.some((error) => error.includes("Minimal Change Guard (enforced)")), true);
+});
+
 test("memory reconciliation makes changed linked memory an agent responsibility", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
@@ -3901,6 +4448,218 @@ test("memory reconciliation makes changed linked memory an agent responsibility"
   assert.deepEqual(report.items[0]?.changed_paths, ["src/retry.js"]);
   assert.match(report.agent_instruction, /kage_learn|kage_supersede/);
   assert.doesNotMatch(report.agent_instruction, /ask the user/i);
+});
+
+test("a work item brief carries the memory and blast radius an agent needs to start", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "retry.ts"), "export const retryLimit = 3;\n", "utf8");
+
+  // Existing knowledge the brief must surface rather than let an agent rediscover.
+  assert.equal(capture({
+    projectDir: project,
+    title: "Retry limit is 3 because the vendor rate-limits above that",
+    body: "We set retryLimit to 3 because the payment vendor starts rate-limiting at 4 concurrent retries, which caused the January incident.",
+    type: "decision",
+    paths: ["src/retry.ts"],
+  }).ok, true);
+
+  const proposal = capture({
+    projectDir: project,
+    title: "Make the retry limit configurable per tenant",
+    body: "We should allow each tenant to configure retryLimit so high-volume tenants can tune it.",
+    type: "proposal",
+    paths: ["src/retry.ts"],
+  });
+  assert.equal(proposal.ok, true);
+
+  const brief = workItemBrief(project, proposal.packet!.id);
+  assert.equal(brief.ok, true);
+  assert.equal(brief.work_item?.id, proposal.packet!.id);
+  assert.equal(brief.stage, "proposed");
+  // The whole point: what the team already knows about this code arrives with the task.
+  assert.match(brief.brief, /vendor rate-limits/);
+  // And what it touches, so scope is visible before the first edit.
+  assert.ok(brief.blast_radius.includes("src/retry.ts"), "the cited code must be named");
+
+  // An id that is not a proposal is refused rather than briefed as if it were work.
+  assert.equal(workItemBrief(project, "repo:nope:decision:not-a-work-item").ok, false);
+});
+
+test("the indexer registry reports one honest status per language present in the repo", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "app.py"), "def handler():\n    return 1\n", "utf8");
+  writeFileSync(join(project, "src", "main.go"), "package main\n\nfunc main() {}\n", "utf8");
+
+  const report = codeIndexerStatus(project);
+
+  // Only languages actually present are reported — an indexer for a language the repo does not
+  // contain is not a gap, and listing it as "missing" would be noise dressed up as a finding.
+  const languages = new Set(report.indexers.flatMap((entry) => entry.languages));
+  assert.ok(languages.has("python"), "python is present and must be reported");
+  assert.ok(languages.has("go"), "go is present and must be reported");
+  assert.equal(languages.has("ruby"), false, "no ruby in this repo, so no ruby indexer row");
+
+  for (const entry of report.indexers) {
+    // Every row is actionable: either it can run, or it says exactly how to make it run.
+    assert.ok(["installed", "available", "unsupported"].includes(entry.state));
+    if (entry.state === "available") assert.ok(entry.install_hint.length > 0, `${entry.id} must say how to install it`);
+  }
+  // Never auto-install: the registry only ever reports.
+  assert.equal(report.installed_anything, false);
+});
+
+test("generated repo facts are not presented as team memory", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Dana Operator"], { cwd: project, stdio: "ignore" });
+  writeFileSync(join(project, "package.json"), JSON.stringify({
+    name: "acme-api",
+    scripts: { test: "vitest run", build: "tsc" },
+  }, null, 2), "utf8");
+
+  const bootstrap = bootstrapStarterMemory(project);
+  assert.equal(bootstrap.created, true, `starter memory must survive admission: ${bootstrap.reason ?? ""}`);
+
+  const block = recall(project, "how do I run the tests").context_block;
+
+  // A packet derived from package.json ten seconds ago is a repo fact, not something
+  // a teammate decided — and it must not be attributed to whoever ran the installer.
+  assert.match(block, /Repo fact \(generated\)/);
+  assert.doesNotMatch(block, /Team memory: How to run/);
+  assert.doesNotMatch(block, /by Dana Operator/);
+});
+
+test("starter memory survives a package.json that overlaps its own wording", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  // Adversarial: script names and values echo the runbook's own vocabulary, which is
+  // what drives citedCodeContainment over its threshold.
+  writeFileSync(join(project, "package.json"), JSON.stringify({
+    name: "run build test dev start lint repo",
+    description: "run the tests before committing; run build; run dev; run start; run lint",
+    scripts: {
+      test: "run the tests before committing vitest run",
+      build: "run build tsc",
+      dev: "run dev vite",
+      start: "run start node .",
+      lint: "run lint eslint .",
+    },
+  }, null, 2), "utf8");
+
+  const bootstrap = bootstrapStarterMemory(project);
+  assert.equal(bootstrap.created, true, `starter memory must survive admission: ${bootstrap.reason ?? ""}`);
+  const packet = loadApprovedPackets(project).find((entry) => entry.tags.includes("bootstrap"));
+  assert.ok(packet, "the starter runbook must be approved, not routed to pending");
+});
+
+test("reanchor sharpens grounding on unchanged files and refuses on moved code", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "stable.ts"), `export const stableGateways = ["a"];\n`, "utf8");
+  writeFileSync(join(project, "src", "moved.ts"), `export const movedGateways = ["a"];\n`, "utf8");
+
+  // Prose bodies that name no symbol in the cited file: these are exactly the packets
+  // that carry a whole-file fingerprint and no anchors, which is what a backfill targets.
+  const stable = capture({
+    projectDir: project,
+    title: "Registration order is significant",
+    body: "The dispatcher matches the first exact hit, so registration order decides which provider answers an overlapping path.",
+    type: "code_explanation",
+    paths: ["src/stable.ts"],
+  });
+  const moved = capture({
+    projectDir: project,
+    title: "Registration order is significant here too",
+    body: "The dispatcher matches the first exact hit, so registration order decides which provider answers an overlapping route.",
+    type: "code_explanation",
+    paths: ["src/moved.ts"],
+  });
+  assert.equal(stable.ok, true);
+  assert.equal(moved.ok, true);
+
+  const verifiedBefore = (moved.packet?.freshness as { last_verified_at?: string })?.last_verified_at;
+
+  // One file moves under its memory; the other does not.
+  writeFileSync(join(project, "src", "moved.ts"), `export const movedGateways = ["a", "b"];\n`, "utf8");
+
+  const report = reanchorUnchangedPackets(project);
+  assert.deepEqual(report.skipped_changed, [moved.packet?.id], "moved code must be refused, not re-stamped");
+  assert.equal(report.skipped_changed.includes(stable.packet!.id), false, "an unchanged file is not a conflict");
+
+  // A re-anchor must never reset the verification clock — nothing was re-verified.
+  const after = loadApprovedPackets(project).find((packet) => packet.id === moved.packet?.id);
+  assert.equal((after?.freshness as { last_verified_at?: string })?.last_verified_at, verifiedBefore);
+});
+
+test("memory anchors to a camelCase exported const, so unrelated edits do not retire it", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  const gatewaysFile = join(project, "src", "gateways.ts");
+  const withHelper = (body: string) => `export const defaultGateways = ["anthropic", "openai"];\n\nexport function unrelatedHelper() {\n  return ${body};\n}\n`;
+  writeFileSync(gatewaysFile, withHelper("1"), "utf8");
+
+  const captured = capture({
+    projectDir: project,
+    title: "Provider gateways are registered in defaultGateways",
+    body: "A new provider is wired by appending it to defaultGateways; order matters only for overlapping paths, because the exact-match router picks the first hit.",
+    type: "code_explanation",
+    paths: ["src/gateways.ts"],
+  });
+  assert.equal(captured.ok, true);
+
+  // The anchor must exist, or staleness silently falls back to whole-file hashing.
+  const fingerprints = (captured.packet?.freshness as { path_fingerprints?: Array<{ path: string; symbols?: Array<{ name: string }> }> })?.path_fingerprints ?? [];
+  const anchored = fingerprints.find((entry) => entry.path === "src/gateways.ts");
+  assert.ok(anchored?.symbols?.some((symbol) => symbol.name === "defaultgateways"), "expected defaultGateways to be anchored");
+
+  // Editing an unrelated function in the same file must not retire the memory.
+  writeFileSync(gatewaysFile, withHelper("42"), "utf8");
+  assert.equal(kageMemoryReconciliation(project).unresolved_count, 0);
+
+  // Editing the anchored symbol itself must retire it.
+  writeFileSync(gatewaysFile, `export const defaultGateways = ["anthropic", "openai", "gemini"];\n\nexport function unrelatedHelper() {\n  return 42;\n}\n`, "utf8");
+  assert.equal(kageMemoryReconciliation(project).unresolved_count, 1);
+});
+
+test("reconciliation only observes paths inside the project directory", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "retry.js"), "export const retryMode = 'callback';\n", "utf8");
+
+  assert.equal(observe(project, {
+    type: "file_change",
+    session_id: "agent-session",
+    agent: "codex",
+    path: "src/retry.js",
+    summary: "Changed retry mode behavior while fixing callback handling.",
+  }).ok, true);
+
+  // Agent-host scratch files arrive as absolute paths from outside the repo. Stripping
+  // the leading slash turns them into plausible repo-relative paths, so they used to be
+  // recorded as touched files and demand reconciliation for work nobody did here.
+  for (const outside of [
+    "/Users/someone/.claude/projects/abc123/tool-results/scratch.txt",
+    "/Users/someone/.claude/plans/some-plan.md",
+    "/tmp/unrelated/file.ts",
+  ]) {
+    assert.equal(observe(project, {
+      type: "file_change",
+      session_id: "agent-session",
+      agent: "codex",
+      path: outside,
+      summary: "Host scratch file, unrelated to this repository.",
+    }).ok, true);
+  }
+
+  const report = kageMemoryReconciliation(project, { sessionId: "agent-session" });
+  assert.deepEqual(report.touched_paths, ["src/retry.js"]);
 });
 
 test("pr check warns but does not block on soft memory reconciliation", () => {
@@ -4087,7 +4846,8 @@ test("verifyCitations flags deleted citations and reports grounding", () => {
   unlinkSync(join(project, "src", "drop.ts"));
 
   const report = verifyCitations(project);
-  assert.equal(report.ok, true);
+  // ok is a real verdict now: a deleted citation is hard-stale, so the check fails.
+  assert.equal(report.ok, false);
   assert.equal(report.checked, 2);
   const dropEntry = report.packets.find((entry) => entry.title === "Drop note");
   assert.equal(dropEntry?.stale, true);
@@ -4215,7 +4975,7 @@ test("recall assembles a bounded structural blast radius from the recalled memor
   assert.match(traversed.context_block, /src\/app\.js/); // app.js depends on the recalled core.js
 });
 
-test("kage demo proves the trust wedge: reject, withhold, recall", () => {
+test("kage demo: rejects hallucinated citations, withholds stale memory, recalls grounded memory", () => {
   const project = tempProject();
   const r = runDemo(join(project, "demo"));
   assert.equal(r.ok, true);
@@ -4643,6 +5403,39 @@ test("truth report surfaces untested hot paths, complexity hotspots, and debt ma
   assert.doesNotMatch(report.headline, /\b0 /);
 });
 
+test("debt marker detector ignores a listing/description of the keywords, not a real marker", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "package.json"), JSON.stringify({ name: "listing-demo", scripts: { build: "tsc" } }), "utf8");
+  // A file whose only "markers" are a code comment and a string DESCRIBING the
+  // TODO/FIXME/HACK convention (e.g. a linter or detector implementation) — this
+  // must not itself be flagged as having unresolved debt.
+  writeFileSync(
+    join(project, "src", "detector.ts"),
+    [
+      "// Detects TODO/FIXME/HACK/XXX markers left in code.",
+      'export function describeDebt(): string {',
+      '  return "Found a TODO, FIXME, or HACK note — flag it.";',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  for (let i = 0; i < 6; i += 1) {
+    writeFileSync(
+      join(project, "src", `consumer${i}.ts`),
+      `import { describeDebt } from "./detector.js";\nexport const v${i} = describeDebt();\n`,
+      "utf8"
+    );
+  }
+  commitAll(project, "initial");
+
+  const report = truthReport(project);
+  const debt = report.findings.find((finding) => finding.kind === "debt_marker" && finding.title.includes("src/detector.ts"));
+  assert.equal(debt, undefined, "a listing of marker keywords must not count as a real debt marker");
+});
+
 test("truth report doc-lie scan skips paths quoted inside fenced code blocks", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
@@ -4824,8 +5617,6 @@ test("claude-mem audit classifies a fixture store against a temp git repo", (t) 
   assert.match(receipt, /Worst offenders:/);
   assert.match(receipt, /src\/deleted\.ts — file no longer exists/);
   assert.match(receipt, /src\/moving\.ts — changed 2026-03-01/);
-  assert.match(receipt, /claude-mem remembers everything\. Kage tells you what's still true\./);
-  assert.match(receipt, /Import coming soon — https:\/\/kage-core\.github\.io\/Kage\//);
 });
 
 test("claude-mem audit reports a friendly error for a missing store and warns on a project-key miss", (t) => {
@@ -4936,6 +5727,61 @@ test("recall records value ledger receipts for served and withheld memory", () =
   assert.equal(ledger.events.some((event: { kind: string; packet_title?: string }) => event.kind === "stale_withheld" && event.packet_title === "Gone billing note"), true);
 });
 
+// Honesty guard: the reuse-savings token figure is an ESTIMATE and must be labeled as such
+// at the point of display, while stale_withheld / recalls are MEASURED counts. This test
+// FAILS if either the gains output or the recall receipt prints the estimate as a bare
+// measured "saved you N tokens" — the product's headline "savings" claim must never imply
+// measurement it does not have.
+test("gains output labels the estimated token figure and keeps measured counts distinct", () => {
+  const mkWindow = (tokens_saved: number, stale_withheld: number, stale_caught: number, recalls: number, caller_answers: number, replay_tokens = 0) => ({
+    tokens_saved,
+    replay_tokens,
+    stale_withheld,
+    stale_caught,
+    recalls,
+    caller_answers,
+    estimated_dollars: Number(((tokens_saved / 1_000_000) * VALUE_DOLLARS_PER_MILLION_TOKENS).toFixed(2)),
+  });
+  const summary = {
+    schema_version: 1,
+    project_dir: "/tmp/x",
+    today: mkWindow(1000, 2, 1, 3, 1, 500),
+    last_7d: mkWindow(5000, 4, 2, 6, 1, 2000),
+    all_time: mkWindow(9000, 10, 3, 12, 2, 4000),
+  };
+  const lines = formatValueGains(summary);
+  const out = lines.join("\n");
+
+  // The estimate is labeled estimated, and the measured counts are labeled measured — the
+  // two are visibly different kinds of number.
+  assert.match(out, /estimated/i, "gains must label the token/$ figures as estimated");
+  assert.match(out, /measured/i, "gains must mark the event counts as measured");
+
+  // Regression guard: the old phrasing presented the estimate as a measured fact.
+  assert.ok(!/saved you/i.test(out), `gains must not phrase the estimate as measured "saved you": ${out}`);
+
+  // Every line that prints a "~<count> tokens" savings figure must carry the estimated label.
+  for (const line of lines) {
+    if (/~\S+\s*tokens\b/i.test(line)) {
+      assert.ok(/estimated/i.test(line), `token savings line must be labeled estimated: "${line}"`);
+    }
+  }
+
+  // The measured stale-block COUNT is present and marked as a measured count, not folded into
+  // the token estimate.
+  assert.ok(/\b4\b/.test(out), "measured 7d stale-withheld count (4) must appear");
+});
+
+test("recall value receipt labels the estimated tokens and the measured withheld count", () => {
+  const line = formatRecallValueReceipt({ tokens_saved: 4000, stale_withheld: 2 });
+  assert.match(line, /4K|4000/, "the token figure must be shown");
+  assert.match(line, /estimated/i, "the token figure is an estimate and must say so");
+  assert.match(line, /2 stale/, "the measured withheld count must be shown");
+  assert.match(line, /measured/i, "the withheld count must be marked as measured");
+  // Regression guard against the old measured-sounding phrasing.
+  assert.ok(!/saved ~\S+ tokens vs reading source/i.test(line), `old measured phrasing must be gone: "${line}"`);
+});
+
 test("capture stores discovery_tokens: caller-reported values kept, conservative per-type defaults estimated", () => {
   const project = tempProject();
   mkdirSync(join(project, "src"), { recursive: true });
@@ -4985,7 +5831,9 @@ test("recall receipt uses knowledge replay value when larger, floored at the rea
   const floored = tempProject();
   mkdirSync(join(floored, "src"), { recursive: true });
   writeFileSync(join(floored, "src", "big.ts"), `// big module\n${"export const line = 1;\n".repeat(4000)}`, "utf8");
-  capture({ projectDir: floored, title: "Big module invariant", body: "Big module exports stable line constants from src/big.ts.", type: "reference", paths: ["src/big.ts"], discoveryTokens: 10 });
+  // Body carries WHY (an invariant downstream depends on), so the T2 derivability gate correctly
+  // treats it as durable memory rather than a restatement of the cited file.
+  capture({ projectDir: floored, title: "Big module invariant", body: "Big module must keep exporting stable line constants (src/big.ts) because downstream fixtures depend on the exact export count.", type: "reference", paths: ["src/big.ts"], discoveryTokens: 10 });
   const flooredResult = recall(floored, "big module line constants", 5);
   assert.equal(flooredResult.results.some((entry) => entry.packet.title === "Big module invariant"), true);
   assert.ok(flooredResult.value_receipt);
@@ -5330,6 +6178,51 @@ test("refresh on the default branch persists stale metadata to disk", () => {
   assert.equal(rewritten.quality.stale, true);
 });
 
+test("merge-packet keeps both sides' edits when they touched different fields", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge3-"));
+  const base = {
+    id: "gotcha-merge-3way",
+    title: "Retry limit is 3",
+    summary: "base summary",
+    body: "base body",
+    tags: ["retry"],
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const oursPath = join(dir, "ours.json");
+  const basePath = join(dir, "base.json");
+  const theirsPath = join(dir, "theirs.json");
+  writeFileSync(basePath, JSON.stringify(base, null, 2), "utf8");
+  // Two teammates edit the SAME packet but DIFFERENT fields. Whole-file newest-wins throws one of
+  // these away silently; a three-way merge keeps both because neither actually conflicts.
+  writeFileSync(oursPath, JSON.stringify({ ...base, summary: "ours refined the summary", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(theirsPath, JSON.stringify({ ...base, body: "theirs explained the vendor rate limit", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
+
+  const result = mergePacketFiles(oursPath, basePath, theirsPath);
+  assert.equal(result.ok, true);
+  const merged = JSON.parse(readFileSync(oursPath, "utf8"));
+  assert.equal(merged.summary, "ours refined the summary", "our non-conflicting edit must survive");
+  assert.equal(merged.body, "theirs explained the vendor rate limit", "their non-conflicting edit must survive");
+  assert.equal(merged.title, "Retry limit is 3", "an untouched field stays at base");
+});
+
+test("merge-packet still falls back to newest-wins when both sides changed the same field", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge3c-"));
+  const base = { id: "gotcha-merge-conflict", title: "base title", body: "base body", updated_at: "2026-01-01T00:00:00.000Z" };
+  const oursPath = join(dir, "ours.json");
+  const basePath = join(dir, "base.json");
+  const theirsPath = join(dir, "theirs.json");
+  writeFileSync(basePath, JSON.stringify(base, null, 2), "utf8");
+  writeFileSync(oursPath, JSON.stringify({ ...base, body: "ours rewrote it", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(theirsPath, JSON.stringify({ ...base, body: "theirs rewrote it", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
+
+  const result = mergePacketFiles(oursPath, basePath, theirsPath);
+  assert.equal(result.ok, true);
+  // A genuine conflict on one field: newest wins for THAT field, and the losing text is preserved
+  // rather than vanishing.
+  assert.equal(JSON.parse(readFileSync(oursPath, "utf8")).body, "theirs rewrote it");
+  assert.equal(result.conflicted_fields?.includes("body"), true, "a real field conflict must be reported");
+});
+
 test("merge-packet keeps the newest side whole-file and rejects garbage", () => {
   const dir = mkdtempSync(join(tmpdir(), "kage-merge-"));
   const basePacket = { id: "gotcha-merge-1", title: "base", updated_at: "2026-01-01T00:00:00.000Z" };
@@ -5360,6 +6253,134 @@ test("merge-packet keeps the newest side whole-file and rejects garbage", () => 
   assert.equal(garbage.ok, false);
 });
 
+test("merge-packet never silently drops a teammate's concurrent edit — the losing side is preserved for review", () => {
+  const project = mkdtempSync(join(tmpdir(), "kage-merge-preserve-"));
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge-preserve-tmp-"));
+  const basePacket = { id: "gotcha-merge-preserve", title: "base", body: "base body", updated_at: "2026-01-01T00:00:00.000Z" };
+  const oursPath = join(dir, "ours.json");
+  const basePath = join(dir, "base.json");
+  const theirsPath = join(dir, "theirs.json");
+  writeFileSync(basePath, JSON.stringify(basePacket, null, 2), "utf8");
+  // Two teammates concurrently reverified/edited the SAME packet — genuine divergence,
+  // not a race where one side is a stale copy of the other.
+  writeFileSync(oursPath, JSON.stringify({ ...basePacket, body: "ours added evidence X", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(theirsPath, JSON.stringify({ ...basePacket, body: "theirs added evidence Y", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
+
+  // No projectDir passed: preservation is a best-effort add-on, must not be required for a merge to succeed.
+  const withoutProject = mergePacketFiles(oursPath, basePath, theirsPath);
+  assert.equal(withoutProject.ok, true);
+  assert.equal(withoutProject.preserved_path, undefined);
+
+  writeFileSync(oursPath, JSON.stringify({ ...basePacket, body: "ours added evidence X", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
+  const withProject = mergePacketFiles(oursPath, basePath, theirsPath, project);
+  assert.equal(withProject.ok, true);
+  assert.equal(withProject.winner, "theirs");
+  assert.equal(typeof withProject.preserved_path, "string");
+  assert.equal(existsSync(withProject.preserved_path!), true);
+  const preserved = JSON.parse(readFileSync(withProject.preserved_path!, "utf8"));
+  // The LOSING (ours) side's real edit is recoverable, not gone.
+  assert.equal(preserved.body, "ours added evidence X");
+  assert.equal(withProject.detail.includes("preserved for review"), true);
+
+  // Identical resolution on both sides (a true no-op race) must not spam a conflict artifact.
+  writeFileSync(theirsPath, JSON.stringify({ ...basePacket, body: "same", updated_at: "2026-04-01T00:00:00.000Z" }, null, 2), "utf8");
+  writeFileSync(oursPath, JSON.stringify({ ...basePacket, body: "same", updated_at: "2026-04-01T00:00:00.000Z" }, null, 2), "utf8");
+  const identical = mergePacketFiles(oursPath, basePath, theirsPath, project);
+  assert.equal(identical.ok, true);
+  assert.equal(identical.preserved_path, undefined);
+});
+
+// Simulates a real multi-contributor team on one repo: two teammates capturing memory
+// under their own git identity, a stale claim left unreviewed, a concurrent-edit
+// conflict, and a pending item awaiting review — then asserts the team report tells
+// the truth about all of it in one call.
+test("teamMemoryReport gives an accurate receipt for a simulated multi-contributor team", () => {
+  const project = tempProject();
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "auth.ts"), "export function login() { return true; }\n", "utf8");
+  writeFileSync(join(project, "src", "billing.ts"), "export function charge() { return true; }\n", "utf8");
+
+  // Teammate 1 (Ada) captures a decision.
+  execFileSync("git", ["config", "user.name", "Ada Lovelace"], { cwd: project, stdio: "ignore" });
+  const adaPacket = capture({
+    projectDir: project,
+    title: "Auth login is idempotent",
+    body: "login() is safe to call twice. Verified by: npm test.",
+    type: "decision",
+    paths: ["src/auth.ts"],
+  });
+  assert.equal(adaPacket.ok, true);
+  assert.equal(adaPacket.packet!.author_name, "Ada Lovelace");
+
+  // Teammate 2 (Grace) captures a gotcha, then the cited file changes under it —
+  // a real drift scenario, left unreviewed (no reverify).
+  execFileSync("git", ["config", "user.name", "Grace Hopper"], { cwd: project, stdio: "ignore" });
+  const gracePacket = capture({
+    projectDir: project,
+    title: "Billing charge() gotcha",
+    body: "charge() must be called from the billing queue only. Verified by: npm test.",
+    type: "gotcha",
+    paths: ["src/billing.ts"],
+  });
+  assert.equal(gracePacket.ok, true);
+  assert.equal(gracePacket.packet!.author_name, "Grace Hopper");
+  writeFileSync(join(project, "src", "billing.ts"), "export function charge() { return false; /* changed */ }\n", "utf8");
+
+  // Grace also leaves an item explicitly routed to pending review.
+  const pendingPacket = capture({
+    projectDir: project,
+    title: "Needs a second pair of eyes",
+    body: "Draft claim about the payment retry policy that still needs review.",
+    type: "reference",
+    paths: ["src/billing.ts"],
+    pendingReview: true,
+  });
+  assert.equal(pendingPacket.ok, true);
+
+  // A merge-driver conflict artifact from an earlier concurrent edit, so the
+  // report's "nothing was silently dropped" count reflects something real.
+  mkdirSync(conflictsDir(project), { recursive: true });
+  writeFileSync(join(conflictsDir(project), "lost-edit.md"), "# preserved conflict\n", "utf8");
+
+  const report = teamMemoryReport(project);
+  assert.equal(report.approved_packets, 2);
+  assert.equal(report.unattributed_packets, 0);
+  assert.deepEqual(
+    report.contributors.map((c) => c.name).sort(),
+    ["Ada Lovelace", "Grace Hopper"]
+  );
+  assert.equal(report.pending_review, 1);
+  assert.equal(report.oldest_pending_days !== null, true);
+  assert.equal(report.stale_withheld, 1); // billing.ts changed under Grace's gotcha
+  assert.equal(report.conflicts_preserved, 1);
+  // Neither packet has been through reverifyMemory, so freshness_rate must be 0 —
+  // a plain capture is not the same as a verified-fresh claim.
+  assert.equal(report.freshness_rate, 0);
+
+  // Now Ada reverifies her own packet with evidence; freshness_rate must reflect it.
+  const reverified = reverifyMemory(project, adaPacket.packet!.id, { evidence: "Re-read src/auth.ts, login() is still idempotent.", verifiedBy: "manual read" });
+  assert.equal(reverified.ok, true);
+  const afterReverify = teamMemoryReport(project);
+  assert.equal(afterReverify.freshness_rate, 0.5);
+});
+
+test("readTeamLink is null until kage cloud link writes one, then round-trips exactly", () => {
+  const project = tempProject();
+  assert.equal(readTeamLink(project), null);
+
+  const written = writeTeamLink(project, { server: "http://localhost:8790", team_id: "team-abc", token: "kct_secret" });
+  assert.equal(written.server, "http://localhost:8790");
+  assert.equal(typeof written.linked_at, "string");
+
+  const read = readTeamLink(project);
+  assert.deepEqual(read, written);
+
+  // Re-linking (e.g. a rotated token) overwrites in place, not appends.
+  writeTeamLink(project, { server: "http://localhost:8790", team_id: "team-abc", token: "kct_rotated" });
+  assert.equal(readTeamLink(project)!.token, "kct_rotated");
+});
+
 test("kage merge-packet CLI follows the git merge-driver exit convention", () => {
   const dir = mkdtempSync(join(tmpdir(), "kage-merge-cli-"));
   const basePacket = { id: "gotcha-merge-2", title: "base", updated_at: "2026-01-01T00:00:00.000Z" };
@@ -5370,14 +6391,17 @@ test("kage merge-packet CLI follows the git merge-driver exit convention", () =>
   writeFileSync(oursPath, JSON.stringify({ ...basePacket, title: "ours", updated_at: "2026-02-01T00:00:00.000Z" }, null, 2), "utf8");
   writeFileSync(theirsPath, JSON.stringify({ ...basePacket, title: "theirs", updated_at: "2026-03-01T00:00:00.000Z" }, null, 2), "utf8");
   const cli = join(__dirname, "cli.js");
-
-  const okRun = spawnSync(process.execPath, [cli, "merge-packet", oursPath, basePath, theirsPath]);
+  // Pin cwd to the temp dir: the merge driver resolves conflict-preservation output
+  // relative to process.cwd() (the real repo root during an actual git merge). Without
+  // this, the child inherits whatever directory the test runner happened to be
+  // launched from and leaks a stray .agent_memory/ next to the source tree.
+  const okRun = spawnSync(process.execPath, [cli, "merge-packet", oursPath, basePath, theirsPath], { cwd: dir });
   assert.equal(okRun.status, 0);
   assert.equal(JSON.parse(readFileSync(oursPath, "utf8")).title, "theirs");
 
   writeFileSync(oursPath, "garbage", "utf8");
   writeFileSync(theirsPath, "garbage", "utf8");
-  const conflict = spawnSync(process.execPath, [cli, "merge-packet", oursPath, basePath, theirsPath]);
+  const conflict = spawnSync(process.execPath, [cli, "merge-packet", oursPath, basePath, theirsPath], { cwd: dir });
   assert.equal(conflict.status, 1);
 });
 
@@ -5615,6 +6639,85 @@ test("setup supports openclaw, copilot, and hermes platforms", () => {
   }
 });
 
+test("agent-surface certification gate passes only when the three required surfaces certify automatic, Codex stays honest fallback", () => {
+  const now = "2026-07-18T00:00:00.000Z";
+  const report = agentSurfaceCertificationGate(
+    [
+      {
+        surface: "claude-code",
+        capture_events: 5,
+        requested_sentinel: "KAGE-CERT-CC",
+        transcript: "<<<KAGE_CONTEXT>>> KAGE-CERT-CC <<<END_KAGE_CONTEXT>>>",
+        health: "healthy",
+      },
+      {
+        surface: "anthropic-proxy",
+        capture_events: 3,
+        requested_sentinel: "KAGE-CERT-PX",
+        transcript: "gateway forwarded KAGE-CERT-PX",
+        health: "healthy",
+      },
+      {
+        surface: "cursor",
+        capture_events: 4,
+        requested_sentinel: "KAGE-CERT-CU",
+        transcript: "cursor sessionStart delivered KAGE-CERT-CU",
+        health: "healthy",
+      },
+      {
+        surface: "codex",
+        capture_events: 4,
+        requested_sentinel: "KAGE-CERT-CX",
+        transcript: "otel events only, no session injection sentinel",
+        health: "healthy",
+      },
+    ],
+    { now },
+  );
+  assert.equal(report.passed, true, JSON.stringify(report.failures));
+  assert.deepEqual([...REQUIRED_AUTOMATIC_SURFACES], ["claude-code", "anthropic-proxy", "cursor"]);
+  const codex = report.certifications.find((c) => c.surface === "codex");
+  assert.ok(codex);
+  assert.equal(codex.capture, "automatic");
+  assert.equal(codex.injection, "mcp_fallback");
+  assert.equal(codex.counts_as_automatic_attachment, false, "Codex is visible but not counted as automatic");
+});
+
+test("agent-surface certification gate stays failed when Cursor injection is not proven — the label is never flipped", () => {
+  const report = agentSurfaceCertificationGate(
+    [
+      {
+        surface: "claude-code",
+        capture_events: 5,
+        requested_sentinel: "KAGE-CERT-CC",
+        transcript: "KAGE-CERT-CC",
+        health: "healthy",
+      },
+      {
+        surface: "anthropic-proxy",
+        capture_events: 3,
+        requested_sentinel: "KAGE-CERT-PX",
+        transcript: "KAGE-CERT-PX",
+        health: "healthy",
+      },
+      {
+        surface: "cursor",
+        capture_events: 4,
+        requested_sentinel: "KAGE-CERT-CU",
+        transcript: "cursor session ran but the context marker never appeared",
+        health: "healthy",
+      },
+    ],
+    { now: "2026-07-18T00:00:00.000Z" },
+  );
+  assert.equal(report.passed, false);
+  assert.ok(report.failures.some((f) => f.startsWith("cursor:")), JSON.stringify(report.failures));
+  const cursor = report.certifications.find((c) => c.surface === "cursor");
+  assert.ok(cursor);
+  assert.notEqual(cursor.injection, "automatic_session");
+  assert.equal(cursor.counts_as_automatic_attachment, false);
+});
+
 test("kageLayers buckets memory into L0 observations, L1 reviewed, L2 synthesis", () => {
   const project = tempProject();
   writeFileSync(join(project, "a.ts"), "export const a = 1;\n", "utf8");
@@ -5691,7 +6794,11 @@ test("reverify refreshes grounding in place and clears stale flags", () => {
   writeFileSync(join(project, "lib.ts"), "export const v = 2;\n", "utf8");
   refreshProject(project);
   const before = parsePacket(packetFile());
-  const result = reverifyMemory(project, id);
+  // Changed content refuses a bare re-stamp; evidence is required.
+  const refused = reverifyMemory(project, id);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.changed_paths.includes("lib.ts"), true);
+  const result = reverifyMemory(project, id, { evidence: "confirmed lib.ts still holds the version constant (now v=2)" });
   assert.equal(result.ok, true, JSON.stringify(result.errors));
   assert.equal(result.refreshed_paths.includes("lib.ts"), true);
   assert.equal(result.was_stale, before.quality?.stale === true);
@@ -6197,4 +7304,137 @@ test("indexProject builds the docs-index artifact so it stays current", () => {
   const result = indexProject(project);
   assert.ok(existsSync(join(indexesDir(project), "docs-index.json")));
   assert.ok(result.indexes.some((path) => path.endsWith("docs-index.json")));
+});
+
+test("recall ranking: aged changelog-shaped memory sinks below a fresh evergreen match", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "hooks.ts"), "export const rotate = 1;\n", "utf8");
+  const old = learn({
+    projectDir: project,
+    type: "decision",
+    title: "Webhook signing rollout decision",
+    learning: "Webhook signature rotation policy decided for the gateway because keys rotate quarterly.",
+    paths: ["src/hooks.ts"],
+  });
+  const fresh = learn({
+    projectDir: project,
+    type: "runbook",
+    title: "Webhook signature rotation runbook",
+    learning: "Webhook signature rotation policy: run the rotation script because keys rotate quarterly.",
+    paths: ["src/hooks.ts"],
+  });
+  assert.equal(old.ok && fresh.ok, true);
+  const aged = new Date(Date.now() - 150 * 86_400_000).toISOString();
+  const agedText = readFileSync(old.path as string, "utf8")
+    .replace(/"created_at":\s*"[^"]+"/, `"created_at":"${aged}"`)
+    .replace(/"updated_at":\s*"[^"]+"/, `"updated_at":"${aged}"`);
+  writeFileSync(old.path as string, agedText, "utf8");
+
+  const result = recall(project, "webhook signature rotation policy");
+  assert.equal(result.results[0]?.packet.title, "Webhook signature rotation runbook");
+  assert.equal((result.results[0]?.score_breakdown?.recency ?? 0) >= 3, true);
+  const agedEntry = result.results.find((entry) => entry.packet.title === "Webhook signing rollout decision");
+  if (agedEntry) assert.equal((agedEntry.score_breakdown?.recency ?? 0) <= -3, true);
+
+  // The curve itself: fresh boost, neutral middle, penalty only for changelog-shaped types.
+  const now = new Date().toISOString();
+  const twoHundredDays = new Date(Date.now() - 200 * 86_400_000).toISOString();
+  assert.equal(recallRecencyScore({ type: "runbook", created_at: now, updated_at: now }), 3);
+  assert.equal(recallRecencyScore({ type: "decision", created_at: twoHundredDays, updated_at: twoHundredDays }), -3);
+  assert.equal(recallRecencyScore({ type: "gotcha", created_at: twoHundredDays, updated_at: twoHundredDays }), 0);
+});
+
+test("recall ranking: terse identifier query grounds through the code graph", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "chain.ts"), "export function verifySignatureChain(input: string): string {\n  return input;\n}\n", "utf8");
+  buildCodeGraph(project, { force: true });
+  const saved = learn({
+    projectDir: project,
+    title: "Gateway request validation notes",
+    learning: "The gateway validates every request twice because the edge cache replays traffic.",
+    paths: ["src/chain.ts"],
+  });
+  assert.equal(saved.ok, true);
+
+  const result = recall(project, "verifySignatureChain");
+  const entry = result.results.find((item) => item.packet.title === "Gateway request validation notes");
+  assert.ok(entry, "identifier-grounded packet must surface despite zero lexical overlap");
+  assert.equal((entry?.score_breakdown?.identifier ?? 0) > 0, true);
+});
+
+test("staleness anchors are code identifiers, not prose words", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "retry.ts"), [
+    "const verified = true;",
+    "const same = 1;",
+    "export function normalizeRetryWindow(ms: number): number {",
+    "  return Math.max(ms, 50);",
+    "}",
+    "",
+  ].join("\n"), "utf8");
+  const saved = learn({
+    projectDir: project,
+    title: "Retry window normalization",
+    learning: "The gateway is verified when the same request replays; `normalizeRetryWindow` guards the retry window.",
+    paths: ["src/retry.ts"],
+  });
+  assert.equal(saved.ok, true);
+  const prints = ((saved.packet!.freshness ?? {}) as { path_fingerprints?: Array<{ path: string; symbols?: Array<{ name: string }> }> }).path_fingerprints ?? [];
+  const anchor = prints.find((print) => print.path === "src/retry.ts");
+  const names = (anchor?.symbols ?? []).map((symbol) => symbol.name);
+  assert.equal(names.includes("normalizeretrywindow"), true, `anchors: ${names.join(",")}`);
+  assert.equal(names.includes("verified"), false);
+  assert.equal(names.includes("same"), false);
+});
+
+test("merge-packet driver sniffs content, not extension (raw-JSON .md packets auto-merge)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kage-merge-"));
+  const packetJson = (updated: string) => JSON.stringify({
+    schema_version: 2, id: "repo:x:decision:t", title: "T", summary: "s", body: "b",
+    type: "decision", status: "approved", tags: [], paths: [], source_refs: [], edges: [],
+    quality: {}, created_at: "2026-07-01T00:00:00Z", updated_at: updated,
+  });
+  writeFileSync(join(dir, "o.md"), packetJson("2026-07-02T00:00:00Z"), "utf8");
+  writeFileSync(join(dir, "b.md"), packetJson("2026-07-01T00:00:00Z"), "utf8");
+  writeFileSync(join(dir, "t.md"), packetJson("2026-07-03T00:00:00Z"), "utf8");
+  const result = mergePacketFiles(join(dir, "o.md"), join(dir, "b.md"), join(dir, "t.md"));
+  assert.equal(result.ok, true, result.detail);
+  assert.equal(result.winner, "theirs");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("gc deletes deprecated packets past retention, keeps recent ones", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "a.ts"), "export {};\n", "utf8");
+  const saved = learn({ projectDir: project, learning: "src/a.ts documents the a module because tests need it.", paths: ["src/a.ts"] });
+  assert.equal(saved.ok, true);
+  const packetPath = saved.path as string;
+  const old = new Date(Date.now() - 60 * 86_400_000).toISOString();
+  // Packets are OKF markdown with a kage-state fence; mutate both layers.
+  const aged = readFileSync(packetPath, "utf8")
+    .replace(/"updated_at":\s*"[^"]+"/g, `"updated_at":"${old}"`)
+    .replace(/"status":\s*"approved"/g, '"status":"deprecated"')
+    .replace(/^x-kage-status: .*$/m, "x-kage-status: deprecated");
+  writeFileSync(packetPath, aged, "utf8");
+  const result = gcProject(project, {});
+  assert.equal(result.deleted.some((entry) => entry.id === saved.packet!.id), true);
+  assert.equal(existsSync(packetPath), false);
+});
+
+test("metadata-only refresh rewrites preserve updated_at (content timestamp)", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "mod.ts"), "export const mod = 1;\n", "utf8");
+  const saved = learn({ projectDir: project, learning: "src/mod.ts holds the module flag because tests toggle it.", paths: ["src/mod.ts"] });
+  assert.equal(saved.ok, true);
+  const before = parsePacket(saved.path as string).updated_at;
+  // Serve it so the access report has a counter to reconcile onto the packet.
+  recall(project, "module flag toggle");
+  refreshProject(project, { force: true });
+  const after = parsePacket(saved.path as string);
+  assert.equal(after.updated_at, before, "metadata reconciliation must not bump updated_at");
 });

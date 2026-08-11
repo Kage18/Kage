@@ -25,6 +25,7 @@ import {
   loadPendingPackets,
   makePacketId,
   memoryRoot,
+  packetVerificationLabel,
   parseFrontmatter,
   slugify,
   type MemoryPacket,
@@ -38,6 +39,7 @@ const TYPE_DISPLAY: Record<MemoryType, string> = {
   runbook: "Runbook",
   bug_fix: "Bug Fix",
   decision: "Decision",
+  proposal: "Proposal",
   rationale: "Rationale",
   convention: "Convention",
   workflow: "Workflow",
@@ -70,18 +72,30 @@ export function kageType(display: unknown): MemoryType {
 const STATE_FENCE_OPEN = "```json kage-state";
 const STATE_FENCE_CLOSE = "```";
 
-function extractKageState(content: string): MemoryPacket | null {
-  const open = content.indexOf(STATE_FENCE_OPEN);
+/**
+ * Extract the JSON carried in a labelled fenced code block (e.g. "```json kage-state" or
+ * "```json kage-model-state"). This is the machinery that makes a Kage-authored concept losslessly
+ * round-trippable EVEN THROUGH a foreign OKF consumer: the identifiers ride in the BODY (which OKF
+ * consumers preserve), not only in the `x-kage-*` frontmatter (which a foreign consumer may drop).
+ * Returns the parsed JSON, or null when the block is absent or unparseable. Generic and reusable so
+ * the vNext model exporter shares exactly this block format rather than reinventing it.
+ */
+export function extractFencedJson(content: string, fenceOpen: string): unknown | null {
+  const open = content.indexOf(fenceOpen);
   if (open === -1) return null;
-  const start = open + STATE_FENCE_OPEN.length;
+  const start = open + fenceOpen.length;
   const close = content.indexOf("\n```", start);
   if (close === -1) return null;
   try {
-    const obj = JSON.parse(content.slice(start, close).trim()) as MemoryPacket;
-    if (obj && obj.schema_version === PACKET_SCHEMA_VERSION && obj.id && obj.title) return obj;
+    return JSON.parse(content.slice(start, close).trim());
   } catch {
-    // fall through to best-effort import
+    return null;
   }
+}
+
+function extractKageState(content: string): MemoryPacket | null {
+  const obj = extractFencedJson(content, STATE_FENCE_OPEN) as MemoryPacket | null;
+  if (obj && obj.schema_version === PACKET_SCHEMA_VERSION && obj.id && obj.title) return obj;
   return null;
 }
 
@@ -143,8 +157,10 @@ function citationText(ref: Record<string, unknown>): string {
 function okfVerifiedStatus(packet: MemoryPacket): string {
   if (packet.status === "superseded") return "superseded";
   if (packet.status === "deprecated") return "deprecated";
-  const freshness = packet.freshness as Record<string, unknown> | undefined;
-  return freshness && freshness.last_verified_at ? "verified" : "unverified";
+  // "verified" is earned, not born: capture provenance (repo_local_agent_capture)
+  // is not a check of the claim. Only an actual recheck (evidence-backed
+  // reverification, validation pass) may carry the label.
+  return packetVerificationLabel(packet);
 }
 
 // ---- packet -> OKF concept document ----
@@ -166,7 +182,8 @@ export function packetToOkfConcept(packet: MemoryPacket): string {
   fm.push(`x-kage-status: ${yamlScalar(packet.status)}`);
   fm.push(`x-kage-scope: ${yamlScalar(packet.scope)}`);
   fm.push(`x-kage-visibility: ${yamlScalar(packet.visibility)}`);
-  fm.push(`x-kage-confidence: ${packet.confidence}`);
+  // No x-kage-confidence: the field was a hardcoded 0.7 nobody computed or
+  // consumed — a number that means nothing must not ship as trust metadata.
   fm.push(`x-kage-verified: ${yamlScalar(okfVerifiedStatus(packet))}`);
   if (packet.paths?.length) fm.push(`x-kage-paths: ${yamlList(packet.paths)}`);
   if (packet.stack?.length) fm.push(`x-kage-stack: ${yamlList(packet.stack)}`);

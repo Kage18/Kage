@@ -1,0 +1,213 @@
+import { createHash } from "node:crypto";
+
+import type { EntityKind } from "../repo-model/types.js";
+
+/**
+ * Deterministic entity resolution.
+ *
+ * The compiler must fold the many surface names an agent uses for one thing ("auth service",
+ * "auth-service", the path `packages/auth`) onto a single repository entity — WITHOUT ever guessing.
+ * Resolution is layered strictly deterministic-first, mirroring Task 7 step 3: an exact stable id, a
+ * path/symbol anchor drawn from evidence, a canonical slug, then a declared alias. Only when every
+ * deterministic key misses does the resolver mint a new, content-derived entity id.
+ *
+ * What this resolver deliberately does NOT do: semantic/model-assisted merging. A model may later
+ * PROPOSE an alias (an untrusted suggestion routed through review), but it can never make two
+ * entities collapse into one here. Automatic merges only ever follow ground-truth anchors.
+ *
+ * Anchor learning: evidence path/symbol anchors are recorded ONLY when the resolution itself was
+ * ground truth — an exact stable id, or a code-anchor (symbol/path) match — or when a brand-new
+ * entity is minted from its founding evidence. A weak name-slug/alias match records nothing: shared
+ * source files are the norm, so learning a slug-matched entity's evidence path would let a later,
+ * differently-named entity that merely cites the same file collapse onto it — an irreversible merge
+ * with no ground truth behind it. Because learning never hinges on a weak match, resolution is
+ * order-independent: a bare path resolves to the same entity regardless of what ran before it.
+ */
+
+export interface EntityAnchor {
+  entity_id: string;
+  kind: EntityKind;
+  canonical_name: string;
+  slug: string;
+  // Additional declared surface forms and ground-truth code anchors. All optional; the canonical
+  // name's slug and the slug itself are always registered.
+  aliases?: readonly string[];
+  paths?: readonly string[];
+  symbols?: readonly string[];
+}
+
+// A code anchor drawn from a piece of evidence. Both fields are ground truth (the evidence literally
+// points at this path/symbol), so either may seed a durable anchor.
+export interface EvidenceAnchorInput {
+  path?: string | null;
+  symbol?: string | null;
+}
+
+export type ResolutionMethod =
+  | "stable_id"
+  | "symbol_anchor"
+  | "path_anchor"
+  | "slug"
+  | "alias"
+  | "created";
+
+export interface Resolution {
+  entity_id: string;
+  kind: EntityKind;
+  matched_by: ResolutionMethod;
+  created: boolean;
+}
+
+/**
+ * Canonicalize a surface name to a slug: lowercase, and collapse every run of non-alphanumeric
+ * characters to a single hyphen with no leading/trailing hyphen. Deterministic and idempotent.
+ */
+export function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+// Anchors are namespaced by entity kind so an `auth-service` component never resolves an
+// `auth-service` flow. The key is opaque; only equality matters.
+function kindKey(kind: EntityKind, value: string): string {
+  return `${kind}\u0000${value}`;
+}
+
+export class EntityResolver {
+  private readonly bySlug = new Map<string, string>();
+  private readonly byAlias = new Map<string, string>();
+  private readonly byPath = new Map<string, string>();
+  private readonly bySymbol = new Map<string, string>();
+  private readonly knownIds = new Set<string>();
+
+  constructor(
+    private readonly repositoryId: string,
+    seeds: readonly EntityAnchor[] = [],
+  ) {
+    for (const seed of seeds) this.register(seed);
+  }
+
+  /** Register (or re-register) an entity's deterministic anchors. Idempotent. */
+  register(anchor: EntityAnchor): void {
+    this.knownIds.add(anchor.entity_id);
+    this.bySlug.set(kindKey(anchor.kind, anchor.slug), anchor.entity_id);
+    // The canonical name's slug is always an alias so "Authentication Service" resolves.
+    this.byAlias.set(kindKey(anchor.kind, slugify(anchor.canonical_name)), anchor.entity_id);
+    for (const alias of anchor.aliases ?? []) {
+      this.byAlias.set(kindKey(anchor.kind, slugify(alias)), anchor.entity_id);
+    }
+    for (const path of anchor.paths ?? []) {
+      this.byPath.set(kindKey(anchor.kind, path), anchor.entity_id);
+    }
+    for (const symbol of anchor.symbols ?? []) {
+      this.bySymbol.set(kindKey(anchor.kind, symbol), anchor.entity_id);
+    }
+  }
+
+  /**
+   * Resolve a surface `name` (with optional evidence code anchors) to an entity id. Deterministic
+   * layers are tried in strict precedence: a ground-truth code anchor (symbol, then path) outranks a
+   * name-derived slug/alias, because a citation into the tree is stronger evidence of identity than a
+   * label someone typed. On a miss, a stable content-derived id is minted and marked `created`.
+   */
+  resolve(kind: EntityKind, name: string, evidence: readonly EvidenceAnchorInput[] = []): Resolution {
+    const trimmed = name.trim();
+
+    // 1. Exact stable id — no normalization, the strongest possible match.
+    if (this.knownIds.has(trimmed)) {
+      this.learn(kind, trimmed, evidence);
+      return { entity_id: trimmed, kind, matched_by: "stable_id", created: false };
+    }
+
+    // 2. Symbol anchors from evidence, then the name treated as a symbol.
+    for (const ev of evidence) {
+      if (ev.symbol) {
+        const hit = this.bySymbol.get(kindKey(kind, ev.symbol));
+        if (hit) return this.matched(kind, hit, "symbol_anchor", evidence);
+      }
+    }
+    {
+      const hit = this.bySymbol.get(kindKey(kind, trimmed));
+      if (hit) return this.matched(kind, hit, "symbol_anchor", evidence);
+    }
+
+    // 3. Path anchors from evidence, then the name treated as a path.
+    for (const ev of evidence) {
+      if (ev.path) {
+        const hit = this.byPath.get(kindKey(kind, ev.path));
+        if (hit) return this.matched(kind, hit, "path_anchor", evidence);
+      }
+    }
+    {
+      const hit = this.byPath.get(kindKey(kind, trimmed));
+      if (hit) return this.matched(kind, hit, "path_anchor", evidence);
+    }
+
+    // 4. Canonical slug.
+    const slug = slugify(trimmed);
+    {
+      const hit = this.bySlug.get(kindKey(kind, slug));
+      if (hit) return this.matched(kind, hit, "slug", evidence);
+    }
+
+    // 5. Declared alias (includes the canonical-name slug).
+    {
+      const hit = this.byAlias.get(kindKey(kind, slug));
+      if (hit) return this.matched(kind, hit, "alias", evidence);
+    }
+
+    // 6. No deterministic match: mint a stable, content-derived id and register it so repeated
+    //    references in the same run collapse onto it. Model-assisted merging never happens here.
+    const entityId = this.mintId(kind, slug);
+    this.register({ entity_id: entityId, kind, canonical_name: trimmed, slug });
+    this.learn(kind, entityId, evidence);
+    return { entity_id: entityId, kind, matched_by: "created", created: true };
+  }
+
+  private matched(
+    kind: EntityKind,
+    entityId: string,
+    method: ResolutionMethod,
+    evidence: readonly EvidenceAnchorInput[],
+  ): Resolution {
+    // Only a match that is itself ground truth may promote the evidence's code anchors to durable
+    // ground truth. A code-anchor match (symbol/path) already agreed with a declared anchor, so
+    // co-cited anchors are corroborated. A name-only match (slug/alias) is far too weak: shared
+    // source files are the norm, and learning a slug-matched entity's evidence path would let a
+    // later, differently-named entity that merely cites the same file collapse onto it. That is an
+    // irreversible identity merge with no ground truth behind it, so slug/alias matches learn
+    // nothing. This also makes resolution order-independent: a bare path resolves the same whether
+    // or not a name reference happened to run first.
+    if (method === "symbol_anchor" || method === "path_anchor") {
+      this.learn(kind, entityId, evidence);
+    }
+    return { entity_id: entityId, kind, matched_by: method, created: false };
+  }
+
+  // Record the evidence's ground-truth code anchors against the resolved entity so a later bare-path
+  // or bare-symbol reference resolves to the same entity. Never overwrites an anchor already bound to
+  // a different entity — a conflicting anchor is a genuine ambiguity and is left for review, not
+  // silently reassigned.
+  private learn(kind: EntityKind, entityId: string, evidence: readonly EvidenceAnchorInput[]): void {
+    for (const ev of evidence) {
+      if (ev.path) {
+        const key = kindKey(kind, ev.path);
+        if (!this.byPath.has(key)) this.byPath.set(key, entityId);
+      }
+      if (ev.symbol) {
+        const key = kindKey(kind, ev.symbol);
+        if (!this.bySymbol.has(key)) this.bySymbol.set(key, entityId);
+      }
+    }
+  }
+
+  private mintId(kind: EntityKind, slug: string): string {
+    const digest = createHash("sha256")
+      .update(`${this.repositoryId}\u0000${kind}\u0000${slug}`)
+      .digest("hex")
+      .slice(0, 24);
+    return `entity-${kind}-${digest}`;
+  }
+}

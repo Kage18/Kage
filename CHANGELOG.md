@@ -1,5 +1,128 @@
 # Changelog
 
+## v4.0.0 — the collaborative repository memory, measured end-to-end
+
+The five-phase vNext program plus the goal-expansion workstreams, every claim
+behind a committed, re-runnable gate or benchmark. Full framework + proofs:
+`docs/COLLABORATIVE_MEMORY.md`.
+
+**One proxy, every agent.** `kage up` runs a background proxy fronting
+Anthropic (`/v1/messages`), OpenAI (`/v1/chat/completions`, `/v1/responses`)
+and Gemini (`generateContent`) behind one gateway seam — injection AND
+reversible compression now bind all three (Gemini through a lossless
+`contents↔messages` view; unknown providers pass through byte-preserving).
+Usage semantics stay per-provider and honest (Anthropic `input_tokens` is the
+uncached remainder; OpenAI/Gemini report full totals).
+
+**Compression that actually pays.** Single-body compression measures ~0% on
+real traffic — so v4 ships deterministic HISTORY digestion instead: old tool
+results reduce to head/error/tail digests with `kage-content:` markers, exact
+originals stored content-addressed first. Measured on a 12-turn real-body
+session: **92.93% final-turn, 93.33% whole-session** bytes saved, with a
+cache-stable digested prefix (deterministic + idempotent). Off by default;
+`history_compression` + `lossy_compression` opt in.
+
+**Injection that knows when to stay silent.** recall() now computes a
+corpus-normalized injection decision (evidence breadth ≥2 distinct terms +
+spike-above-own-band); the proxy gates on it and dominance-trims co-attached
+packets. Measured: false injection **0.667→0**, absent-topic injection
+**0.875→0**, precision **0.154→0.636**, small-store recall and top-hit held
+at 1.0 (`bench:injection --assert-baseline`).
+
+**Near-duplicates caught.** Capture-time dedup adds a guarded TF-cosine view:
+reworded packets that kept their core vocabulary are flagged through the real
+capture path; short genuinely-different notes are unaffected.
+
+**Repository model + portal.** Evidence → episodes → claims with trust states
+(only verified/approved ever inject); a React knowledge portal (overview with
+exactness-labeled metrics, accessible system maps, current-truth-vs-history
+pages, evidence-first review queue with self-approval blocked and versioned
+mutations, exact-vs-cohort task receipts, identifier-only SSE) served by the
+daemon under `/app/`.
+
+**Team workspace (technical GA).** A separate Postgres service: tenant-keyed
+everything, idempotent approved-only sync (raw prompts never leave the
+machine), team review authority + append-only audit, least-privilege GitHub
+App (constant-time signatures, delivery-id idempotency, checks-write as a
+separate opt-in), Stripe-driven entitlements resolved server-side with the
+no-overhead credit capped at the first invoice, OIDC/SCIM for enterprise
+plans, backup/restore/export, Docker packaging. The technical GA gate passes
+against a real embedded PostgreSQL: cross-tenant reads 0, raw payloads synced
+0, self-approvals 0, duplicate sync records 0, invalid webhooks accepted 0,
+local context fully working during a workspace outage, export after
+entitlement expiry. The commercial gate honestly reports NO-GO (no design
+partners run yet) and exits non-zero.
+
+**The v4 surface.** Default MCP tools are `kage_context`, `kage_retrieve`,
+`kage_feedback`; primary CLI is `connect`/`status`/`open`/`doctor`/`export`/
+`migrate` (+ `install`/`up`/`run`/`down` to get started). Every pre-v4 command
+still runs, prints its one supported replacement and a v5 removal notice, and
+is callable deliberately via `kage legacy <cmd>`; `kage legacy scan` finds
+scripts still using them. Migration: `docs/migration/v4-upgrade.md` +
+`docs/migration/v4-command-map.md`.
+
+Suite at release: **1463/1463** aggregate (incl. deploy 36 + dogfood 12);
+workspace 176/176 vs real PostgreSQL; portal 105/105; phase gates A–E green.
+
+
+## v3.3.0 — the memory loop works end-to-end
+
+The core promise — session 2 inherits what session 1 learned — now holds, proven
+by a two-session sandbox test through the real installed hooks.
+
+- **Hooks never silently die.** The documented npx install left no `kage` on
+  PATH, so every ambient hook silently exited for new users. Hooks now resolve
+  the CLI via PATH → install-time path → npx package runner. Installed scripts
+  carry a `# kage-hooks-v2` stamp; `kage doctor` reports outdated hooks.
+- **Capture finally carries signal.** The observe hook serialized tool payloads
+  to JSON, which the signal scorer hard-rejects — all tool activity scored 0 and
+  edit contents (where fixes and conventions live) were discarded. Observations
+  are now built as prose: edits carry old→new excerpts, commands carry output.
+- **Distill is gated in every mode.** SessionEnd/PreCompact/SubagentStop ran the
+  ungated path (no signal filter, no dedupe, born approved) — the source of every
+  junk dump stamped verified. All modes gate, dedupe, and write drafts as
+  pending; fail→pass command pairs stamp truthful verification evidence that
+  lets grounded fixes auto-promote.
+- **Ranking trusts evidence.** Graph prior capped at lexical parity (log1p-damped),
+  recency decay sinks aged changelog-shaped memory, and terse identifier queries
+  ground through the code graph.
+- **Verification is earned, not born.** Packets start unverified; `kage reverify`
+  refuses bare re-stamps when cited code changed (`--evidence`/`--verified-by`
+  required and recorded); `kage verify` can fail; the hardcoded confidence 0.7
+  is gone from OKF output and displays show the verification label.
+- **Store health.** Staleness anchors are code identifiers, not prose words.
+  The merge driver sniffs content (raw-JSON `.md` packets auto-merge — proven on
+  a live sync race). GC deletes deprecated/superseded packets after 30 days.
+  Metadata rewrites no longer bump `updated_at`, so recency and retention are
+  honest. Usage counters are reconciled onto packets (`uses_30d` is real).
+- **New: `kage check`** — verify the claims in agent-context files (CLAUDE.md,
+  AGENTS.md, .cursor/rules, README, docs) against the code: cited paths, npm
+  scripts, make targets, CLI subcommands. Three buckets — confirmed drift /
+  verified true / unverifiable — counts, never estimates. `--base` gates PRs on
+  new drift only; `--init-ci` ships the GitHub Action; corpus-validated on 70
+  public repos (docs/CHECK_VALIDATION.md).
+- **Honesty cleanup.** The bytes/4 "tokens saved" receipt no longer ships in
+  `kage_context`/`kage_recall` output; the "Show the Value" relay is gone from
+  the policy template; unbacked benchmark claims removed from the README.
+
+## v3.2.0 — recall ranking fix + observation retention
+
+- **Recall ranking: rare terms now beat filler words.** Hooks pass raw prompts as
+  queries ("what is X? can we replace it"), and filler words were collecting
+  BM25/vector/graph credit while unconditional quality/freshness priors floated
+  entrenched packets over the one packet literally titled with the queried term.
+  Fixed by expanding the stopword list (interrogatives, pronouns, auxiliaries)
+  and gating quality/freshness on a real query match, the same way usage was
+  already gated. The exact term now ranks #1 on `recall`, `prompt-context`
+  (the ambient hook path), and `kage_context` alike.
+- **Observation retention.** `.agent_memory/observations/` grew unbounded
+  (measured 12k files / 48MB in two months). `kage refresh` now prunes
+  observations older than 30 days (`KAGE_OBSERVATION_RETENTION_DAYS` overrides;
+  `0` disables). Distill consumes observations per session, so aged records are
+  dead weight.
+- Also removed the dollar estimate from the viewer's gains panel (measured
+  token counts stay), and cut the "money saved" framing from the value receipt.
+
 ## v3.1.0 — cleaner viewer + `kage okf view`
 
 - **`kage okf view`** — open your memory as a clean, self-contained OKF bundle
@@ -88,7 +211,9 @@
   for the file you're touching" behavior is already delivered by the
   `file-context` hook injecting the packets that cite the file — the nudge
   channel was redundant for that case, and had no generator for the rest
-  (nothing auto-runs the `kage-watcher`). Recall, file-context, capture, and the
+  (nothing auto-runs `kage-watcher`, a maintainer-only local Claude Code
+  subagent that was never part of the npm package or `kage setup`/`install`,
+  and has since been deleted). Recall, file-context, capture, and the
   shell-paste capture guard are unchanged; the `normalizeRepoPath` /
   trailing-slash cleanup to `file-context` path matching is kept.
 
@@ -107,11 +232,11 @@
 ## v2.5.2 — nudges become felt; capture leak closed
 
 - **Watcher nudges surface to the agent.** `surfacePendingNudges` reads the
-  nudge inbox the `kage-watcher` writes (`.agent_memory/nudges/pending.jsonl`),
+  nudge inbox `kage-watcher` writes (`.agent_memory/nudges/pending.jsonl`),
   injects the unsurfaced ones as a prominent "⚠ Kage nudges — act on these"
   block via the `UserPromptSubmit` hook (`kage prompt-context`), and marks each
-  surfaced so it shows exactly once. This is what turns recall/nudges from
-  silent context into *felt* behavior. Nudges now surface even when a prompt has
+  surfaced so it shows exactly once, on sessions where the local `kage-watcher`
+  subagent is populating that inbox. Nudges now surface even when a prompt has
   no other relevant memory.
 - **Capture leak closed.** The serialized-dump guard now also rejects
   shell-prompt / terminal-paste titles (`user@host dir % cmd`) — the one class
@@ -542,6 +667,11 @@
 - **README/site:** quick start leads with the one-command install; new honest
   comparison table (Kage vs claude-mem vs mem0/Zep) centered on verification.
 
+## v2.0.1
+
+- `kage scan` doc-lie checks are fence-aware: paths quoted inside code fences are sample output, not claims; `npm run`/CLI claims still verified inside shell-typed fences.
+- npm package declares `mcpName: com.kage-core/kage` for the official MCP registry.
+
 ## v2.0.0 - verified repo knowledge, receipts, and the Truth Report
 
 The 2.0 release reframes Kage around one story: every claim cited against your
@@ -929,9 +1059,4 @@ current code, and you see exactly what it saves you. (PRs #56–#65.)
 
 ## v1.0.0
 
-- Initial local-first Kage MCP package with repo memory packets, recall, graph indexing, code graph, review gates, metrics, daemon, and setup helpers.## 2.0.1
-
-- `kage scan` doc-lie checks are fence-aware: paths quoted inside code fences are sample output, not claims; `npm run`/CLI claims still verified inside shell-typed fences.
-- npm package declares `mcpName: com.kage-core/kage` for the official MCP registry.
-
-
+- Initial local-first Kage MCP package with repo memory packets, recall, graph indexing, code graph, review gates, metrics, daemon, and setup helpers.
