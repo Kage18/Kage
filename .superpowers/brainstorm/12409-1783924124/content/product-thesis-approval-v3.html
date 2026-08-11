@@ -1,0 +1,41 @@
+<h2>Kage: the control plane for agent-delivered software</h2>
+<p class="subtitle">The customer contract is simple: connect GitHub, assign work, and receive a reviewable pull request with verified context and evidence.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Task → trusted delivery</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+      <div class="mock-content" style="border:1px solid var(--border);border-radius:10px"><div class="label">01</div><strong>Connect GitHub</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">Select repositories and set policies.</p></div>
+      <div class="mock-content" style="border:1px solid var(--border);border-radius:10px"><div class="label">02</div><strong>Give Kage a task</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">From an issue, prompt, Slack, or API.</p></div>
+      <div class="mock-content" style="border:1px solid var(--border);border-radius:10px"><div class="label">03</div><strong>Build trusted context</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">Verified memory, code graph, risks, and decisions.</p></div>
+      <div class="mock-content" style="border:1px solid var(--border);border-radius:10px"><div class="label">04</div><strong>Run isolated</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">Connected agent in a controlled sandbox.</p></div>
+      <div class="mock-content" style="border:1px solid var(--border);border-radius:10px"><div class="label">05</div><strong>Verify</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">Tests, security, quality, and policy gates.</p></div>
+      <div class="mock-content" style="border:2px solid var(--success);border-radius:10px"><div class="label">06</div><strong>Deliver a draft PR</strong><p style="font-size:.82rem;color:var(--text-secondary);margin-top:6px">Evidence, risks, unresolved questions, and human approval.</p></div>
+    </div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="section">
+    <div class="label">Kage owns</div>
+    <h3>The task-to-PR outcome</h3>
+    <p style="color:var(--text-secondary)">Task state, verified context, routing, policies, evidence, approval, PR delivery, and learning from the result.</p>
+  </div>
+  <div class="section">
+    <div class="label">Kage connects first</div>
+    <h3>Models and execution</h3>
+    <p style="color:var(--text-secondary)">Codex, Claude, GitHub/customer runners, and customer credentials. A managed Kage sandbox becomes an optional paid tier later.</p>
+  </div>
+</div>
+
+<h3>Is this the right product boundary?</h3>
+<div class="options">
+  <div class="option" data-choice="approve-product-thesis" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Approve this direction</h3><p>Kage owns reliable agent delivery, while models and compute remain pluggable initially.</p></div>
+  </div>
+  <div class="option" data-choice="revise-product-thesis" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>Revise the boundary</h3><p>Kage should own more or less of execution, delivery, or governance.</p></div>
+  </div>
+</div>
