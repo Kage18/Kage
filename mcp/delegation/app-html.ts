@@ -115,7 +115,15 @@ const APP_HTML = `<!doctype html>
   html,body { height:100%; }
   body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
     font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased; overflow:hidden; }
-  button { font:inherit; cursor:pointer; border:none; background:none; color:inherit; padding:0; }
+  button { font:inherit; cursor:pointer; border:none; background:none; color:inherit; padding:0;
+    transition:background .12s ease, border-color .12s ease, color .12s ease, opacity .12s ease; }
+  .view.on { animation:viewin .16s ease both; }
+  @keyframes viewin { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
+  .turn { animation:turnin .18s ease both; }
+  @keyframes turnin { from { opacity:0; transform:translateY(4px) } to { opacity:1; transform:none } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
+  }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-thumb { background:var(--line); border-radius:var(--r-panel); border:2px solid transparent; background-clip:content-box; }
   ::-webkit-scrollbar-track { background:transparent; }
@@ -147,7 +155,13 @@ const APP_HTML = `<!doctype html>
   .seg button.on .k { border-color:var(--line-strong, var(--line)); }
   .iconbtn { font-size:12px; padding:5px 11px; border-radius:var(--r-panel); border:1px solid var(--line);
     background:var(--surface); color:var(--text2); box-shadow:var(--shadow-sm); }
-  .iconbtn.primary { background:var(--seal); border-color:var(--seal); color:#fff; }
+  .iconbtn.primary { background:var(--green); border-color:var(--green); color:#06130d; font-weight:600; }
+  .iconbtn.primary:hover { background:var(--green-strong); border-color:var(--green-strong); }
+  /* The one thing on the bar that CREATES something should not look like the two
+     icon buttons next to it. */
+  #m-new { background:var(--green-soft); border-color:color-mix(in srgb, var(--green) 45%, var(--line));
+    color:var(--green); font-weight:550; }
+  #m-new:hover { background:var(--green); color:#06130d; border-color:var(--green); }
 
   /* The frame below the title bar is a horizontal split: projects rail, then the view.
      main used to own the height itself; it now fills whatever the split gives it. */
@@ -274,9 +288,15 @@ const APP_HTML = `<!doctype html>
     border-radius:var(--r-control); padding:1px 6px; color:var(--text2); background:var(--surface); }
 
   /* ---- room: the conversation ---- */
-  .room-scroll { overflow-y:auto; flex:1; }
-  .room-col { max-width:720px; margin:0 auto; padding:28px 24px 32px; display:flex; flex-direction:column; gap:18px; }
-  .primer { text-align:center; padding:70px 20px 20px; color:var(--text3); }
+  /* Bottom-anchored, like every chat surface people already know. The column used to
+     sit at the TOP of a tall pane, so a short conversation left ~400px of dead space
+     between the last message and the composer — the eye and the hands ended up at
+     opposite ends of the window. justify-content:flex-end pins the turns to the
+     composer and lets the empty space fall above, where it reads as headroom. */
+  .room-scroll { overflow-y:auto; flex:1; display:flex; flex-direction:column; }
+  .room-col { max-width:760px; width:100%; margin:0 auto; padding:32px 24px 8px;
+    display:flex; flex-direction:column; justify-content:flex-end; gap:22px; flex:1; box-sizing:border-box; }
+  .primer { text-align:center; padding:20px; color:var(--text3); margin:auto 0; }
   .primer .pseal-eye { width:46px; height:46px; display:block; }
   .primer .pseal { width:46px; height:46px; color:var(--green);
     font-family:var(--mono); font-weight:700; font-size:22px; display:flex; align-items:center; justify-content:center;
@@ -287,15 +307,20 @@ const APP_HTML = `<!doctype html>
      next to AO: a bubble is a frame, and framing continuous prose fights the reading.
      Only the user's own lines are bubbled — they are short, they are interjections,
      and the contrast is what makes the thread scannable. */
-  .turn { display:flex; flex-direction:column; gap:5px; max-width:100%; }
-  .turn.you { align-self:flex-end; align-items:flex-end; max-width:80%; }
-  .turn.kage { align-self:stretch; align-items:flex-start; }
-  .turn .bubble2 { font-size:14.5px; line-height:1.65; white-space:pre-wrap; }
-  .turn.you .bubble2 { background:var(--surface2); border:1px solid var(--line);
-    color:var(--text); border-radius:var(--r-card); border-bottom-right-radius:4px; padding:9px 14px; font-size:14px; }
+  /* One column, one rhythm. Right-aligned bubbles of wildly different widths (830px
+     next to 65px for "hi") read as accidental; a labelled left-aligned turn with a
+     rule down the side reads as a transcript, which is what this is. */
+  .turn { display:flex; flex-direction:column; gap:7px; max-width:100%; align-self:stretch; }
+  .turn.you { margin-top:6px; }
+  .turn .who { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--text3); }
+  .turn.you .who { color:var(--green); }
+  .turn .bubble2 { font-size:14.5px; line-height:1.7; white-space:pre-wrap; }
+  .turn.you .bubble2 { color:var(--text2); max-width:68ch;
+    border-left:2px solid var(--green); padding-left:14px; }
   .turn.kage .bubble2 { color:var(--text); max-width:68ch; }
   /* A turn boundary with elapsed time, the way AO closes a stretch of work. */
-  .turnbreak { display:flex; align-items:center; gap:12px; padding:6px 0 2px; }
+  .turnbreak { display:flex; align-items:center; gap:12px; padding:2px 0 0; opacity:.55; }
   .turnbreak .rule { flex:1; height:1px; background:var(--line2); }
   .turnbreak .label { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
     text-transform:uppercase; color:var(--text3); }
@@ -949,6 +974,9 @@ function renderRoom() {
       turnsEl.appendChild(brk);
     }
     var wrap = h("div", "turn " + turn.role);
+    // Say who is speaking. Alignment alone carried it before, which meant a transcript
+    // you had to decode rather than read.
+    wrap.appendChild(h("div", "who", turn.role === "you" ? "You" : "Kage"));
     wrap.appendChild(h("div", "bubble2", turn.text));
     if (turn.role === "kage" && turn.tools && turn.tools.length) {
       var used = turn.tools.map(toolLabel);
