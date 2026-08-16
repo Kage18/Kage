@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher, chmodSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { extname, join, normalize, resolve } from "node:path";
 import {
   benchmarkCodingMemoryQuality,
@@ -50,6 +51,9 @@ import {
   validateProject,
   type ObservationEvent,
 } from "./kernel.js";
+import { guardRequest, loopbackOrigins, makeToken } from "./delegation/guard.js";
+import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
+import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
 
 export interface DaemonStatus {
   ok: boolean;
@@ -447,6 +451,42 @@ function statusPath(projectDir: string): string {
   return join(daemonDir(projectDir), "status.json");
 }
 
+/**
+ * The daemon's API token. Written 0600 beside the status file so any process running as
+ * this user can read it (the CLI, the TUI, the desktop shell) and nothing else can.
+ * Regenerated on every start: a token that outlives its daemon is a credential nobody
+ * is tracking.
+ */
+function tokenPath(projectDir: string): string {
+  return join(daemonDir(projectDir), "token");
+}
+
+export function provisionDaemonToken(projectDir: string): string {
+  const token = makeToken();
+  mkdirSync(daemonDir(projectDir), { recursive: true });
+  const path = tokenPath(projectDir);
+  writeFileSync(path, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort on filesystems without POSIX modes.
+  }
+  return token;
+}
+
+export function readDaemonToken(projectDir: string): string {
+  try {
+    return readFileSync(tokenPath(projectDir), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Refuse the request, saying plainly why — a silent 404 would teach nothing. */
+function refuse(res: ServerResponse, verdict: { status: number; reason?: string }): void {
+  json(res, verdict.status, { ok: false, error: "refused", reason: verdict.reason });
+}
+
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(value, null, 2));
@@ -624,6 +664,7 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   const restPort = options.restPort ?? DEFAULT_REST_PORT;
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
   mkdirSync(daemonDir(projectDir), { recursive: true });
+  const token = provisionDaemonToken(projectDir);
   indexProject(projectDir);
   let lastIndexedAt = new Date().toISOString();
   const status: DaemonStatus = {
@@ -667,13 +708,39 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   }
 
+  const guardContext = { allowedOrigins: loopbackOrigins(restPort), token };
+  const delegationFeed = createDelegationFeed(projectDir);
+  const delegationRoom = createRoomState();
+  const delegationPty = createPtyState();
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}:${restPort}`);
+    // Every request passes the guard before any handler sees it: loopback Host,
+    // same-origin (or no origin), and a token for anything that changes state.
+    const verdict = guardRequest(
+      { method: req.method ?? "GET", headers: req.headers as Record<string, string | string[] | undefined>, pathname: url.pathname },
+      guardContext,
+    );
+    if (!verdict.ok) {
+      refuse(res, verdict);
+      return;
+    }
     try {
       if (req.method === "GET" && url.pathname === "/health") {
         json(res, 200, { ok: true, name: "kage-daemon", project_dir: projectDir, pid: process.pid });
         return;
       }
+      // The delegation app + run API live on THIS origin, behind the same guard —
+      // one origin is what lets the shipped page call the API at all (CSP 'self').
+      if (req.method === "GET" && (url.pathname === APP_ROUTE || url.pathname === `${APP_ROUTE}/`)) {
+        // Injecting the token here is safe under the guard: this page is only served to
+        // a loopback Host with a same-origin (or absent) Origin — a DNS-rebound page
+        // fails the Host check before it can read anything.
+        const html = delegationAppHtml(token);
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(html);
+        return;
+      }
+      if (await handleDelegationRoute({ projectDir, feed: delegationFeed, room: delegationRoom, pty: delegationPty }, req, res, url)) return;
       if (req.method === "GET" && url.pathname === "/kage/status") {
         status.last_indexed_at = lastIndexedAt;
         json(res, 200, status);
@@ -840,55 +907,102 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   process.on("SIGTERM", () => {
     if (watcher) watcher.close();
     if (refreshTimer) clearTimeout(refreshTimer);
+    delegationFeed.close();
     server.close(() => process.exit(0));
   });
+}
+
+/**
+ * Build every viewer report, in place, synchronously.
+ *
+ * Runs in its own process (spawned by startViewer, or by `kage viewer-reports`) so the
+ * viewer's event loop is never blocked by it. Reports already newer than the newest
+ * packet or index are skipped: they derive entirely from those inputs, so a newer
+ * report is still true, and restarting on an unchanged repo then costs nothing.
+ */
+export function generateViewerReports(projectDir: string): void {
+  const projectRoot = resolve(projectDir);
+  const reports = viewerReportPaths(projectRoot);
+  try {
+    mkdirSync(join(projectRoot, ".agent_memory", "reports"), { recursive: true });
+  } catch {
+    return;
+  }
+  let newestInput = 0;
+  for (const dir of [join(projectRoot, ".agent_memory", "packets"), join(projectRoot, ".agent_memory", "indexes")]) {
+    try {
+      for (const name of readdirSync(dir)) {
+        const at = statSync(join(dir, name)).mtimeMs;
+        if (at > newestInput) newestInput = at;
+      }
+    } catch {
+      // Missing directory just means "no inputs seen here".
+    }
+  }
+  const steps: Array<[string, () => unknown]> = [
+    ["metrics", () => kageMetrics(projectDir)],
+    ["inbox", () => memoryInbox(projectDir)],
+    ["quality", () => qualityReport(projectDir)],
+    ["benchmark", () => viewerBenchmarkReport(projectDir)],
+    ["profile", () => kageProjectProfile(projectDir)],
+    ["capabilities", () => kageCapabilityAudit(projectDir)],
+    ["slots", () => kageContextSlots(projectDir)],
+    ["decisions", () => kageDecisionIntelligence(projectDir)],
+    ["graphInsights", () => kageGraphInsights(projectDir)],
+    ["workspace", () => kageWorkspace(projectDir)],
+    ["sessions", () => kageSessionCaptureReport(projectDir)],
+    ["replay", () => kageSessionReplay(projectDir)],
+    ["memoryAccess", () => kageMemoryAccess(projectDir)],
+    ["memoryAudit", () => kageMemoryAudit(projectDir)],
+    ["handoff", () => kageMemoryHandoff(projectDir)],
+    ["lifecycle", () => kageMemoryLifecycle(projectDir)],
+    ["activity", () => kageActivity(projectDir)],
+    ["timeline", () => kageMemoryTimeline(projectDir)],
+    ["lineage", () => kageMemoryLineage(projectDir)],
+    ["setup", () => setupDoctor(projectDir)],
+    ["trust", () => benchmarkTrust(projectDir)],
+    ["suppressed", () => kageSuppressedMemory(projectDir)],
+    // Last on purpose — the four measured expensive ones (30s/39s/58s/80s). Everything
+    // a first glance needs has already been written by the time these start.
+    ["moduleHealth", () => kageModuleHealth(projectDir)],
+    ["risk", () => kageRisk(projectDir)],
+    ["contributors", () => kageContributors(projectDir)],
+    ["xray", () => kageRepoXray(projectDir)],
+  ];
+  for (const [name, compute] of steps) {
+    try {
+      const path = reports[name];
+      if (existsSync(path) && statSync(path).mtimeMs >= newestInput) continue;
+      writeFileSync(path, JSON.stringify(compute(), null, 2));
+    } catch {
+      // One failed report must not stop the rest.
+    }
+  }
 }
 
 export async function startViewer(projectDir: string, options: { host?: string; port?: number } = {}): Promise<ViewerStatus> {
   const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? DEFAULT_VIEWER_PORT;
   const viewerDir = resolve(__dirname, "..", "viewer");
-  const threeDir = resolve(__dirname, "..", "node_modules", "three");
   const projectRoot = resolve(projectDir);
   const reports = viewerReportPaths(projectRoot);
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
 
-  // Pre-generate lightweight JSON reports so the viewer can load them directly.
-  // Note: reports.value (the cumulative value ledger written by recall) is served
-  // as-is and intentionally never regenerated here.
-  try {
-    mkdirSync(reportsDir, { recursive: true });
-    const metrics = kageMetrics(projectDir);
-    writeFileSync(reports.metrics, JSON.stringify(metrics, null, 2));
-    const inbox = memoryInbox(projectDir);
-    writeFileSync(reports.inbox, JSON.stringify(inbox, null, 2));
-    writeFileSync(reports.quality, JSON.stringify(qualityReport(projectDir), null, 2));
-    writeFileSync(reports.benchmark, JSON.stringify(viewerBenchmarkReport(projectDir), null, 2));
-    writeFileSync(reports.contributors, JSON.stringify(kageContributors(projectDir), null, 2));
-    writeFileSync(reports.profile, JSON.stringify(kageProjectProfile(projectDir), null, 2));
-    writeFileSync(reports.xray, JSON.stringify(kageRepoXray(projectDir), null, 2));
-    writeFileSync(reports.capabilities, JSON.stringify(kageCapabilityAudit(projectDir), null, 2));
-    writeFileSync(reports.slots, JSON.stringify(kageContextSlots(projectDir), null, 2));
-    writeFileSync(reports.decisions, JSON.stringify(kageDecisionIntelligence(projectDir), null, 2));
-    writeFileSync(reports.risk, JSON.stringify(kageRisk(projectDir), null, 2));
-    writeFileSync(reports.moduleHealth, JSON.stringify(kageModuleHealth(projectDir), null, 2));
-    writeFileSync(reports.graphInsights, JSON.stringify(kageGraphInsights(projectDir), null, 2));
-    writeFileSync(reports.workspace, JSON.stringify(kageWorkspace(projectDir), null, 2));
-    writeFileSync(reports.sessions, JSON.stringify(kageSessionCaptureReport(projectDir), null, 2));
-    writeFileSync(reports.replay, JSON.stringify(kageSessionReplay(projectDir), null, 2));
-    writeFileSync(reports.memoryAccess, JSON.stringify(kageMemoryAccess(projectDir), null, 2));
-    writeFileSync(reports.memoryAudit, JSON.stringify(kageMemoryAudit(projectDir), null, 2));
-    writeFileSync(reports.handoff, JSON.stringify(kageMemoryHandoff(projectDir), null, 2));
-    writeFileSync(reports.lifecycle, JSON.stringify(kageMemoryLifecycle(projectDir), null, 2));
-    writeFileSync(reports.activity, JSON.stringify(kageActivity(projectDir), null, 2));
-    writeFileSync(reports.timeline, JSON.stringify(kageMemoryTimeline(projectDir), null, 2));
-    writeFileSync(reports.lineage, JSON.stringify(kageMemoryLineage(projectDir), null, 2));
-    writeFileSync(reports.setup, JSON.stringify(setupDoctor(projectDir), null, 2));
-    writeFileSync(reports.trust, JSON.stringify(benchmarkTrust(projectDir), null, 2));
-    writeFileSync(reports.suppressed, JSON.stringify(kageSuppressedMemory(projectDir), null, 2));
-  } catch {
-    // non-fatal: viewer will show 404 for reports if generation fails
-  }
+  // Report generation runs in a CHILD PROCESS, and that detail is the whole fix.
+  //
+  // These calls are synchronous and genuinely expensive on this repo — measured:
+  // kageRepoXray 80s, kageContributors 58s, kageRisk 39s, kageModuleHealth 30s, 227s
+  // total. Generating them before listen() made `kage viewer` look hung for four
+  // minutes. But simply moving them after listen() is not enough: Node is
+  // single-threaded, so an 80s synchronous call blocks the server that is already
+  // listening. Yielding between reports only opens gaps BETWEEN them — a request
+  // landing inside kageContributors still measured 58s. Off-thread is the only honest
+  // answer, so the work goes to a detached child and the server stays responsive.
+  const child = spawn(process.execPath, [__filename.replace(/daemon\.js$/, "cli.js"), "viewer-reports", "--project", projectRoot], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 
   const url = viewerUrl(host, port, projectRoot);
   const liveFeed = startLiveFeed(projectRoot);
@@ -907,15 +1021,13 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       return;
     } else if (requestUrl.pathname.startsWith("/viewer/")) {
       filePath = join(viewerDir, normalize(requestUrl.pathname.replace(/^\/viewer\//, "")));
-    } else if (requestUrl.pathname.startsWith("/vendor/three/")) {
-      filePath = join(threeDir, normalize(requestUrl.pathname.replace(/^\/vendor\/three\//, "")));
     } else {
       const decoded = decodeURIComponent(requestUrl.pathname);
       filePath = resolve(decoded);
       if (!isInside(projectRoot, filePath)) filePath = null;
     }
 
-    if (!filePath || (!isInside(viewerDir, filePath) && !isInside(projectRoot, filePath) && !isInside(threeDir, filePath)) || !existsSync(filePath)) {
+    if (!filePath || (!isInside(viewerDir, filePath) && !isInside(projectRoot, filePath)) || !existsSync(filePath)) {
       json(res, 404, { ok: false, error: "not_found" });
       return;
     }
@@ -932,8 +1044,14 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     res.end(readFileSync(filePath));
   });
 
+  try {
+    mkdirSync(reportsDir, { recursive: true });
+  } catch {
+    // Reports simply will not be written; the viewer still serves.
+  }
   await new Promise<void>((resolveListen) => server.listen(port, host, resolveListen));
   console.log(`Kage viewer → http://${host}:${port}/`);
+  console.log("Reports build in a separate process — sections fill in as they finish.");
   process.on("SIGTERM", () => {
     liveFeed.close();
     server.close(() => process.exit(0));

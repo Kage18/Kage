@@ -3284,21 +3284,25 @@ export function formatTokenCount(tokens: number): string {
   return String(count);
 }
 
-// Receipt math: tokens an agent would have spent reading the cited source files
-// of the served packets (bytes / 4) minus the tokens the recall context block
-// itself costs (length / 4). Floored at zero — a recall never "costs" savings.
+// Receipt math: estimated tokens an agent would have spent re-reading the cited sources
+// of the served packets, minus what the recall context block itself costs. Honesty cap
+// (receipt v1): an agent re-reads the relevant slice of a cited file, not the whole
+// thing — each file contributes at most RECALL_READ_TOKENS_CAP_PER_FILE (a targeted
+// few-hundred-line read), so a memory citing a 900KB module can no longer claim the
+// full module as savings. Floored at zero — a recall never "costs" savings.
+export const RECALL_READ_TOKENS_CAP_PER_FILE = 1500;
 function recallTokensSaved(projectDir: string, results: RecallResult["results"], contextBlock: string): number {
   const paths = unique(results.flatMap((entry) => entry.packet.paths).filter((path) => meaningfulMemoryPath(path)));
-  let sourceBytes = 0;
+  let sourceTokens = 0;
   for (const path of paths) {
     try {
       const stats = statSync(join(projectDir, path));
-      if (stats.isFile()) sourceBytes += stats.size;
+      if (stats.isFile()) sourceTokens += Math.min(Math.floor(stats.size / 4), RECALL_READ_TOKENS_CAP_PER_FILE);
     } catch {
       // Missing cited files save nothing.
     }
   }
-  return Math.max(0, Math.floor(sourceBytes / 4) - Math.floor(contextBlock.length / 4));
+  return Math.max(0, sourceTokens - Math.floor(contextBlock.length / 4));
 }
 
 // Conservative per-type defaults for discovery_tokens — the approximate exploration +
@@ -3860,6 +3864,49 @@ function identifierTokens(text: string): Set<string> {
   const out = new Set<string>();
   for (const match of text.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) out.add(match[0].toLowerCase());
   return out;
+}
+
+// Strong code-identifier tokens (camelCase/PascalCase, snake_case, SCREAMING_SNAKE) —
+// plain prose words never match, so only deliberate symbol references are considered.
+const STRONG_IDENTIFIER_PATTERNS = [
+  // camelCase / PascalCase: a lowercase run, THEN an internal capital (mergeRun,
+  // ClaimRecord). Both halves matter — requiring the internal capital keeps ordinary
+  // capitalized prose out ("Briefs"), and requiring the lowercase run before it keeps
+  // all-caps emphasis out ("PROPERLY"). Underscored constants are matched below.
+  /^[A-Za-z][a-z0-9]+[A-Z][A-Za-z0-9]{2,}$/,
+  /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/,
+  /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/,
+];
+
+// Write-time named-symbol grounding check: strong identifiers the memory text mentions
+// that appear in NONE of the cited code files. File existence alone cannot catch a
+// memory naming a function the cited code never had — surface it so the writer fixes
+// the name or cites the defining file. Warning-only by design: rejection would
+// false-positive on prose and legitimate cross-file mentions.
+function unresolvedNamedSymbols(projectDir: string, paths: string[], text: string): string[] {
+  const anchorable = unique(paths).filter((path) => pathSupportsSymbolAnchors(path) && pathExistsInRepo(projectDir, path));
+  if (!anchorable.length) return [];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) {
+    const token = match[0];
+    if (seen.has(token)) continue;
+    seen.add(token);
+    if (STRONG_IDENTIFIER_PATTERNS.some((pattern) => pattern.test(token))) candidates.push(token);
+  }
+  if (!candidates.length) return [];
+  const contents: string[] = [];
+  for (const path of anchorable.slice(0, 8)) {
+    try {
+      contents.push(readFileSync(join(projectDir, path), "utf8").toLowerCase());
+    } catch {
+      // Unreadable cited file: cannot clear names against it.
+    }
+  }
+  if (!contents.length) return [];
+  return candidates
+    .filter((token) => !contents.some((content) => content.includes(token.toLowerCase())))
+    .slice(0, 8);
 }
 
 // current-file symbol span hashes, keyed by `${nameLower}\0${kind}` -> [sha256...].
@@ -16492,13 +16539,15 @@ export function capture(input: CaptureInput): CaptureResult {
     .filter((path) => meaningfulMemoryPath(path) && !shouldSkipRepoMemoryPath(path));
   const missingPaths = meaningfulPaths.filter((path) => !pathExistsInRepo(input.projectDir, path));
   // Citation validation. Strict mode (agent-facing record_memory tools / CLI) rejects a
-  // write whose every cited path is missing — the PRD's "reject if citations don't exist".
+  // write citing ANY nonexistent path — "hallucinated citations rejected at write time"
+  // must hold per citation, not only when every cited path is wrong. allow_missing_paths
+  // stays the escape hatch for a file the caller is about to create.
   // The core library stays permissive (warn-only) for programmatic callers and migrations.
-  if (input.strictCitations && meaningfulPaths.length && missingPaths.length === meaningfulPaths.length && !input.allowMissingPaths) {
+  if (input.strictCitations && missingPaths.length && !input.allowMissingPaths) {
     return {
       ok: false,
       errors: [
-        `Citation validation failed: none of the referenced paths exist in this repo: ${missingPaths.join(", ")}. ` +
+        `Citation validation failed: ${missingPaths.length} of ${meaningfulPaths.length} referenced path(s) do not exist in this repo: ${missingPaths.join(", ")}. ` +
           `Fix the paths, or pass allow_missing_paths to record anyway (e.g. for a file you are about to create).`,
       ],
       warnings: [],
@@ -16506,6 +16555,17 @@ export function capture(input: CaptureInput): CaptureResult {
   }
   if (missingPaths.length) {
     warnings.push(`Some referenced paths do not exist in this repo: ${missingPaths.join(", ")}`);
+  }
+
+  // Named-symbol grounding: strong identifiers in the text that resolve in none of the
+  // cited code files usually mean a misnamed symbol or a missing citation. Warn and
+  // record; such names get no symbol anchors, so staleness falls back to whole-file.
+  const unresolvedSymbols = unresolvedNamedSymbols(input.projectDir, meaningfulPaths, `${input.title}\n${input.body}`);
+  if (unresolvedSymbols.length) {
+    warnings.push(
+      `Named symbols not found in any cited file: ${unresolvedSymbols.join(", ")}. ` +
+        `If the memory is about these, cite the file that defines them.`,
+    );
   }
 
   // Ungrounded conversational chatter — a frustrated/rhetorical user message with no cited repo
@@ -16608,6 +16668,7 @@ export function capture(input: CaptureInput): CaptureResult {
     ...packet.quality,
     ...evaluateMemoryQuality(input.projectDir, packet),
     ...(contradictions.length ? { contradicts: contradictions.map((c) => c.packet_id) } : {}),
+    ...(unresolvedSymbols.length ? { unresolved_symbols: unresolvedSymbols } : {}),
   };
   const path = writePacket(input.projectDir, packet, routeToPending ? "pending" : "packets");
   recordMemoryAudit(input.projectDir, "capture", [packet], {

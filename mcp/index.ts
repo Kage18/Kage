@@ -84,6 +84,16 @@ import {
   type SetupAgent,
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
+import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
+import { dispatchRun } from "./delegation/dispatch.js";
+import { steerRun } from "./delegation/steer.js";
+import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
+import { compileBrief, renderBriefCard } from "./delegation/brief.js";
+import { renderClaimCard } from "./delegation/verify.js";
+import { mergeRun, rejectRun } from "./delegation/ratify.js";
+import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
+import { diffBudget } from "./delegation/config.js";
+import { readJudgment, renderJudgment } from "./delegation/manager.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
 
@@ -1127,8 +1137,258 @@ export function listTools() {
       },
     },
   ];
+  // Delegation tools: the manager's hands. Exposed inside the room (KAGE_ROOM=1) so a
+  // normal coding session is not handed orchestration verbs it has no business calling.
+  if (process.env.KAGE_ROOM === "1" || process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") {
+    all.push(...(DELEGATION_TOOLS as unknown as typeof all));
+  }
   if (process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") return all;
+  if (process.env.KAGE_ROOM === "1") return all.filter((tool) => CORE_TOOLS.has(tool.name) || DELEGATION_TOOL_NAMES.has(tool.name));
   return all.filter((tool) => CORE_TOOLS.has(tool.name));
+}
+
+const DELEGATION_TOOLS = [
+  {
+    name: "kage_room_state",
+    description:
+      "Clock in: the compact state of every run, what needs the user, and the trust line. Call this FIRST in any session — the manager holds no memory of its own.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] },
+  },
+  {
+    name: "kage_events_since",
+    description:
+      "Run events since a cursor. Call at the start of each turn to catch up on work that finished while you were talking. Pass back next_cursor from the previous reply; it reports how many events it could not fit rather than truncating silently.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        cursor: { type: "number", description: "next_cursor from your last call; omit for everything" },
+      },
+      required: ["project_dir"],
+    },
+  },
+  {
+    name: "kage_compile_brief",
+    description:
+      "Compile a brief for an intent from repo memory and the code graph, without dispatching. Returns memories (with author and date), predicted touch set, derived checks, and a confidence band with its basis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        type: { type: "string", enum: [...RUN_TYPES] },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_dispatch",
+    description:
+      "Hire a coding agent to deliver an intent in an isolated worktree, then verify its claim by executing the checks. Pass your judgment (drop_memories, confidence, clarification) so it is recorded with the run — the kernel validates it: drops need a reason and confidence may only be lowered.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        type: { type: "string", enum: [...RUN_TYPES] },
+        agent: { type: "string", enum: ["claude", "codex", "stub"] },
+        drop_memories: {
+          type: "array",
+          description: "Recalled memories you judged irrelevant to this task. Each needs a reason.",
+          items: {
+            type: "object",
+            properties: { id: { type: "string" }, reason: { type: "string" } },
+            required: ["id", "reason"],
+          },
+        },
+        confidence: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description: "Your band. You may lower the kernel's band, never raise it.",
+        },
+        confidence_reason: { type: "string" },
+        clarification_question: { type: "string", description: "The question you asked before spending tokens." },
+        clarification_answer: { type: "string", description: "What the user answered." },
+        judgment_note: { type: "string", description: "Anything else about how you shaped this brief." },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_judgment",
+    description:
+      "The recorded judgment for a run: which memories you kept or dropped and why, the confidence you set, the question you asked, and any moves the kernel refused.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_task",
+    description: "The full card for one run: state, claim, checks with verdicts, unsure notes, learnings.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_tell",
+    description:
+      "Answer or steer a run. A blocked or dropped agent is RESUMED in place with its context intact; a live one gets the message queued for its next boundary. The reply states which happened — never assume delivery.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" }, message: { type: "string" } },
+      required: ["project_dir", "run_id", "message"],
+    },
+  },
+  {
+    name: "kage_stop",
+    description: "Halt a run now. State is preserved and the run is resumable.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_merge_run",
+    description:
+      "Accept a verified claim: merge its branch and ratify the learnings that rode with it into team memory. Only a run in state 'ready' can be merged.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_reject_run",
+    description: "Refuse a claim with a reason. The reason is captured as a negative_result memory so future briefs carry it.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" }, reason: { type: "string" } },
+      required: ["project_dir", "run_id", "reason"],
+    },
+  },
+  {
+    name: "kage_report",
+    description: "The while-you-were-away digest: ready, blocked, halted, and the trust line. Observed numbers only.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, all: { type: "boolean" } },
+      required: ["project_dir"],
+    },
+  },
+];
+
+const DELEGATION_TOOL_NAMES = new Set(DELEGATION_TOOLS.map((tool) => tool.name));
+
+// The manager's hands. Every one of these is a request to the kernel — the kernel
+// decides what is legal, executes the checks, and owns the record. Nothing here lets a
+// model assert a verdict.
+async function callDelegationTool(name: string, args: Record<string, unknown> | undefined) {
+  const text = (body: string) => ({ content: [{ type: "text" as const, text: body }] });
+  try {
+    return await runDelegationTool(name, args, text);
+  } catch (error) {
+    // A tool never throws at the manager: a bad request comes back as a sentence it can
+    // act on, which is also what keeps the room conversational instead of brittle.
+    return text(`Could not do that: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function runDelegationTool(
+  name: string,
+  args: Record<string, unknown> | undefined,
+  text: (body: string) => { content: Array<{ type: "text"; text: string }> },
+) {
+  const projectDir = String(args?.project_dir ?? "");
+  const runId = String(args?.run_id ?? "");
+  const needsRun = ["kage_task", "kage_tell", "kage_stop", "kage_merge_run", "kage_reject_run"];
+  if (needsRun.includes(name) && !runId) return text(`${name} needs a run_id. Call kage_room_state to see the runs that exist.`);
+
+  if (name === "kage_room_state") return text(JSON.stringify(roomState(projectDir), null, 2));
+  if (name === "kage_events_since") {
+    // Sequence cursor, not a timestamp: same-millisecond events used to vanish.
+    const cursor = Number(args?.cursor ?? args?.since ?? 0);
+    const page = eventsSincePage(projectDir, Number.isFinite(cursor) ? cursor : 0);
+    return text(
+      JSON.stringify(
+        {
+          events: page.events,
+          next_cursor: page.cursor,
+          ...(page.dropped ? { dropped: page.dropped, note: `${page.dropped} older event(s) not shown — pass next_cursor to keep up` } : {}),
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (name === "kage_compile_brief") {
+    const intent = String(args?.intent ?? "").trim();
+    if (!intent) return text("kage_compile_brief needs an intent — the sentence describing the work.");
+    const type = (typeof args?.type === "string" ? args.type : "chore") as RunType;
+    return text(JSON.stringify(compileBrief(projectDir, intent, type), null, 2));
+  }
+  if (name === "kage_dispatch") {
+    if (!String(args?.intent ?? "").trim()) return text("kage_dispatch needs an intent — the sentence describing the work.");
+    const type = (typeof args?.type === "string" ? args.type : "chore") as RunType;
+    const agent = (typeof args?.agent === "string" ? args.agent : detectAgent()) ?? "stub";
+    const drops = Array.isArray(args?.drop_memories)
+      ? (args.drop_memories as Array<{ id?: unknown; reason?: unknown }>).map((entry) => ({
+          id: String(entry?.id ?? ""),
+          reason: String(entry?.reason ?? ""),
+        }))
+      : undefined;
+    const question = typeof args?.clarification_question === "string" ? args.clarification_question : undefined;
+    // Any judgment field present means a manager shaped this brief; absent means kernel
+    // defaults, and the record says which so the two can be compared later.
+    const judged =
+      drops?.length || args?.confidence || question || args?.judgment_note
+        ? {
+            dropMemoryIds: drops,
+            managerConfidence: typeof args?.confidence === "string" ? args.confidence : undefined,
+            confidenceReason: typeof args?.confidence_reason === "string" ? args.confidence_reason : undefined,
+            ...(question
+              ? {
+                  clarification: {
+                    question,
+                    answer: typeof args?.clarification_answer === "string" ? args.clarification_answer : undefined,
+                  },
+                }
+              : {}),
+            notes: typeof args?.judgment_note === "string" ? args.judgment_note : undefined,
+          }
+        : undefined;
+    const result = await dispatchRun(projectDir, { intent: String(args?.intent ?? ""), type, judgment: judged }, adapterByName(agent));
+    const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
+    const judgment = readJudgment(projectDir, result.task.id);
+    const judgmentBlock = judgment ? `\n\n${renderJudgment(judgment).join("\n")}` : "";
+    return text(`${renderBriefCard(result.task, result.plan)}${judgmentBlock}\n\n${claimCard}`);
+  }
+  if (name === "kage_judgment") {
+    return text(renderJudgment(readJudgment(projectDir, runId)).join("\n"));
+  }
+  if (name === "kage_task") {
+    return text(renderRunCard(readRun(projectDir, runId), readClaim(projectDir, runId)));
+  }
+  if (name === "kage_tell") {
+    const result = await steerRun(projectDir, runId, String(args?.message ?? ""), adapterByName);
+    return text(`${result.message}\n(delivery: ${result.delivery})`);
+  }
+  if (name === "kage_stop") {
+    return text(renderRunLine(transitionRun(projectDir, runId, "stopped", "manager", "stopped from the room")));
+  }
+  if (name === "kage_merge_run") return text(mergeRun(projectDir, runId).message);
+  if (name === "kage_reject_run") return text(rejectRun(projectDir, runId, String(args?.reason ?? "")).message);
+  if (name === "kage_report") {
+    const report = buildReport(projectDir, { all: Boolean(args?.all) });
+    const rendered = renderReport(projectDir, report);
+    markReportRead(projectDir);
+    return text(rendered);
+  }
+  return text(`Unknown delegation tool: ${name}`);
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -1137,6 +1397,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 export async function callTool(name: string, args: Record<string, unknown> | undefined) {
   await ensureTreeSitterLanguages();
+
+  if (DELEGATION_TOOL_NAMES.has(name)) return await callDelegationTool(name, args);
+
   if (name === "kage_list_domains") {
     const catalog = await fetchJSON<Catalog>(`${BASE_URL}/catalog.json`);
     const lines = Object.entries(catalog.domains)
@@ -1298,7 +1561,8 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // Visible receipt: surface what the harness saved today so agents relay it. Kept
     // outside the size cap so it always survives.
     const gains = valueSummary(projectDir).today;
-    const gainsLine = `\n\nGains: ~${formatTokenCount(gains.tokens_saved)} tokens saved this session · stale memories withheld: ${gains.stale_withheld}`;
+    // Observed counts lead; token savings are an estimate and say so (honest receipt v1).
+    const gainsLine = `\n\nGains today: ${gains.recalls} recall${gains.recalls === 1 ? "" : "s"} served · ${gains.stale_withheld} stale withheld${gains.tokens_saved > 0 ? ` · est. ~${formatTokenCount(gains.tokens_saved)} tokens saved` : ""}`;
     // Backstop: per-field clamping + graph dedup keep this compact in practice, but never
     // let a pathological repo overflow the MCP response again. ~24k chars ≈ 6k tokens.
     const MAX_CONTEXT_CHARS = 24000;
@@ -1323,9 +1587,13 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // Visible receipt: in text mode, surface what this recall saved so the agent
     // can relay it. Value is otherwise invisible; an unseen win is a churned user.
     const receipt = result.value_receipt;
-    const gainsLine = receipt && (receipt.tokens_saved > 0 || receipt.stale_withheld > 0)
-      ? `\n\nGains: ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall${receipt.stale_withheld ? ` · stale memories withheld: ${receipt.stale_withheld}` : ""}`
-      : "";
+    const receiptParts = receipt
+      ? [
+          ...(receipt.stale_withheld > 0 ? [`stale memories withheld: ${receipt.stale_withheld}`] : []),
+          ...(receipt.tokens_saved > 0 ? [`est. ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall`] : []),
+        ]
+      : [];
+    const gainsLine = receiptParts.length ? `\n\nGains: ${receiptParts.join(" · ")}` : "";
     return {
       content: [{ type: "text", text: args?.json || args?.explain ? JSON.stringify(result, null, 2) : `${result.context_block}${gainsLine}` }],
     };

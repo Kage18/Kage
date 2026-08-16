@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as spawnProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -101,6 +101,7 @@ import {
   setupAgent,
   generatePluginHooks,
   VALUE_DOLLARS_PER_MILLION_TOKENS,
+  RECALL_READ_TOKENS_CAP_PER_FILE,
   setupDoctor,
   setContextSlot,
   staleCatch,
@@ -124,6 +125,18 @@ import {
   type ObservationEvent,
   type SetupAgent,
 } from "./kernel.js";
+import { dirtyTreeWarning, dispatchRun, executeRun, runWorkspacePath } from "./delegation/dispatch.js";
+import { ensureAppDaemon } from "./delegation/app-daemon.js";
+import { rememberProject } from "./delegation/projects.js";
+import { steerRun } from "./delegation/steer.js";
+import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
+import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
+import { compileBrief, renderBriefCard } from "./delegation/brief.js";
+import { renderClaimCard } from "./delegation/verify.js";
+import { mergeRun, rejectRun } from "./delegation/ratify.js";
+import { buildReport, markReportRead, renderReport, renderStatusBoard } from "./delegation/report.js";
+import { diffBudget, writeDelegationConfig } from "./delegation/config.js";
+import { openRoom } from "./delegation/room.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
 
@@ -251,6 +264,22 @@ Usage:
   kage changelog --project <dir> [--days <n>] [--json]
   kage review --project <dir>
   kage validate --project <dir>
+  kage app [--project <dir>] [--no-open]     the web app: inbox · runs · board (starts the daemon if needed)
+  kage ui [--project <dir>]                  full-screen console: board · review · dispatch · memory
+  kage room [--project <dir>] [--agent claude|codex]
+  kage dispatch "<intent>" [--agent claude|codex|stub] [--type bugfix|feature|refactor|migration|chore|investigation] [--brief-only]
+  kage runs [--project <dir>]
+  kage status [--watch] [--project <dir>]
+  kage task <run-id> [--project <dir>]
+  kage review <run-id> [--project <dir>]
+  kage merge <run-id> [--project <dir>]
+  kage reject <run-id> "<reason>" [--project <dir>]
+  kage open <run-id> [--project <dir>]
+  kage tell <run-id> "<message>" [--project <dir>]
+  kage stop <run-id> [--project <dir>]
+  kage retry <run-id> [--project <dir>]
+  kage report [--all] [--project <dir>]
+  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--project <dir>]
 
 Types:
   ${MEMORY_TYPES.join(", ")}`;
@@ -914,6 +943,38 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Internal: build the viewer's JSON reports. Never typed by a human — startViewer
+  // spawns it so the expensive, synchronous report functions run off the server's
+  // thread. See generateViewerReports for the measurements that forced this.
+  if (command === "viewer-reports") {
+    const { generateViewerReports } = await import("./daemon.js");
+    generateViewerReports(projectArg(args));
+    return;
+  }
+
+  if (command === "app") {
+    if (args.includes("--help") || args.includes("-h")) usage();
+    const projectDir = projectArg(args);
+    const port = numberArg(args, "--port", 3111);
+    // Ensuring a live daemon lives in delegation/app-daemon.ts — the projects sidebar
+    // needs the identical logic to switch projects, and two copies would drift.
+    let url: string;
+    try {
+      ({ url } = await ensureAppDaemon(projectDir, port));
+    } catch (error) {
+      console.error((error as Error).message);
+      process.exit(2);
+      return;
+    }
+    // Opening the app is what marks a project "known" to the sidebar; no separate step.
+    rememberProject(projectDir);
+    console.log(`Kage app → ${url}`);
+    if (!args.includes("--no-open") && process.platform === "darwin") {
+      spawnProcess("open", [url], { detached: true, stdio: "ignore" }).unref();
+    }
+    return;
+  }
+
   if (command === "hook") {
     const action = args[1];
     const projectDir = projectArg(args);
@@ -1493,16 +1554,16 @@ async function main(): Promise<void> {
       return;
     }
     console.log(
-      `This week Kage saved you ~${formatTokenCount(week.tokens_saved)} tokens (~$${week.estimated_dollars.toFixed(2)}), ` +
+      `This week Kage answered ${week.recalls} ${plural(week.recalls, "recall", "recalls")}, ` +
       `blocked ${week.stale_withheld} stale ${plural(week.stale_withheld, "memory", "memories")}, ` +
-      `caught ${week.stale_caught} stale at change-time, ` +
-      `answered ${week.recalls} ${plural(week.recalls, "recall", "recalls")}.`
+      `caught ${week.stale_caught} stale at change-time — ` +
+      `est. ~${formatTokenCount(week.tokens_saved)} tokens (~$${week.estimated_dollars.toFixed(2)}) not re-spent.`
     );
     const windowLine = (label: string, window: typeof week): string =>
-      `  ${label} ~${formatTokenCount(window.tokens_saved)} tokens (~$${window.estimated_dollars.toFixed(2)}) · ` +
+      `  ${label} ${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
       `${window.stale_withheld} stale blocked · ${window.stale_caught} stale caught at change-time · ` +
-      `${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
-      `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")}`;
+      `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")} · ` +
+      `est. ~${formatTokenCount(window.tokens_saved)} tokens (~$${window.estimated_dollars.toFixed(2)})`;
     console.log(windowLine("Today:   ", summary.today));
     console.log(windowLine("All time:", summary.all_time));
     if (summary.all_time.replay_tokens > 0) {
@@ -1514,7 +1575,9 @@ async function main(): Promise<void> {
     }
     const usdOverridden = Number.isFinite(Number(process.env.KAGE_USD_PER_MTOK)) && Number(process.env.KAGE_USD_PER_MTOK) > 0;
     console.log(
-      `\nDollars estimated at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
+      `\nCounts are observed events; token/$ figures are estimates — per recall, the larger of a ` +
+      `capped re-read cost (≤${RECALL_READ_TOKENS_CAP_PER_FILE} tokens per cited file) and the served ` +
+      `memories' discovery cost. Dollars at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
       `(${usdOverridden ? "via KAGE_USD_PER_MTOK" : "Sonnet-class default — set KAGE_USD_PER_MTOK for your model"}). ` +
       `Ledger: .agent_memory/reports/value.json`
     );
@@ -2494,8 +2557,222 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "ui" || command === "console") {
+    const { runTui } = await import("./delegation/tui/app.js");
+    process.exit(await runTui(projectArg(args)));
+  }
+
+  if (command === "room") {
+    process.exit(openRoom(projectArg(args), takeArg(args, "--agent") ?? undefined));
+  }
+
+  if (command === "dispatch") {
+    const project = projectArg(args);
+    const intent = takeArg(args, "--intent") ?? firstPositional(args);
+    if (!intent) usage();
+    const typeArg = takeArg(args, "--type") ?? "chore";
+    if (!(RUN_TYPES as readonly string[]).includes(typeArg)) {
+      console.error(`Unknown --type ${typeArg}. One of: ${RUN_TYPES.join(", ")}`);
+      process.exit(2);
+    }
+    const agentName = takeArg(args, "--agent") ?? (args.includes("--stub") ? "stub" : detectAgent());
+    if (!agentName) {
+      console.error("No coding agent found on PATH. Install Claude Code or Codex, or dispatch with --agent stub to exercise the loop.");
+      process.exit(2);
+    }
+    const briefOnly = args.includes("--brief-only");
+    const dirty = dirtyTreeWarning(project);
+    if (dirty) console.log(`  heads up: ${dirty}\n`);
+    const adapter = adapterByName(agentName);
+    // Compile and SHOW the brief before any work starts — you should be able to read
+    // what was dispatched while the agent is still working on it.
+    const held = await dispatchRun(project, { intent, type: typeArg as RunType, briefOnly: true }, adapter);
+    console.log(renderBriefCard(held.task, held.plan));
+    if (briefOnly) {
+      console.log(`\nHeld. Release it with: kage retry ${held.task.id} --project ${project}`);
+      return;
+    }
+    console.log("");
+    const result = await executeRun(project, held.task.id, held.plan, adapter, { progress: !args.includes("--quiet") });
+    console.log("");
+    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project) }));
+    else console.log(renderRunCard(result.task));
+    return;
+  }
+
+  // Internal: the body of a supervised run. Spawned detached by `kage dispatch --live`,
+  // never typed by a human — it holds one agent's stdin for the run's whole life.
+  if (command === "supervise") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const { superviseRun } = await import("./delegation/supervisor.js");
+    await superviseRun(projectArg(args), runId);
+    return;
+  }
+
+  // Internal: the body of a supervised ROOM — one held claude session for the whole
+  // conversation, spawned detached by the daemon on the first message. Never typed by
+  // a human directly (use `kage room` for an interactive terminal session instead).
+  if (command === "supervise-room") {
+    const { superviseRoom } = await import("./delegation/room-supervisor.js");
+    // --session names which conversation thread this supervisor holds; absent means
+    // the default thread, which is where every pre-threads install already is.
+    await superviseRoom(projectArg(args), takeArg(args, "--session") ?? undefined);
+    return;
+  }
+
+  // Internal: a REAL pty running interactive claude (no -p) — the room's Terminal
+  // mode. Also never typed by a human; the daemon spawns it on first attach.
+  if (command === "supervise-room-pty") {
+    const { superviseRoomPty } = await import("./delegation/room-pty.js");
+    await superviseRoomPty(projectArg(args), takeArg(args, "--session") ?? undefined);
+    return;
+  }
+
+  if (command === "runs") {
+    const runs = listRuns(projectArg(args));
+    if (!runs.length) {
+      console.log('No runs yet. Dispatch one: kage dispatch "<intent>"');
+      return;
+    }
+    for (const task of runs) console.log(renderRunLine(task));
+    return;
+  }
+
+  if (command === "status") {
+    const project = projectArg(args);
+    if (!args.includes("--watch")) {
+      console.log(renderStatusBoard(project));
+      return;
+    }
+    // Live board: repaint in place until interrupted. Deliberately a poll, not a log
+    // stream — you want to know what is happening, not read everything that happened.
+    const paint = (): void => {
+      process.stdout.write(`3[2J3[H${renderStatusBoard(project)}\n\nwatching — ctrl-c to stop\n`);
+    };
+    paint();
+    const timer = setInterval(paint, 2000);
+    await new Promise<void>((resolve) => {
+      process.on("SIGINT", () => {
+        clearInterval(timer);
+        process.stdout.write("\n");
+        resolve();
+      });
+    });
+    return;
+  }
+
+  if (command === "task") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const task = readRun(project, runId);
+    console.log(renderRunCard(task, readClaim(project, runId)));
+    return;
+  }
+
+  if (command === "retry") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const task = readRun(project, runId);
+    if (task.state === "failed" || task.state === "blocked" || task.state === "stopped") {
+      transitionRun(project, runId, "running", "user", "retry requested");
+    }
+    const plan = compileBrief(project, task.intent, task.type);
+    const result = await executeRun(project, runId, plan, adapterByName(task.agent), { progress: !args.includes("--quiet") });
+    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project) }));
+    else console.log(renderRunCard(result.task));
+    return;
+  }
+
+  if (command === "open") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    console.log(runWorkspacePath(project, readRun(project, runId)));
+    return;
+  }
+
+  if (command === "tell") {
+    const runId = firstPositional(args);
+    const message = firstPositional(args.filter((arg) => arg !== runId));
+    if (!runId || !message) usage();
+    const result = await steerRun(projectArg(args), runId, message, adapterByName);
+    console.log(result.message);
+    if (result.delivery === "resumed") console.log(renderRunLine(result.task));
+    if (result.delivery === "refused") process.exit(2);
+    return;
+  }
+
+  if (command === "stop") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const task = transitionRun(projectArg(args), runId, "stopped", "user", "stopped by user");
+    console.log(`${renderRunLine(task)}\nState is preserved — resume with: kage retry ${runId}`);
+    return;
+  }
+
+  if (command === "merge") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = mergeRun(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "reject") {
+    const runId = firstPositional(args);
+    const reason = firstPositional(args.filter((arg) => arg !== runId));
+    if (!runId || !reason) usage();
+    const result = rejectRun(projectArg(args), runId, reason);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "report") {
+    const project = projectArg(args);
+    const report = buildReport(project, { all: args.includes("--all") });
+    console.log(renderReport(project, report));
+    markReportRead(project);
+    return;
+  }
+
+  if (command === "config") {
+    const project = projectArg(args);
+    const patch: Record<string, unknown> = {};
+    const test = takeArg(args, "--test");
+    const setup = takeArg(args, "--setup");
+    const budget = takeArg(args, "--diff-budget");
+    if (test) patch.test = test;
+    if (setup) patch.setup = setup;
+    if (budget) patch.diff_budget = Number(budget);
+    if (args.includes("--no-strict")) patch.strict_verify = false;
+    const merged = writeDelegationConfig(project, patch);
+    console.log(JSON.stringify(merged, null, 2));
+    return;
+  }
+
   if (command === "review") {
-    await review(projectArg(args));
+    const runId = firstPositional(args);
+    const project = projectArg(args);
+    // `kage review` with no run id keeps its original meaning: the pending-memory inbox.
+    if (!runId) {
+      await review(project);
+      return;
+    }
+    const task = readRun(project, runId);
+    const claim = readClaim(project, runId);
+    if (!claim) {
+      console.log(`${renderRunCard(task)}\nNo claim yet — this run is ${task.state}.`);
+      return;
+    }
+    console.log(renderClaimCard(claim, { budget: diffBudget(project) }));
+    console.log(`\nDiff:  git -C ${runWorkspacePath(project, task)} diff --cached`);
+    console.log(`Take over:  kage open ${runId}`);
+    console.log(`Accept:  kage merge ${runId}   ·   Refuse:  kage reject ${runId} "<reason>"`);
     return;
   }
 

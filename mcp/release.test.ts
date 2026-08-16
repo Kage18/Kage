@@ -60,6 +60,20 @@ test("npm release plan preflights remote state and pushes before publish", () =>
   ]);
 });
 
+// Distribution manifests drifted three minor versions behind npm before this guard
+// existed (plugin 2.5.5/2.0.1, server.json 2.3.3 vs package 3.1.0). Lockstep or fail.
+test("distribution manifests stay in version lockstep with the npm package", () => {
+  const version = (JSON.parse(readFileSync("package.json", "utf8")) as { version: string }).version;
+  const manifests = ["../server.json", "../plugin/.claude-plugin/plugin.json", "../plugin/.codex-plugin/plugin.json"];
+  for (const path of manifests) {
+    const manifest = JSON.parse(readFileSync(path, "utf8")) as { version?: string; packages?: Array<{ version?: string }> };
+    assert.equal(manifest.version, version, `${path} version must match package.json (${version})`);
+    for (const pkg of manifest.packages ?? []) {
+      assert.equal(pkg.version, version, `${path} packages[].version must match package.json (${version})`);
+    }
+  }
+});
+
 test("maintainer release helper is not exposed in public package metadata", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
     files?: string[];

@@ -25,16 +25,16 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/retrieval-0%20deps-41ff8f" alt="zero-dependency retrieval">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/LongMemEval--S%20R@5-96%25-1f6feb" alt="retrieval R@5 96%">
+  <img src="https://img.shields.io/badge/LongMemEval--S%20R@10-98.7%25-1f6feb" alt="retrieval R@10 98.7%">
   <img src="https://img.shields.io/badge/stale%20served-0%25-1f6feb" alt="0% stale served">
   <img src="https://img.shields.io/badge/vs%20grep-18%25%20faster-1f6feb" alt="18% faster than grep">
   <img src="https://img.shields.io/badge/external%20DBs-0-1f6feb" alt="zero external databases">
-  <img src="https://img.shields.io/badge/tests-340%2B%20passing-1f6feb" alt="340+ tests passing">
+  <img src="https://img.shields.io/badge/tests-360%2B%20passing-1f6feb" alt="360+ tests passing">
 </p>
 
 <p>
@@ -162,7 +162,7 @@ Kage 는 코딩 에이전트를 위한 메모리 계층입니다. 에이전트�
 
 - **동일한 정확도에서 grep 보다 18% 빠름**, 실제 코드 내비게이션 작업 기준(N=3 스위트,
   동일 에이전트/모델; `kage benchmark --project . --compare` 로 재현).
-- **LongMemEval-S 검색:** 96.17% R@5 / 98.72% R@10, 의존성 0.
+- **LongMemEval-S 검색:** 98.72% R@10 / 99.79% R@20, 의존성 0.
 - **변경 하 메모리 정확성:** 낡은 제공 0%(삭제·변경된 코드의 메모리는 보류), "전부 포착"형
   저장소의 100% 대비.
 - **신뢰 벤치마크:** 100/100, 환각 거부·낡음 제외·실시간 대조를 포함

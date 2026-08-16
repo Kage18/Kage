@@ -1,0 +1,29 @@
+{
+  "name": "kage-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kage desktop shell — a thin Electron frame over the daemon's renderer. Contains zero HTML.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac --dir",
+    "dmg": "electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "dev.kage.desktop",
+    "productName": "Kage",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "package.json"],
+    "extraMetadata": { "main": "main.js" },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "identity": null
+    },
+    "dmg": { "title": "Kage" }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}

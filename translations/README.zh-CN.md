@@ -24,16 +24,16 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/retrieval-0%20deps-41ff8f" alt="zero-dependency retrieval">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/LongMemEval--S%20R@5-96%25-1f6feb" alt="retrieval R@5 96%">
+  <img src="https://img.shields.io/badge/LongMemEval--S%20R@10-98.7%25-1f6feb" alt="retrieval R@10 98.7%">
   <img src="https://img.shields.io/badge/stale%20served-0%25-1f6feb" alt="0% stale served">
   <img src="https://img.shields.io/badge/vs%20grep-18%25%20faster-1f6feb" alt="18% faster than grep">
   <img src="https://img.shields.io/badge/external%20DBs-0-1f6feb" alt="zero external databases">
-  <img src="https://img.shields.io/badge/tests-340%2B%20passing-1f6feb" alt="340+ tests passing">
+  <img src="https://img.shields.io/badge/tests-360%2B%20passing-1f6feb" alt="360+ tests passing">
 </p>
 
 <p>
@@ -159,7 +159,7 @@ Kage 是面向编码代理的记忆层。在代理工作时，它会把学到的
 
 - **在同等正确率下比 grep 快 18%**，基于真实的代码导航任务（N=3 套件，
   相同代理/模型；用 `kage benchmark --project . --compare` 复现）。
-- **LongMemEval-S 检索：** 96.17% R@5 / 98.72% R@10，零依赖。
+- **LongMemEval-S 检索：** 98.72% R@10 / 99.79% R@20，零依赖。
 - **变更下的记忆正确性：** 失效投喂率 0%（代码被删或被改的记忆会被扣留），
   对比“全量捕获”存储为 100%。
 - **信任基准：** 100/100，覆盖幻觉拒绝、失效排除与实时对照

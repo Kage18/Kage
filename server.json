@@ -6,14 +6,14 @@
     "url": "https://github.com/kage-core/Kage",
     "source": "github"
   },
-  "version": "2.3.3",
+  "version": "3.1.0",
   "websiteUrl": "https://kage-core.com",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@kage-core/kage-graph-mcp",
-      "version": "2.3.3",
+      "version": "3.1.0",
       "transport": {
         "type": "stdio"
       }

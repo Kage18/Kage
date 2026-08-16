@@ -38,7 +38,9 @@
   "license": "GPL-3.0-only",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.2",
-    "three": "^0.184.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.1.0",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.0.0",
     "web-tree-sitter": "^0.24.7"

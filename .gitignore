@@ -36,3 +36,13 @@ docs/assets/*.typescript
 # Private keys (e.g. MCP registry DNS-auth ed25519 key) — never commit
 *.pem
 kage-mcp-key.pem
+.agent_memory/runs/
+.agent_memory/worktrees/
+.agent_memory/audit/
+.agent_memory/indexes/
+.agent_memory/reports/
+.agent_memory/graph/
+.agent_memory/code_graph/
+.agent_memory/structural/
+.agent_memory/review/
+.agent_memory/pending/

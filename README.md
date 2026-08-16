@@ -27,12 +27,12 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/retrieval-0%20deps-41ff8f" alt="zero-dependency retrieval">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
   <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf"><img src="https://img.shields.io/badge/built%20on-Open%20Knowledge%20Format-41ff8f" alt="Built on Google Open Knowledge Format"></a>
 </p>
 
-<img src="docs/kage-stats.svg" alt="Kage in numbers: 96% R@5 recall, 0% stale served, 18% faster than grep, 0 dependencies, 340+ tests passing, 15 agents supported" width="820">
+<img src="docs/kage-stats.svg" alt="Kage in numbers: 98.7% R@10 recall, 0% stale served, 18% faster than grep, zero-dependency retrieval, 360+ tests passing, 15 agents supported" width="820">
 
 <p>
   <a href="https://kage-core.com/">Website</a> ·
@@ -181,7 +181,10 @@ repo and verifies it, so it stays your team's and stays true as the code changes
 
 - **18% faster than grep at equal correctness** on real code-navigation tasks (N=3 suite,
   same agent/model; reproduce with `kage benchmark --project . --compare`).
-- **LongMemEval-S retrieval:** 96.17% R@5 / 98.72% R@10, zero dependencies.
+- **LongMemEval-S retrieval:** 98.72% R@10 / 99.79% R@20 / 0.909 MRR — ahead of plain BM25
+  at every depth except R@5, where BM25 edges it (96.60% vs 96.17%; full table in
+  [benchmarks/LONGMEMEVAL.md](benchmarks/LONGMEMEVAL.md)). The retrieval path itself is
+  dependency-free: BM25 + sparse lexical scoring, no embeddings, no network.
 - **Memory Correctness Under Change:** 0% stale-served (memory whose code was deleted or
   changed is withheld), vs 100% for capture-everything stores.
 - **Trust benchmark:** 100/100, covering hallucination rejection, stale exclusion, and live
@@ -201,10 +204,11 @@ kage okf migrate --project .   # render memory as a Google OKF bundle
 ```
 
 Full CLI and MCP reference: [docs](https://kage-core.com/guide.html).
+Delegating work to coding agents (dispatch → verified claim → merge): [docs/DELEGATION.md](docs/DELEGATION.md).
 
 ## Storage
 
-Everything lives in `.agent_memory/`: `packets/` is durable repo memory (git-tracked JSON);
+Everything lives in `.agent_memory/`: `packets/` is durable repo memory (git-tracked OKF Markdown);
 `graph/`, `code_graph/`, `structural/`, and `indexes/` are rebuildable with `kage refresh`;
 `reports/` holds the value ledger and health reports. Capture scans for secrets and PII
 before writing.
@@ -228,8 +232,8 @@ npm run build
 
 ## Contributing & community
 
-Kage is built in the open and we'd love your help. Zero runtime dependencies, no
-account, no cloud — it's a friendly codebase to jump into.
+Kage is built in the open and we'd love your help. Four runtime dependencies (the
+retrieval core uses none), no account, no cloud — it's a friendly codebase to jump into.
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup, project layout, conventions.
 - **[ROADMAP.md](ROADMAP.md)** — where Kage is headed, and where to plug in.
