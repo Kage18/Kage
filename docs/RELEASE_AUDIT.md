@@ -71,7 +71,7 @@ own slice was broken and was silently checking nothing.
 | 5.4 | Three memory packets cited docs that moved | **fixed** — citations repointed, not marked stale |
 | 5.5 | 11 packets cited code edited this pass | **fixed** — 10 reverified in place (claims unchanged), 1 superseded (it said "two gates"; there are three) |
 | 5.6 | `launch/`, `marketing/` — historical GTM, 37 tracked files, not product | **open** — kept deliberately; deleting history isn't a UX gain |
-| 5.7 | `kernel.ts` is 21,103 lines | **open** — a real cost, but splitting it is a refactor with its own risk budget, not release work |
+| 5.7 | `kernel.ts` is 21,103 lines | **investigated and resolved — see §9.** Splitting it is the wrong fix; navigation was the real problem and is now fixed and gated |
 | 5.8 | Runtime deps: 7 (`@modelcontextprotocol/sdk`, xterm ×2, `node-pty`, tree-sitter ×2, `typescript`) | **verified** — no bloat |
 
 ## 6. Packaging
@@ -80,28 +80,56 @@ own slice was broken and was silently checking nothing.
 |---|---|---|
 | 6.1 | **Generic Electron icon** on every launch and dock slot | **fixed** — 影 seal rendered at 10 sizes → `.icns`; packaged app's icon verified by SHA match |
 | 6.2 | Dev runs (`npx electron .`) also showed the default icon | **fixed** — `app.dock.setIcon` at ready |
-| 6.3 | **The `.dmg` is unsigned and un-notarized.** macOS will show "unidentified developer" and the user must right-click → Open. | **open — requires a paid Apple Developer ID certificate**, which cannot be created from here. This is a purchase-and-enrol step for the project owner, not a code change. Once a cert exists: set `mac.identity`, add `notarize`, and supply `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`. |
+| 6.3 | **The bundle carried Electron's own signature**, invalidated by packaging — `Identifier=Electron`, and `codesign --verify` failed outright. macOS shows that as **"Kage is damaged and can't be opened"**, which reads as a corrupt download rather than an unsigned app. | **fixed** — ad-hoc signed in an `afterPack` hook; now `Identifier=dev.kage.desktop` and `codesign --verify --deep --strict` passes |
 | 6.4 | `.dmg` builds, mounts, and contains a sane bundle (`dev.kage.desktop`, 98MB) | **verified** |
+| 6.5 | Gatekeeper still rejects (no Developer ID) | **open — needs a paid Apple Developer membership**, which cannot be obtained from here. The build auto-detects a Developer ID and notarizes when `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` are set; nothing needs editing. Steps in [shell/README.md](../shell/README.md). |
 
 ## 7. Tests
 
 | | Finding | State |
 |---|---|---|
-| 7.1 | 538 tests pass, 0 fail, **real exit code 0** | **verified** — checked unmasked; `npm test \| tail` reports the pipe's status, not the suite's |
-| 7.2 | `app-daemon.ts` has no direct test | **open** — exercised end to end by every `kage app` invocation, but not unit-tested |
-| 7.3 | `provenance.ts` has no test references | **open** |
+| 7.1 | 551 tests pass, 0 fail, **real exit code 0** | **verified** — checked unmasked; `npm test \| tail` reports the pipe's status, not the suite's |
+| 7.2 | `app-daemon.ts` had no direct test | **fixed** — 6 tests via an injectable spawn seam; covers reuse, the live-pid-but-dead-app restart, and the startup-failure message |
+| 7.3 | `provenance.ts` had no test references | **fixed** — 6 tests including last-author-wins and cache invalidation |
 | 7.4 | No stray background test runners inflating latency | **verified** — `pgrep` clean |
 
 ## 8. Known-open list
 
 Carried deliberately, with reasons:
 
-1. **Code signing / notarization** (6.3) — blocked on a certificate only the owner can buy.
-2. **`kernel.ts` at 21k lines** (5.7) — refactor, not release work.
-3. **`app-daemon.ts` and `provenance.ts` untested** (7.2, 7.3).
-4. **`launch/` and `marketing/`** kept (5.6).
-5. Everything in [KAGE_NOT_COPYING.md](design/KAGE_NOT_COPYING.md) — the seven AO/Conductor
+1. **Gatekeeper / notarization** (6.5) — blocked on a paid Apple membership only the
+   owner can buy. Everything on this side of that is done: the build detects a
+   Developer ID, notarizes when credentials are present, and ad-hoc signs otherwise.
+2. **`launch/` and `marketing/`** kept (5.6) — deleting history is not a UX gain.
+3. Everything in [KAGE_NOT_COPYING.md](design/KAGE_NOT_COPYING.md) — the seven AO/Conductor
    features deliberately not built, each with its reason.
+
+## 9. Why `kernel.ts` stays one file
+
+"21k lines" reads as an obvious defect, so it was measured rather than assumed:
+
+- **174 functions call nothing else in the file** — but they total **1,679 lines, 8%**.
+  Extracting every leaf leaves a 19,400-line file.
+- The generic helpers (`ensureDir`, `nowIso`, `readJson`, `writeJson`, `unique`,
+  `repoKey`) are **3–9 lines each**. Pulling them into a base module moves ~50 lines.
+- Lifting out a topically cohesive region — agent setup, 708 lines, the best candidate
+  in the file — required making **seven private internals public** to satisfy its
+  imports, and created an import cycle back to the kernel. Every region extraction has
+  this shape: it *widens* the public API rather than narrowing it.
+
+So the size is a symptom of **semantic coupling within one domain**, not of poor file
+organization, and moving code between files cannot fix it — it trades one large file
+for many files plus a wider API surface plus import cycles. A real decomposition means
+redesigning the memory core's internal boundaries: a design program with genuine
+regression risk against 551 tests and no user-visible benefit.
+
+What *was* broken is navigation: 21,000 lines with **8 section banners and no header**.
+That is now fixed — a header explaining the above, an index of eleven sections, and
+`§ MARKER` anchors through the body, with a test asserting the index matches the markers
+in order so it cannot drift. Searching `§ RECALL` jumps straight to recall.
+
+**The recommendation is to leave it as one file** until a change actually requires
+different boundaries, and to reach for the index instead of the scrollbar.
 
 ---
 

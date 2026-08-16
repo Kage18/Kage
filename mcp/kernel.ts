@@ -1,3 +1,46 @@
+// The Kage memory kernel.
+//
+// ────────────────────────────────────────────────────────────────────────────
+// WHY THIS FILE IS ONE FILE
+//
+// It is ~21,000 lines, and splitting it was investigated properly rather than
+// assumed. The measurements:
+//
+//   · 174 functions call nothing else in here — but they total 1,679 lines, 8%.
+//   · The generic helpers (ensureDir/nowIso/readJson/writeJson/unique) are 3-9
+//     lines each; extracting them moves ~50 lines.
+//   · Lifting out a topically cohesive region (agent setup, 708 lines) required
+//     making SEVEN private internals public to satisfy its imports, and created
+//     a cycle back to this module. Every such extraction widens the public API
+//     instead of narrowing it.
+//
+// So the size is a symptom of SEMANTIC coupling in one domain, not of poor file
+// organization, and moving code between files cannot fix it — it would trade one
+// large file for many files, a wider API surface, and import cycles. A genuine
+// decomposition means redesigning the memory core's internal boundaries, which is
+// a design program with real regression risk and no user-visible gain. Recorded in
+// docs/RELEASE_AUDIT.md so it is not re-litigated from scratch.
+//
+// What DID need fixing was navigation: 21,000 lines with no map. Hence the index
+// below. Search for a marker (e.g. "§ RECALL") to jump to its section. The markers
+// are checked by a test, so this index cannot quietly drift from the code.
+//
+// ────────────────────────────────────────────────────────────────────────────
+// INDEX
+//
+//   § TYPES            packet schema, report shapes, the shared vocabulary
+//   § STORE            paths, JSON/OKF read-write, validation, contradiction checks
+//   § CODEGRAPH        parsing, symbols, calls, structural + LSP indexes
+//   § INDEXES          catalogs, vectors, docs, graph building
+//   § CAPTURE          learn/capture, write gates, distillation, suppression
+//   § RECALL           scoring, ranking, context blocks, value receipts
+//   § REPORTS          metrics, quality, risk, contributors, xray, workspace
+//   § BENCHMARKS       trust, project, memory-quality, scale, comparisons
+//   § REGISTRY         public candidates, org sync, promotion
+//   § AGENTS           setup, plugin hooks, doctor, activation verification
+//   § LIFECYCLE        staleness, reconciliation, supersede, branch overlays
+//
+// ────────────────────────────────────────────────────────────────────────────
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -8,6 +51,11 @@ import { Worker } from "node:worker_threads";
 import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § TYPES
+// ══════════════════════════════════════════════════════════════════════════
 
 export const PACKET_SCHEMA_VERSION = 2;
 
@@ -2428,6 +2476,11 @@ export function pendingDir(projectDir: string): string {
 export function publicCandidatesDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "public-candidates");
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § STORE
+// ══════════════════════════════════════════════════════════════════════════
 
 export function indexesDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "indexes");
@@ -5833,6 +5886,11 @@ function readCachedCodeGraph(projectDir: string, fingerprint: string, structural
   }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § CODEGRAPH
+// ══════════════════════════════════════════════════════════════════════════
+
 export interface StructuralCachedFile {
   schema_version: 1;
   path: string;
@@ -9224,6 +9282,11 @@ function buildGraphIndexes(projectDir: string, options: { forceCodeGraph?: boole
   };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § INDEXES
+// ══════════════════════════════════════════════════════════════════════════
+
 export function buildIndexes(projectDir: string): string[] {
   return buildGraphIndexes(projectDir).indexes;
 }
@@ -10534,6 +10597,11 @@ function looksLikeRawUserUtterance(text: string): boolean {
 // ungrounded decision or convention is declarative (no "why are you.../don't stop") and usually
 // names a symbol, file, command, or rule, so it is never caught. Such packets route to pending
 // (not auto-approved) at capture time and are withheld from recall, like serialized dumps.
+
+// ══════════════════════════════════════════════════════════════════════════
+// § CAPTURE
+// ══════════════════════════════════════════════════════════════════════════
+
 export function isUngroundedConversationalCapture(packet: Pick<MemoryPacket, "title" | "body" | "paths">): boolean {
   if (packet.paths && packet.paths.length > 0) return false;
   const text = `${packet.title ?? ""}\n${packet.body ?? ""}`;
@@ -10779,6 +10847,11 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   }
   return result;
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § RECALL
+// ══════════════════════════════════════════════════════════════════════════
 
 export function recall(projectDir: string, query: string, limit = 5, explain = false, inputs: GraphInputs = {}): RecallResult {
   return recallWithVectorScores(projectDir, query, limit, explain, inputs);
@@ -13084,6 +13157,11 @@ export function kageReviewerSuggestions(projectDir: string, targets: string[] = 
   };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § REPORTS
+// ══════════════════════════════════════════════════════════════════════════
+
 export function kageContributors(projectDir: string): KageContributorsReport {
   const graph = readCurrentCodeGraph(projectDir) ?? buildCodeGraph(projectDir);
   const graphPaths = new Set(graph.files.map((file) => file.path));
@@ -15369,6 +15447,11 @@ export interface TrustBenchmarkReport {
 // system can be TRUSTED — does it refuse to store hallucinated citations, does it
 // withhold memory whose evidence was deleted, and is live repo memory actually grounded.
 // Controlled gates run in an isolated sandbox; the grounding gate runs on the real repo.
+
+// ══════════════════════════════════════════════════════════════════════════
+// § BENCHMARKS
+// ══════════════════════════════════════════════════════════════════════════
+
 export function benchmarkTrust(projectDir: string): TrustBenchmarkReport {
   const runDir = mkdtempSync(join(tmpdir(), "kage-trust-"));
   const sandbox = join(runDir, "project");
@@ -16680,6 +16763,11 @@ export function capture(input: CaptureInput): CaptureResult {
   return { ok: true, packet, path, errors: [], warnings, ...(contradictions.length ? { contradictions } : {}) };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § REGISTRY
+// ══════════════════════════════════════════════════════════════════════════
+
 export function createPublicCandidate(projectDir: string, id: string): PublicCandidateResult {
   ensureMemoryDirs(projectDir);
   const source = loadApprovedPackets(projectDir).find((packet) => packet.id === id);
@@ -16820,6 +16908,11 @@ export function registryRecommendations(projectDir: string): RegistryRecommendat
 
   return recommendations.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § AGENTS
+// ══════════════════════════════════════════════════════════════════════════
 
 export function setupAgent(agent: SetupAgent, projectDir: string, options: { write?: boolean; serverPath?: string; homeDir?: string } = {}): AgentSetupResult {
   if (!SETUP_AGENTS.includes(agent)) throw new Error(`Unsupported agent: ${agent}`);
@@ -18641,6 +18734,11 @@ export function proposeFromDiff(projectDir: string): DiffProposalResult {
     errors: [],
   };
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § LIFECYCLE
+// ══════════════════════════════════════════════════════════════════════════
 
 export function buildBranchOverlay(projectDir: string): BranchOverlay {
   ensureMemoryDirs(projectDir);

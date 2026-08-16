@@ -6,39 +6,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --mac --dir",
-    "dmg": "electron-builder --mac dmg"
-  },
-  "build": {
-    "appId": "dev.kage.desktop",
-    "productName": "Kage",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "main.js",
-      "package.json",
-      "build/icon.icns"
-    ],
-    "extraMetadata": {
-      "main": "main.js"
-    },
-    "mac": {
-      "category": "public.app-category.developer-tools",
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64"
-          ]
-        }
-      ],
-      "identity": null,
-      "icon": "build/icon.icns"
-    },
-    "dmg": {
-      "title": "Kage"
-    }
+    "dist": "electron-builder --mac --dir --config electron-builder.config.js",
+    "dmg": "electron-builder --mac dmg --config electron-builder.config.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",

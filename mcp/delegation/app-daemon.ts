@@ -41,6 +41,19 @@ function cliEntry(): string {
   return join(dirname(__dirname), "cli.js");
 }
 
+/**
+ * Test seam, matching the convention used across the delegation layer
+ * (askManagerFn, ensurePtyAttachedFn): a test must be able to exercise the
+ * is-it-alive/should-I-restart logic without putting real detached daemons on the
+ * machine running the suite.
+ */
+export interface EnsureAppOptions {
+  port?: number;
+  spawnFn?: (command: string, args: string[]) => void;
+  /** How long to wait for a spawned daemon to answer /app. Tests shorten this. */
+  startupTimeoutMs?: number;
+}
+
 export interface EnsureAppResult {
   url: string;
   host: string;
@@ -54,7 +67,12 @@ export interface EnsureAppResult {
  * there isn't one. Detached matters: the daemon must outlive whatever asked for it —
  * a CLI invocation that returns, or an HTTP request that ends.
  */
-export async function ensureAppDaemon(projectDir: string, port = DEFAULT_APP_PORT): Promise<EnsureAppResult> {
+export async function ensureAppDaemon(
+  projectDir: string,
+  portOrOptions: number | EnsureAppOptions = DEFAULT_APP_PORT,
+): Promise<EnsureAppResult> {
+  const options: EnsureAppOptions = typeof portOrOptions === "number" ? { port: portOrOptions } : portOrOptions;
+  const port = options.port ?? DEFAULT_APP_PORT;
   let status = readDaemonStatus(projectDir);
   let healthy = Boolean(status) && pidAlive(status!.pid) && (await servesApp(status!.host, status!.rest_port));
   let started = false;
@@ -69,14 +87,15 @@ export async function ensureAppDaemon(projectDir: string, port = DEFAULT_APP_POR
       }
       await new Promise((pause) => setTimeout(pause, 500));
     }
-    const child = spawn(
-      process.execPath,
-      [cliEntry(), "daemon", "start", "--project", projectDir, "--port", String(port)],
-      { detached: true, stdio: "ignore" },
-    );
-    child.unref();
+    const args = [cliEntry(), "daemon", "start", "--project", projectDir, "--port", String(port)];
+    if (options.spawnFn) {
+      options.spawnFn(process.execPath, args);
+    } else {
+      const child = spawn(process.execPath, args, { detached: true, stdio: "ignore" });
+      child.unref();
+    }
     started = true;
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + (options.startupTimeoutMs ?? 15_000);
     while (Date.now() < deadline) {
       status = readDaemonStatus(projectDir);
       if (status && pidAlive(status.pid) && (await servesApp(status.host, status.rest_port))) {
@@ -88,7 +107,8 @@ export async function ensureAppDaemon(projectDir: string, port = DEFAULT_APP_POR
   }
 
   if (!healthy || !status) {
-    throw new Error("The daemon did not come up within 15s — try `kage daemon start` in the foreground to see why.");
+    const waited = Math.round((options.startupTimeoutMs ?? 15_000) / 1000);
+    throw new Error(`The daemon did not come up within ${waited}s — try \`kage daemon start\` in the foreground to see why.`);
   }
   return {
     url: `http://${status.host}:${status.rest_port}/app`,

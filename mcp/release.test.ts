@@ -107,3 +107,22 @@ test("every command the help advertises actually exists, and the flagship ones a
     assert.ok(advertised.includes(name), `"kage ${name}" must be discoverable from plain \`kage help\``);
   }
 });
+
+test("the kernel's index matches the section markers actually in the file", () => {
+  // kernel.ts is ~21k lines and splitting it was measured and rejected (see its own
+  // header). What replaced the split is navigation: an index at the top and § markers
+  // through the body. An index that drifts from the markers is worse than none — it
+  // sends a reader to a section that is not there — so the two are checked against
+  // each other, in order.
+  const source = readFileSync(join(__dirname, "..", "kernel.ts"), "utf8");
+
+  const indexed = [...source.matchAll(/^\/\/ {3}§ (\w+)/gm)].map((m) => m[1]);
+  const markers = [...source.matchAll(/^\/\/ § (\w+)$/gm)].map((m) => m[1]);
+
+  assert.ok(indexed.length >= 8, `the index should list the kernel's sections (found ${indexed.length})`);
+  assert.deepEqual(
+    indexed,
+    markers,
+    "the index at the top of kernel.ts must list exactly the § markers in the file, in the order they appear",
+  );
+});
