@@ -222,6 +222,10 @@ const APP_HTML = `<!doctype html>
   .packet .ph h3 { margin:0; font-family:var(--serif); font-size:17px; font-weight:600; flex:1; letter-spacing:.005em; }
   .packet .pbody { overflow-y:auto; padding:18px 22px 24px; font-size:13.5px; line-height:1.65;
     white-space:pre-wrap; word-break:break-word; color:var(--text2); font-family:var(--mono); }
+  .packet .pfoot { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    padding:13px 20px; border-top:1px solid var(--line); }
+  .packet .pf-label { font-size:12px; color:var(--text3); margin-right:2px; }
+  .packet .pfoot .msg { font-size:11.5px; color:var(--text3); margin-left:auto; }
   .view.on { display:flex; flex-direction:column; }
 
   .status { height:28px; display:flex; align-items:center; gap:14px; padding:0 14px;
@@ -697,6 +701,13 @@ const APP_HTML = `<!doctype html>
     <div class="packet">
       <div class="ph"><h3 id="packet-title"></h3><button class="btn" id="packet-close">Close</button></div>
       <div class="pbody" id="packet-body"></div>
+      <div class="pfoot">
+        <span class="pf-label">Is this still true?</span>
+        <button class="btn" data-fb="helpful">Helpful</button>
+        <button class="btn" data-fb="stale">Out of date</button>
+        <button class="btn" data-fb="wrong">Wrong</button>
+        <span class="msg" id="packet-msg"></span>
+      </div>
     </div>
   </div>
 </main>
@@ -1120,11 +1131,28 @@ function renderMemory() {
     list.appendChild(h("div", "mem-empty", "Showing 200 of " + num(shown.length) + " — narrow it with search or a type."));
   }
 }
+function sendPacketFeedback(id, kind, button) {
+  var msg = document.getElementById("packet-msg");
+  msg.textContent = "";
+  api("/memory/feedback", { method: "POST", body: { id: id, kind: kind } }).then(function (out) {
+    // Report what the kernel actually recorded — the surface never claims a write it
+    // did not get confirmation for.
+    if (!out.ok) { msg.textContent = out.error || "could not record that"; return; }
+    msg.textContent = kind === "helpful" ? "Recorded — thanks." : "Recorded. Kage will weigh this down in recall.";
+    if (button) button.classList.add("primary");
+    loadMemory();
+  }).catch(function () { msg.textContent = "could not record that"; });
+}
 function openPacket(id) {
   var overlay = document.getElementById("packet-overlay");
   document.getElementById("packet-title").textContent = "Loading…";
   document.getElementById("packet-body").textContent = "";
   overlay.classList.add("on");
+  Array.prototype.forEach.call(overlay.querySelectorAll("[data-fb]"), function (button) {
+    button.classList.remove("primary");
+    button.onclick = function () { sendPacketFeedback(id, button.getAttribute("data-fb"), button); };
+  });
+  document.getElementById("packet-msg").textContent = "";
   api("/memory/" + encodeURIComponent(id)).then(function (out) {
     document.getElementById("packet-title").textContent = out.ok ? out.title : "Not found";
     document.getElementById("packet-body").textContent = out.ok ? out.body : (out.error || "");

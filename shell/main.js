@@ -8,10 +8,26 @@
 // grows opinions becomes a second renderer that drifts (the AO/TUI lesson).
 "use strict";
 
-const { app, BrowserWindow, globalShortcut, shell } = require("electron");
+const { app, BrowserWindow, globalShortcut, nativeImage, shell } = require("electron");
 const { execFileSync } = require("node:child_process");
 const { writeFileSync, existsSync } = require("node:fs");
 const { join, resolve } = require("node:path");
+
+/**
+ * The app's own mark — the 影 seal the titlebar already shows.
+ *
+ * electron-builder bakes the icon into a packaged .app from build/icon.icns, but a dev
+ * run (`npm start`, or `npx electron .`) gets Electron's default icon unless the dock
+ * is told explicitly. Setting it here means the icon is right in both, which is the
+ * whole point: a generic Electron diamond is the first thing a user sees.
+ */
+function applyDockIcon() {
+  if (process.platform !== "darwin" || !app.dock) return;
+  const icon = join(__dirname, "build", "icon.png");
+  if (!existsSync(icon)) return;
+  const image = nativeImage.createFromPath(icon);
+  if (!image.isEmpty()) app.dock.setIcon(image);
+}
 
 function argValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -75,6 +91,10 @@ function createWindow(url) {
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 15 },
     backgroundColor: "#121619",
+    // Linux/Windows take the window icon; macOS uses the dock icon set above.
+    ...(process.platform === "darwin" || !existsSync(join(__dirname, "build", "icon.png"))
+      ? {}
+      : { icon: join(__dirname, "build", "icon.png") }),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -120,6 +140,7 @@ function createWindow(url) {
 }
 
 app.whenReady().then(() => {
+  applyDockIcon();
   let url;
   try {
     url = ensureDaemon();

@@ -212,3 +212,39 @@ export function stripPacketChrome(raw: string): string {
   if (fence >= 0) text = text.slice(0, fence);
   return text.trim();
 }
+
+/**
+ * Record a reader's verdict on one memory.
+ *
+ * Browsing memory you cannot correct is a read-only museum: the moment a packet is
+ * visibly wrong or stale, the reader is exactly the right person to say so, and
+ * making them leave for a terminal is how bad memory survives. The kernel owns the
+ * write (recordFeedback) — this only validates the input and forwards it, so the app
+ * can never record a verdict the CLI could not.
+ */
+export function recordMemoryFeedback(
+  projectDir: string,
+  id: string,
+  kind: string,
+): { ok: boolean; id: string; kind?: string; error?: string } {
+  const allowed = ["helpful", "wrong", "stale"];
+  if (!allowed.includes(kind)) {
+    return { ok: false, id, error: `kind must be one of ${allowed.join(", ")}` };
+  }
+  // Only ids this repo actually has — the same catalog check readMemoryPacket uses,
+  // so a crafted id cannot reach the kernel's writer.
+  const catalog = readJson<CatalogFile>(join(memoryDir(projectDir), "indexes", "catalog.json"), {});
+  if (!(catalog.packets ?? []).some((entry) => String(entry.id) === id)) {
+    return { ok: false, id, error: "no such memory in this repo" };
+  }
+  try {
+    // Imported lazily: kernel.ts is large, and the memory view's read path must stay
+    // cheap enough to serve on every page load.
+    const { recordFeedback } = require("../kernel.js") as typeof import("../kernel.js");
+    const result = recordFeedback(projectDir, id, kind as never);
+    if (!result.ok) return { ok: false, id, error: result.errors.join("; ") };
+    return { ok: true, id, kind };
+  } catch (error) {
+    return { ok: false, id, error: (error as Error).message };
+  }
+}

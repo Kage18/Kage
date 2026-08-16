@@ -2,7 +2,7 @@
   "name": "kage-shell",
   "version": "0.1.0",
   "private": true,
-  "description": "Kage desktop shell — a thin Electron frame over the daemon's renderer. Contains zero HTML.",
+  "description": "Kage desktop shell \u2014 a thin Electron frame over the daemon's renderer. Contains zero HTML.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -12,15 +12,33 @@
   "build": {
     "appId": "dev.kage.desktop",
     "productName": "Kage",
-    "directories": { "output": "dist" },
-    "files": ["main.js", "package.json"],
-    "extraMetadata": { "main": "main.js" },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "package.json",
+      "build/icon.icns"
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    },
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": [{ "target": "dmg", "arch": ["arm64"] }],
-      "identity": null
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": null,
+      "icon": "build/icon.icns"
     },
-    "dmg": { "title": "Kage" }
+    "dmg": {
+      "title": "Kage"
+    }
   },
   "devDependencies": {
     "electron": "^33.0.0",

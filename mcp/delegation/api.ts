@@ -45,7 +45,7 @@ import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
 import { ensureAppDaemon } from "./app-daemon.js";
-import { readMemoryOverview, readMemoryPacket } from "./memory-view.js";
+import { readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
 import { attachRoomPty, dispatchRoomPtySupervisor, isRoomPtyLive, retirePtyRoom, retireStructuredRoom, type RoomPtyAttachment } from "./room-pty.js";
 import {
   DEFAULT_SESSION,
@@ -531,6 +531,27 @@ export async function handleDelegationRoute(
   // analysis functions from a request would be a four-minute mistake.
   if (path === "/memory" && method === "GET") {
     json(res, 200, readMemoryOverview(projectDir));
+    return true;
+  }
+
+  // A reader who spots wrong or stale memory is the right person to say so, and the
+  // app is where they are standing when they spot it.
+  if (path === "/memory/feedback" && method === "POST") {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      json(res, 400, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    const id = typeof body.id === "string" ? body.id : "";
+    const kind = typeof body.kind === "string" ? body.kind : "";
+    if (!id) {
+      json(res, 400, { ok: false, error: "id is required" });
+      return true;
+    }
+    const result = recordMemoryFeedback(projectDir, id, kind);
+    json(res, result.ok ? 200 : 400, result);
     return true;
   }
 

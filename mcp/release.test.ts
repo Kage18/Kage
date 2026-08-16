@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildNpmReleasePlan, parseReleaseArgs } from "./release.js";
 
 test("release args default to a dry run unless publish is explicit", () => {
@@ -83,4 +84,26 @@ test("maintainer release helper is not exposed in public package metadata", () =
   assert.equal(pkg.scripts?.["release:npm"], undefined);
   assert.equal(pkg.scripts?.["release:npm:dry-run"], undefined);
   assert.equal(pkg.files?.includes("!dist/release.js"), true);
+});
+
+test("every command the help advertises actually exists, and the flagship ones are advertised", () => {
+  // Help drifted badly once: `kage app` — the desktop app the product is sold on —
+  // appeared nowhere in `kage help`, while `kage viewer` (the legacy dashboard) was
+  // listed in its place. A user installing Kage had no way to discover the app.
+  const source = readFileSync(join(__dirname, "..", "cli.ts"), "utf8");
+  const implemented = new Set([...source.matchAll(/command === "([a-z-]+)"/g)].map((m) => m[1]));
+
+  const coreStart = source.indexOf("const CORE_USAGE");
+  const coreEnd = source.indexOf("`;", coreStart);
+  const help = source.slice(coreStart, coreEnd);
+  const advertised = [...help.matchAll(/^\s{2}kage ([a-z-]+)/gm)].map((m) => m[1]);
+
+  assert.ok(advertised.length >= 10, `help should list the real command set (found ${advertised.length})`);
+  for (const name of advertised) {
+    assert.ok(implemented.has(name), `help advertises "kage ${name}" but no such command is implemented`);
+  }
+  // The surfaces a new user must be able to find.
+  for (const name of ["app", "room", "dispatch", "recall", "install"]) {
+    assert.ok(advertised.includes(name), `"kage ${name}" must be discoverable from plain \`kage help\``);
+  }
 });

@@ -140,23 +140,37 @@ import { openRoom } from "./delegation/room.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
 
-const CORE_USAGE = `Kage — code-grounded memory for coding agents
+// Ordered by what a person actually does, not by when each command was built. The app
+// used to be missing from this list entirely — the surface the product is sold on was
+// undiscoverable from its own CLI, while `kage viewer` (the legacy dashboard) was
+// advertised in its place.
+const CORE_USAGE = `Kage — repo memory, and an orchestrator that uses it
 
-Core commands:
+Start here:
   kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
+  kage app [--project <dir>]                 the desktop app — room, runs, board, memory
   kage scan --project <dir>                  60-second truth report on any repo (zero setup)
-  kage init --project <dir>                  create repo memory (.agent_memory only)
-  kage index --project <dir> [--full]        build/refresh code graph + indexes
+
+Delegate work (the orchestrator):
+  kage room [--project <dir>]                talk to Kage; it briefs and hires agents for you
+  kage dispatch "<intent>" [--agent claude]  one delegated run, briefed from repo memory
+  kage runs [--project <dir>]                what every run is doing right now
+  kage review --project <dir>                read a finished run's claim and diff
+  kage merge <run-id> --project <dir>        land the code and ratify what it learned
+
+Memory:
   kage recall "<query>" --project <dir>      grounded recall from repo memory
   kage learn --project <dir> ...             capture a learning as a memory packet
   kage gains --project <dir>                 what Kage saved you (tokens, cost, stale blocks)
   kage verify --project <dir>                check memory citations against code
-  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+
+Keep it healthy:
+  kage refresh --project <dir>               rebuild indexes, graphs and metrics
   kage doctor --project <dir>                health check
   kage repair --project <dir>                fix what doctor finds (indexes, broken packets, wiring)
-  kage viewer --project <dir>                local dashboard
+  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
 
-Run 'kage help --all' for the full command list (lifecycle, CI, benchmarks, daemon, workspace).`;
+Run 'kage help --all' for every command (lifecycle, CI, benchmarks, daemon, workspace).`;
 
 const FULL_USAGE = `Kage — full command reference
 
