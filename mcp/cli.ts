@@ -328,7 +328,11 @@ function listArg(value: string | undefined): string[] {
 }
 
 function projectArg(args: string[]): string {
-  return takeArg(args, "--project") ?? process.cwd();
+  // ALWAYS absolute. `kage app --project .` used to hand "." straight through to the
+  // daemon, which then stored it, served it back through /settings, and built every
+  // memory/worktree path from it — so anything that changed directory, or any client
+  // resolving it later, was working from a different repo than the user meant.
+  return resolve(takeArg(args, "--project") ?? process.cwd());
 }
 
 function numberArg(args: string[], name: string, fallback: number): number {

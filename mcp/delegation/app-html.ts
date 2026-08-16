@@ -479,7 +479,8 @@ const APP_HTML = `<!doctype html>
   /* diff + raw */
   .codepane { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     padding:10px 0; overflow-x:auto; box-shadow:var(--shadow-sm); }
-  .dline { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre; }
+  .dline { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre;
+    width:max-content; min-width:100%; box-sizing:border-box; }
   .dline.add { color:var(--jade); background:color-mix(in srgb, var(--jade) 7%, transparent); }
   .dline.del { color:var(--crimson); background:color-mix(in srgb, var(--crimson) 7%, transparent); }
   .dline.hunk { color:var(--text3); padding-top:6px; }
@@ -743,7 +744,7 @@ const APP_HTML = `<!doctype html>
 <div class="status">
   <span class="conn" id="conn" title="live"></span>
   <span id="st-left">connecting…</span>
-  <span class="right"><span id="st-counts"></span><span>press ⌘K for commands · N for a new run</span></span>
+  <span class="right"><span id="st-counts"></span><span>press ⌘K for commands · ⌘N for a new run</span></span>
 </div>
 <div class="overlay" id="settings-overlay">
   <div class="settings">
@@ -1862,6 +1863,20 @@ function refresh() {
   return api("/runs").then(function (out) {
     state.runs = out.runs || [];
     maybeNotify();
+    // Open on something. The Runs view used to render a full-width empty pane until
+    // the user guessed to click the list, which on a 1280px window is most of the
+    // screen doing nothing. Pick what most wants a human — the first run needing you,
+    // else the newest — and only when nothing is selected, so this never steals a
+    // selection the user made.
+    if (!state.selected && state.runs.length) {
+      var wants = state.runs.filter(function (r) { return r.ownership === "needs_you"; })[0];
+      state.selected = (wants || state.runs[0]).id;
+      api("/runs/" + state.selected).then(function (detail) {
+        state.detail = detail.ok ? detail : null;
+        render();
+        loadTabText(state.selected);
+      });
+    }
     if (state.selected) {
       return api("/runs/" + state.selected).then(function (detail) {
         state.detail = detail.ok ? detail : null;
@@ -2275,6 +2290,7 @@ document.addEventListener("keydown", function (ev) {
   var typing = ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "SELECT");
   // ⌘K works from anywhere, including mid-sentence in the composer.
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "k") { ev.preventDefault(); showPalette(true); return; }
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "n") { ev.preventDefault(); showOverlay(true); return; }
   if (ev.key === "Escape") { showPalette(false); showOverlay(false); showSettings(false); document.getElementById("notif").classList.remove("on"); return; }
   if (typing) {
     if (ev.key === "Enter" && ev.target.id === "intent" && (ev.metaKey || ev.ctrlKey)) dispatchNow();
@@ -2285,7 +2301,7 @@ document.addEventListener("keydown", function (ev) {
   else if (ev.key === "3") setView("runs");
   else if (ev.key === "4") setView("board");
   else if (ev.key === "5") setView("memory");
-  else if (ev.key === "n") showOverlay(true);
+  else if (ev.key === "n") { ev.preventDefault(); showOverlay(true); }
 });
 Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function (btn) {
   btn.onclick = function () { setView(btn.dataset.view); };
