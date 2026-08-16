@@ -370,7 +370,10 @@ test("every CSS class the renderer styles is actually put on an element somewher
   // so a textual check covers both.
   const html = delegationAppHtml("tok");
   const styleEnd = html.indexOf("</style>");
-  const css = html.slice(0, styleEnd);
+  // Strip /* comments */ before scanning: a comment that mentions a selector (e.g.
+  // explaining what ".stat-chip strong" does on the website) is prose, not a rule,
+  // and flagging it as an orphan is the gate reporting on itself.
+  const css = html.slice(0, styleEnd).replace(/\/\*[\s\S]*?\*\//g, " ");
   const body = html.slice(styleEnd);
 
   const styled = new Set<string>();

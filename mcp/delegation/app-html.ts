@@ -47,41 +47,64 @@ const APP_HTML = `<!doctype html>
 <title>Kage</title>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <style>
+  /* ── Kage tokens, taken from the site (docs/assets/site.css) ────────────────
+     The app previously invented its own look: a warm neutral ground with an orange
+     seal, tight 4-8px corners, system fonts. None of that is Kage. The product's
+     palette is a GREEN-BLACK ground with verified-green reserved for gains and
+     primary action, editorial serif display type, and a deliberately soft radius
+     scale. Matching the site is the point — a user should not be able to tell the
+     app and the site were built by different hands.
+
+     Fonts are declared with the site's exact stacks. The site loads Fraunces/Inter/
+     JetBrains Mono from Google Fonts; the app cannot (it must work offline behind
+     the guard, and a test forbids external hosts), so it takes the same stacks and
+     degrades exactly as the site does when they are absent. */
   :root {
-    --bg:#f6f5f2; --surface:#ffffff; --surface2:#efede8; --inset:#e9e7e1;
-    --line:#dcd9d1; --line2:#e8e5de; --line-strong:#bfbab0; --text:#1b1f22; --text2:#5c6166; --text3:#8f918f;
-    --chrome:#eceae4; --seal:#d4552f; --jade:#2f9268; --amber:#b3811c; --crimson:#9e3b3b;
-    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-    /* Kage's display face, carried over from the viewer, where it sets the brand mark
-       and every heading. The app had no typographic identity at all — system sans for
-       everything — which is the main reason the two surfaces read as different
-       products despite sharing a palette. */
-    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
-    /* One radius scale instead of eleven ad-hoc values (3,4,5,6,7,8,9,10,11,12,13px).
-       The viewer's tighter scale reads as a precise tool; soft 12-13px corners read as
-       a generic web app. */
-    --r-control:4px; --r-panel:6px; --r-card:8px;
-    --shadow-sm:0 1px 2px rgba(20,24,26,.05), 0 2px 8px rgba(20,24,26,.05);
-    --shadow-md:0 1px 2px rgba(20,24,26,.06), 0 10px 28px rgba(20,24,26,.10);
+    color-scheme: dark;
+    --bg:#121413; --surface:#1a1d1b; --surface2:#212522; --inset:#0e1110;
+    --line:#2c302c; --line2:#242a25; --line-strong:#41463f;
+    --text:#edefe9; --text2:#a4aba1; --text3:#767d74;
+    --chrome:#171a18;
+
+    /* Verified green — gains and primary action only, per the site's own rule. */
+    --green:#43c98a; --green-strong:#5fdca0; --green-soft:rgba(67,201,138,.12);
+    /* Kept under their old names so every existing rule keeps working, but now
+       pointing at the site's palette rather than an invented one. */
+    --seal:#43c98a; --jade:#43c98a;
+    --code:#6fb4e8; --memory:#b095e8; --amber:#d9a93f; --crimson:#e07a8c;
+
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --serif:"Fraunces","Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+
+    /* Soft, premium — the site's scale. The app had 4/6/8px, which read as a
+       utilitarian tool rather than as Kage. */
+    --r-control:10px; --r-panel:14px; --r-card:16px; --r-hero:22px;
+
+    --code-bg:#0e1110; --code-text:#cfe0d4;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.2), 0 6px 18px rgba(0,0,0,.22);
+    --shadow-md:0 1px 2px rgba(0,0,0,.2), 0 14px 36px rgba(0,0,0,.3);
+    --glow-green:0 10px 28px rgba(67,201,138,.22);
   }
-  /* Dark tokens live in a named block so BOTH the OS preference and an explicit
-     in-app choice can apply them. The explicit choice must win in both directions,
-     so it is a data-theme attribute on :root that overrides the media query. */
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg:#121619; --surface:#1a1f23; --surface2:#20262b; --inset:#15191d;
-      --line:#2c333a; --line2:#242b31; --line-strong:#414a52; --text:#e8e8e5; --text2:#a6acb0; --text3:#70777c;
-      --chrome:#171c20; --seal:#e86a42; --jade:#46b184; --amber:#d9a53c; --crimson:#cc6b6b;
-      --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 2px 10px rgba(0,0,0,.25);
-      --shadow-md:0 1px 2px rgba(0,0,0,.4), 0 14px 36px rgba(0,0,0,.45); }
+
+  /* The site retired its light tokens ("one look, like the product"). A desktop app
+     is used in rooms the site is not, so the choice survives — but as a faithful
+     light rendering of the SAME green-black language, not the unrelated warm
+     palette that was here before. Dark stays the default and the identity. */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg:#f2f4f1; --surface:#ffffff; --surface2:#e9ece7; --inset:#e3e7e1;
+    --line:#d5dad2; --line2:#e2e6df; --line-strong:#b3bbb0;
+    --text:#141714; --text2:#4d544c; --text3:#79806f;
+    --chrome:#e8ebe6;
+    --green:#1f9d63; --green-strong:#178552; --green-soft:rgba(31,157,99,.12);
+    --seal:#1f9d63; --jade:#1f9d63;
+    --code:#2f6fa8; --memory:#6f52a8; --amber:#9a6f14; --crimson:#a8465c;
+    --code-bg:#0e1110; --code-text:#cfe0d4;
+    --shadow-sm:0 1px 2px rgba(20,24,20,.05), 0 2px 8px rgba(20,24,20,.05);
+    --shadow-md:0 1px 2px rgba(20,24,20,.06), 0 10px 28px rgba(20,24,20,.10);
+    --glow-green:0 10px 28px rgba(31,157,99,.18);
   }
-  :root[data-theme="dark"] {
-    --bg:#121619; --surface:#1a1f23; --surface2:#20262b; --inset:#15191d;
-    --line:#2c333a; --line2:#242b31; --line-strong:#414a52; --text:#e8e8e5; --text2:#a6acb0; --text3:#70777c;
-    --chrome:#171c20; --seal:#e86a42; --jade:#46b184; --amber:#d9a53c; --crimson:#cc6b6b;
-    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 2px 10px rgba(0,0,0,.25);
-    --shadow-md:0 1px 2px rgba(0,0,0,.4), 0 14px 36px rgba(0,0,0,.45); }
 
   /* notification badge on the bell */
   .bellwrap { position:relative; display:inline-flex; }
@@ -103,9 +126,10 @@ const APP_HTML = `<!doctype html>
     -webkit-app-region:drag; flex:none; }
   .top button, .top .seg { -webkit-app-region:no-drag; }
   body.electron .top { padding-left:84px; }
-  .seal { width:26px; height:26px; border:1.5px solid var(--seal); border-radius:var(--r-panel); color:var(--seal);
-    font-family:var(--mono); font-weight:700; font-size:13px; display:flex; align-items:center;
-    justify-content:center; flex:none; }
+  /* Kage's mark is the glowing eye from the site, not the 影 kanji the app invented
+     — the site does not use 影 anywhere. Inlined rather than linked so the page stays
+     self-contained behind the guard. */
+  .seal { width:24px; height:24px; flex:none; display:block; }
   .appname { font-family:var(--serif); font-weight:700; font-size:16px; letter-spacing:.01em; }
   .proj { font-family:var(--mono); font-size:11px; color:var(--text3); overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; max-width:30vw; }
@@ -174,20 +198,23 @@ const APP_HTML = `<!doctype html>
   .mem-hero .eyebrow { font-size:10.5px; font-weight:650; letter-spacing:.1em; text-transform:uppercase;
     color:var(--text3); margin-bottom:14px; }
   .mem-figs { display:flex; flex-wrap:wrap; gap:30px; }
-  .mem-fig .n { font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:-.02em;
-    font-variant-numeric:tabular-nums; }
+  /* The site sets stat figures in the SERIF face (.stat-chip strong: 600 22px
+     var(--serif)); the app had them in mono, which reads as telemetry rather than
+     as Kage. */
+  .mem-fig .n { font-family:var(--serif); font-size:30px; font-weight:600; letter-spacing:-.01em;
+    font-variant-numeric:tabular-nums; line-height:1; }
   .mem-fig .l { font-size:12px; color:var(--text2); margin-top:3px; }
   .mem-fig .sub { font-size:11px; color:var(--text3); margin-top:1px; }
-  .mem-fig.jade .n { color:var(--jade); }
+  .mem-fig.jade .n { color:var(--green); }
   .mem-fig.amber .n { color:var(--amber); }
   .mem-est { margin-top:16px; padding-top:14px; border-top:1px solid var(--line);
     display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-  .mem-est .n { font-family:var(--mono); font-size:16px; font-variant-numeric:tabular-nums; color:var(--text2); }
+  .mem-est .n { font-family:var(--serif); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text2); }
   .mem-est .l { font-size:11.5px; color:var(--text3); }
 
   .mem-health { display:grid; grid-template-columns:repeat(auto-fit, minmax(128px, 1fr)); gap:10px; margin-bottom:22px; }
   .mem-stat { border:1px solid var(--line); border-radius:var(--r-card); background:var(--surface); padding:12px 14px; }
-  .mem-stat .n { font-family:var(--mono); font-size:17px; font-variant-numeric:tabular-nums; }
+  .mem-stat .n { font-family:var(--serif); font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; }
   .mem-stat .l { font-size:11px; color:var(--text3); margin-top:2px; }
   .mem-stat.warn { border-color:var(--amber); }
   .mem-stat.warn .n { color:var(--amber); }
@@ -250,7 +277,8 @@ const APP_HTML = `<!doctype html>
   .room-scroll { overflow-y:auto; flex:1; }
   .room-col { max-width:720px; margin:0 auto; padding:28px 24px 32px; display:flex; flex-direction:column; gap:18px; }
   .primer { text-align:center; padding:70px 20px 20px; color:var(--text3); }
-  .primer .pseal { width:44px; height:44px; border:1.5px solid var(--seal); border-radius:var(--r-card); color:var(--seal);
+  .primer .pseal-eye { width:46px; height:46px; display:block; }
+  .primer .pseal { width:46px; height:46px; color:var(--green);
     font-family:var(--mono); font-weight:700; font-size:22px; display:flex; align-items:center; justify-content:center;
     margin:0 auto 18px; }
   .primer p { max-width:420px; margin:0 auto; font-size:13.5px; line-height:1.6; }
@@ -607,7 +635,7 @@ const APP_HTML = `<!doctype html>
   .thread .tx:hover { color:var(--crimson); }
   .room-toggle .tadd { color:var(--text3); padding:6px 9px; flex:none; }
   #room-chat-pane { display:flex; flex-direction:column; flex:1; min-height:0; }
-  #room-term-pane { display:none; flex:1; min-height:0; min-width:0; background:#0d1117; padding:10px 14px; }
+  #room-term-pane { display:none; flex:1; min-height:0; min-width:0; background:var(--code-bg); padding:10px 14px; }
   /* flex:1 + min-width:0 matter: as a flex item this would otherwise size to its
      content, and xterm's fit addon would measure a near-zero box and pick cols=2 —
      which renders the session one character per line. */
@@ -617,7 +645,7 @@ const APP_HTML = `<!doctype html>
 </head>
 <body>
 <div class="top">
-  <span class="seal">影</span>
+  <svg class="seal" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg>
   <span class="appname">Kage</span>
   <span class="proj" id="proj"></span>
   <div class="seg">
@@ -650,7 +678,7 @@ const APP_HTML = `<!doctype html>
     <div id="room-chat-pane">
       <div class="room-scroll"><div class="room-col" id="room-col">
         <div class="primer" id="room-primer">
-          <div class="pseal">影</div>
+          <div class="pseal"><svg class="pseal-eye" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris2" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris2)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg></div>
           <p>Tell Kage what should happen. It reads the room, compiles a brief from what this repo has learned, hires an agent in a worktree, and reports back once the kernel — not the agent — has checked the work.</p>
         </div>
         <div id="room-turns"></div>
@@ -1059,8 +1087,9 @@ function renderMemory() {
     return box;
   }
   var v = mem.value.observed;
-  figs.appendChild(fig(num(v.packets), "memories written", "verified against the repo"));
-  figs.appendChild(fig(num(v.recalls), "recalls served", v.recalls ? "answered from memory" : "none yet"));
+  // Green on what Kage saved you — the site reserves it for gains and primary action.
+  figs.appendChild(fig(num(v.packets), "memories written", "verified against the repo", "jade"));
+  figs.appendChild(fig(num(v.recalls), "recalls served", v.recalls ? "answered from memory" : "none yet", v.recalls ? "jade" : null));
   if (v.stale_caught) figs.appendChild(fig(num(v.stale_caught), "stale memories caught", "before they misled an agent", "amber"));
   card.appendChild(figs);
 
@@ -1364,7 +1393,8 @@ function ensureTerminal() {
     cursorBlink: true,
     fontSize: 13,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    theme: { background: "#0d1117", foreground: "#e6e6e3", cursor: "#e6e6e3" },
+    // xterm needs literals, not CSS variables — these are --code-bg/--code-text.
+    theme: { background: "#0e1110", foreground: "#cfe0d4", cursor: "#43c98a" },
     convertEol: true,
   });
   fitAddon = new FitAddon.FitAddon();

@@ -90,7 +90,7 @@ function createWindow(url) {
     title: "Kage",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 15 },
-    backgroundColor: "#121619",
+    backgroundColor: "#121413",
     // Linux/Windows take the window icon; macOS uses the dock icon set above.
     ...(process.platform === "darwin" || !existsSync(join(__dirname, "build", "icon.png"))
       ? {}
