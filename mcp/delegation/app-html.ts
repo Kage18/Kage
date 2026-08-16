@@ -214,6 +214,9 @@ const APP_HTML = `<!doctype html>
     white-space:nowrap; flex:1; min-width:0; }
   .liverow .la { font-family:var(--mono); font-size:11px; color:var(--green); flex:none; }
   .liverow .lg { font-family:var(--mono); font-size:10.5px; color:var(--text3); flex:none; }
+  .railmore { align-self:center; font-size:11.5px; color:var(--text3); padding:3px 8px;
+    border-radius:var(--r-control); }
+  .railmore:hover { color:var(--green); background:var(--green-soft); }
   /* ---- memory ----
      The one view that answers "what has Kage actually done for me". It leads with
      OBSERVED numbers (recalls served, stale memories withheld, packets written) and
@@ -891,7 +894,33 @@ function renderInbox() {
   rows.textContent = "";
   var decisions = state.runs.filter(function (r) { return r.ownership === "needs_you"; });
   var quiet = state.runs.filter(function (r) { return r.ownership === "working"; }).length;
+  // Order by what it COSTS to ignore, not by when it happened. At twenty decisions a
+  // flat list buried an agent waiting on an answer underneath nine routine merges;
+  // a blocked run holds a whole worktree hostage, a lost one may need re-dispatching,
+  // and a ready one is only waiting for a click.
+  var rank = { blocked: 0, failed: 1, dropped: 1, stopped: 1, ready: 2 };
+  decisions.sort(function (a, b) {
+    var ra = rank[a.display_state] === undefined ? 3 : rank[a.display_state];
+    var rb = rank[b.display_state] === undefined ? 3 : rank[b.display_state];
+    return ra - rb || String(b.updated_at).localeCompare(String(a.updated_at));
+  });
+  var groupOf = function (run) {
+    if (run.display_state === "blocked") return "Asks you";
+    if (run.display_state === "ready") return "Ready to merge";
+    return "Needs a decision";
+  };
+  var lastGroup = null;
   decisions.forEach(function (run) {
+    // A heading per group, with its own count, so twenty rows read as three piles.
+    var group = groupOf(run);
+    if (group !== lastGroup) {
+      lastGroup = group;
+      var count = decisions.filter(function (r) { return groupOf(r) === group; }).length;
+      var head = h("div", "seclabel");
+      head.appendChild(document.createTextNode(group));
+      head.appendChild(h("span", "n", String(count)));
+      rows.appendChild(head);
+    }
     var row = h("div", "qrow");
     var g = glyphFor(run);
     row.appendChild(h("span", "glyph " + g[1], g[0]));
@@ -1054,7 +1083,8 @@ function renderLiveRail() {
     return ["running", "dispatched", "verifying"].indexOf(r.display_state) >= 0;
   });
   var waiting = state.runs.filter(function (r) { return r.display_state === "blocked" || r.display_state === "ready"; });
-  live.concat(waiting).slice(0, 4).forEach(function (run) {
+  var all = live.concat(waiting);
+  all.slice(0, 4).forEach(function (run) {
     var row = h("div", "liverow");
     var working = ["running", "dispatched", "verifying"].indexOf(run.display_state) >= 0;
     if (working) row.appendChild(h("span", "dot"));
@@ -1067,6 +1097,13 @@ function renderLiveRail() {
     row.onclick = function () { openRun(run.id); };
     rail.appendChild(row);
   });
+  // Never imply four is all of it. Twenty runs needing a human, showing four, with no
+  // hint of the rest is the app quietly hiding work from you.
+  if (all.length > 4) {
+    var more = h("button", "railmore", "+" + (all.length - 4) + " more waiting — open the inbox");
+    more.onclick = function () { setView("inbox"); };
+    rail.appendChild(more);
+  }
 }
 
 function renderRoom() {
