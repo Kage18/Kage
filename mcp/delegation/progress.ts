@@ -139,7 +139,15 @@ export function progressFromStreamEvent(raw: string): ProgressEvent | null {
         (typeof input.pattern === "string" && String(input.pattern).slice(0, 32)) ||
         "";
       const verb = toolVerb(String(block.name ?? "working"));
-      return { kind: "tool", label: target ? `${verb} ${shorten(String(target))}` : verb };
+      // Shorten the PATH first, then the string. Truncating blindly at 44 characters
+      // produced "writing /private/tmp/claude-501/-Users-kushaljain-c…" — every live
+      // activity line was a prefix of a temp path, identical to every other line and
+      // naming nothing. Worktrees live several levels deep under a temp dir, so the
+      // filename is always the part that carries the meaning.
+      const shown = typeof input.file_path === "string" || typeof input.path === "string"
+        ? shortenPath(String(target))
+        : String(target);
+      return { kind: "tool", label: shown ? `${verb} ${shorten(shown)}` : verb };
     }
     if (block.type === "text" && block.text?.trim()) {
       return { kind: "say", label: shorten(block.text.trim().split("\n")[0], 64) };
@@ -163,6 +171,18 @@ function toolVerb(name: string): string {
     TodoWrite: "planning",
   };
   return map[name] ?? `using ${name}`;
+}
+
+/**
+ * A path as a person would name it: the file, with one parent when that parent is a
+ * real directory name rather than a generated worktree id.
+ */
+function shortenPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length < 2) return path;
+  const file = parts[parts.length - 1];
+  const parent = parts[parts.length - 2];
+  return parent.length <= 14 && !/\d{6}-[0-9a-f]{4}$/.test(parent) ? `${parent}/${file}` : file;
 }
 
 function shorten(text: string, max = 44): string {

@@ -200,6 +200,20 @@ const APP_HTML = `<!doctype html>
   .side .sidefoot b { font-weight:600; color:var(--text2); }
   @media (max-width: 900px) { .side { display:none; } }
 
+  /* Live runs, surfaced in the Room. Work dispatched from here used to vanish: the
+     only sign an agent was running was a count in the status bar, and you had to know
+     to navigate to Runs to find it. */
+  .liverail { flex:none; display:flex; flex-direction:column; gap:6px; padding:10px 24px 0; }
+  .liverow { display:flex; align-items:center; gap:10px; padding:9px 13px; cursor:pointer;
+    border:1px solid color-mix(in srgb, var(--green) 26%, var(--line));
+    background:var(--green-soft); border-radius:var(--r-panel); }
+  .liverow:hover { border-color:var(--green); }
+  .liverow .dot { width:6px; height:6px; border-radius:50%; background:var(--green); flex:none;
+    animation:pulse2 1.2s ease-in-out infinite; }
+  .liverow .li { font-size:12.5px; color:var(--text); overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; flex:1; min-width:0; }
+  .liverow .la { font-family:var(--mono); font-size:11px; color:var(--green); flex:none; }
+  .liverow .lg { font-family:var(--mono); font-size:10.5px; color:var(--text3); flex:none; }
   /* ---- memory ----
      The one view that answers "what has Kage actually done for me". It leads with
      OBSERVED numbers (recalls served, stale memories withheld, packets written) and
@@ -462,7 +476,8 @@ const APP_HTML = `<!doctype html>
   .toolcard .ic { width:16px; text-align:center; font-size:12px; flex:none; }
   .toolcard .ic.read { color:var(--text3); } .toolcard .ic.edit { color:var(--jade); }
   .toolcard .ic.run { color:var(--seal); } .toolcard .ic.plan { color:var(--amber); }
-  .toolcard .lbl { font-family:var(--mono); font-size:12px; color:var(--text2); }
+  .toolcard .lbl { font-family:var(--mono); font-size:12px; color:var(--text2);
+    min-width:0; flex:1; overflow-wrap:anywhere; }
   .toolcard .ts { font-family:var(--mono); font-size:10px; color:var(--text3); opacity:.6;
     margin-left:auto; font-variant-numeric:tabular-nums; flex:none; }
   .livepulse { width:6px; height:6px; border-radius:50%; background:var(--jade); display:inline-block;
@@ -710,6 +725,7 @@ const APP_HTML = `<!doctype html>
         <div id="room-turns"></div>
         <div class="typing" id="room-typing" style="display:none"><span id="room-typing-text">thinking</span><span class="dots"><i></i><i></i><i></i></span></div>
       </div></div>
+      <div class="liverail" id="liverail"></div>
       <div class="room-composer">
         <div class="room-cwrap">
           <textarea id="room-input" rows="1" placeholder="Message Kage…"></textarea>
@@ -945,6 +961,42 @@ function renderHandover() {
 
 // --- room: the conversation. askManager's tool names arrive as "mcp__kage__kage_dispatch";
 // the trailer strips the MCP prefix so a non-technical reader sees "dispatch", not plumbing.
+// Activity labels arrive with ABSOLUTE paths, because that is what the agent actually
+// ran. Rendered raw and ellipsised they became "reading /private/tmp/claude-501/-Users-
+// kushaljain-c…" on every line — the live feed was technically working and completely
+// unreadable. Worktrees live under a temp dir, so the interesting part is always the
+// tail: show the path relative to the repo, and shorten a long command to its verb and
+// target rather than its first 40 characters.
+// Deliberately no regex: this whole file is one TS template literal, so every
+// backslash would need doubling and a mis-escaped character class silently compiles
+// to something else (the parse gate caught exactly that here). Splitting on
+// whitespace is clearer and cannot be mangled by the template.
+function readableLabel(text) {
+  return String(text || "")
+    .split(" ")
+    .map(function (word) {
+      if (word.indexOf("/") < 0) return word;
+      var parts = word.split("/").filter(Boolean);
+      if (!parts.length) return word;
+      // Prefer the last segment that looks like a FILE. Worktree paths end in a long
+      // generated directory name, so "last segment" alone still produced
+      // "claude-501/-Users-kushaljain-code-Kage…" — a path with no information in it.
+      var fileAt = -1;
+      for (var i = parts.length - 1; i >= 0; i -= 1) {
+        if (parts[i].indexOf(".") > 0) { fileAt = i; break; }
+      }
+      if (fileAt < 0) {
+        // No filename at all: this is a directory. Its own name is the useful part.
+        var dir = parts[parts.length - 1];
+        return dir.length > 28 ? dir.slice(0, 27) + "…" : dir;
+      }
+      var file = parts[fileAt];
+      var parent = fileAt > 0 ? parts[fileAt - 1] : "";
+      return parent && parent.length <= 14 ? parent + "/" + file : file;
+    })
+    .join(" ");
+}
+
 function toolLabel(name) { return String(name).replace("mcp__kage__kage_", "").replace("mcp__kage__", ""); }
 function turnDispatched(turn) {
   return (turn.tools || []).some(function (t) { return t.indexOf("kage_dispatch") >= 0; });
@@ -955,6 +1007,32 @@ function turnDispatched(turn) {
 // arrival is trustworthy — after a reload there's no way to know which old turn
 // caused which old run.
 var roomLinkedRuns = {};
+
+// What is running right now, shown in the Room. It answers the question the Room
+// could not: you asked Kage to do something, an agent is doing it — where is it?
+// Clicking a row takes you to that run's live feed.
+function renderLiveRail() {
+  var rail = document.getElementById("liverail");
+  if (!rail) return;
+  rail.textContent = "";
+  var live = state.runs.filter(function (r) {
+    return ["running", "dispatched", "verifying"].indexOf(r.display_state) >= 0;
+  });
+  var waiting = state.runs.filter(function (r) { return r.display_state === "blocked" || r.display_state === "ready"; });
+  live.concat(waiting).slice(0, 4).forEach(function (run) {
+    var row = h("div", "liverow");
+    var working = ["running", "dispatched", "verifying"].indexOf(run.display_state) >= 0;
+    if (working) row.appendChild(h("span", "dot"));
+    row.appendChild(h("span", "la", working ? (run.display_state === "verifying" ? "verifying" : "working") :
+      (run.display_state === "ready" ? "ready" : "asks you")));
+    row.appendChild(h("span", "li", run.intent));
+    // The live activity line is the whole point — say what it is doing, not just that
+    // it is doing something.
+    if (run.activity && run.activity.last_label) row.appendChild(h("span", "lg", readableLabel(run.activity.last_label)));
+    row.onclick = function () { openRun(run.id); };
+    rail.appendChild(row);
+  });
+}
 
 function renderRoom() {
   var scroll = document.querySelector("#v-room .room-scroll");
@@ -1881,6 +1959,7 @@ function addProject() {
 
 function render() {
   renderRoom();
+  renderLiveRail();
   renderInbox();
   renderRunList();
   renderDetail();
@@ -1988,13 +2067,13 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
       var g = toolGlyph(e.label);
       var trow = h("div", "toolcard");
       trow.appendChild(h("span", "ic " + g[1], g[0]));
-      trow.appendChild(h("span", "lbl", e.label || "working"));
+      trow.appendChild(h("span", "lbl", readableLabel(e.label) || "working"));
       trow.appendChild(h("span", "ts", (e.at || "").slice(11, 19)));
       body.appendChild(trow);
       return;
     }
     if (e.kind === "say" || e.kind === "final") {
-      var text = e.kind === "final" ? String(e.message || "").split("\\n\\n")[0] : (e.label || "");
+      var text = e.kind === "final" ? String(e.message || "") : (e.label || "");
       if (!text.trim()) return;
       var srow = h("div", "said");
       srow.appendChild(h("div", "who", "agent"));
