@@ -393,6 +393,9 @@ const APP_HTML = `<!doctype html>
   .seclabel .n { margin-left:auto; }
   .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     box-shadow:var(--shadow-sm); overflow:hidden; }
+  .qact { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+  .qbtns { display:flex; gap:6px; }
+  .btn.sm { font-size:11.5px; padding:4px 11px; }
   .qrow { display:grid; grid-template-columns:34px 1fr auto; gap:12px; padding:15px 18px 15px 14px;
     cursor:pointer; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     box-shadow:var(--shadow-sm); margin-bottom:10px; transition:border-color .12s, box-shadow .12s; }
@@ -567,6 +570,10 @@ const APP_HTML = `<!doctype html>
     padding:11px 12px; margin-bottom:8px; display:grid; grid-template-columns:26px 1fr; gap:10px;
     cursor:pointer; box-shadow:var(--shadow-sm); transition:border-color .12s, box-shadow .12s; }
   .acard:hover { border-color:var(--text3); box-shadow:var(--shadow-md); }
+  /* A grid item defaults to min-width:auto, so the nowrap branch slug inside forced
+     the card to its full text width — which widened the column, which pushed the
+     fourth column off the right edge of the board entirely. */
+  .acard > div { min-width:0; }
   .av { width:24px; height:24px; border-radius:var(--r-panel); display:flex; align-items:center; justify-content:center;
     font-family:var(--mono); font-size:9.5px; font-weight:700; background:var(--surface2);
     border:1px solid var(--line); color:var(--text2); }
@@ -898,9 +905,37 @@ function renderInbox() {
     if (run.display_state === "ready") atoms.appendChild(h("span", "atom jade", "awaiting merge"));
     if (run.stale) atoms.appendChild(h("span", "atom hot", "process gone"));
     if (run.display_state === "failed" && !run.stale) atoms.appendChild(h("span", "atom hot", "checks failed"));
+    // What actually changed, so the decision can be made HERE. A row that only
+    // repeats the intent asks you to go and find out somewhere else.
+    if (run.claim_summary) atoms.appendChild(h("span", "atom", run.claim_summary));
     mid.appendChild(atoms);
     row.appendChild(mid);
-    row.appendChild(h("span", "qtime", ago(run.updated_at)));
+
+    var right = h("div", "qact");
+    right.appendChild(h("span", "qtime", ago(run.updated_at)));
+    // An inbox exists to be ACTIONED. This one listed five decisions and offered no
+    // way to take any of them — every row made you leave for Runs to click the same
+    // buttons that could have been here.
+    var acts = h("div", "qbtns");
+    if (run.display_state === "ready") {
+      var merge = h("button", "btn primary sm", "Merge");
+      merge.title = "Land the code and ratify what it learned";
+      merge.onclick = function (ev) {
+        ev.stopPropagation();
+        merge.disabled = true;
+        merge.textContent = "Merging…";
+        api("/runs/" + run.id + "/merge", { method: "POST" }).then(function (out) {
+          flash(out.detail || (out.ok ? "merged" : "merge failed"));
+          refresh();
+        });
+      };
+      acts.appendChild(merge);
+    }
+    var open = h("button", "btn sm", "Review");
+    open.onclick = function (ev) { ev.stopPropagation(); openRun(run.id); };
+    acts.appendChild(open);
+    right.appendChild(acts);
+    row.appendChild(right);
     row.onclick = function () { openRun(run.id); };
     rows.appendChild(row);
   });

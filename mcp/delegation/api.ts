@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import {
   createRun,
   listRuns,
+  readClaim,
   readRun,
   runDir,
   runsDir,
@@ -450,7 +451,23 @@ function queueRoomTurn(
  * write, never asserted by the agent. Attached only to in-flight runs so the list
  * stays cheap and a finished run never shows a stale activity line.
  */
-function withActivity(projectDir: string, run: RunView): RunView & { activity?: ReturnType<typeof readActivity> } {
+function withActivity(
+  projectDir: string,
+  run: RunView,
+): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string } {
+  // A run awaiting a decision carries the one fact needed to make it: how much
+  // changed, and whether the kernel's checks passed. Without it the inbox could only
+  // repeat the intent back, so every decision meant opening the run to find out.
+  if (run.display_state === "ready" || run.display_state === "failed") {
+    const claim = readClaim(projectDir, run.id);
+    if (claim) {
+      const passed = claim.checks.filter((check) => check.result === "pass").length;
+      const files = claim.diff?.files ?? 0;
+      const lines = claim.diff?.lines ?? 0;
+      const change = files ? `${files} file${files === 1 ? "" : "s"} · ${lines} line${lines === 1 ? "" : "s"}` : "no changes";
+      return { ...run, claim_summary: `${change} · ${passed}/${claim.checks.length} checks` };
+    }
+  }
   const inFlight = run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "verifying";
   if (!inFlight) return run;
   const activity = readActivity(runTranscriptPath(projectDir, run.id));
