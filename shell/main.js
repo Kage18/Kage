@@ -9,8 +9,8 @@
 "use strict";
 
 const { app, BrowserWindow, globalShortcut, nativeImage, shell } = require("electron");
-const { execFileSync } = require("node:child_process");
-const { writeFileSync, existsSync } = require("node:fs");
+const { execFile, execFileSync } = require("node:child_process");
+const { writeFileSync, existsSync, readFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 
 /**
@@ -62,26 +62,89 @@ function resolveCli() {
  * `kage app --no-open` already knows how to find, health-check, and self-heal the
  * daemon (a live pid is not a live app). Reuse it instead of re-implementing daemon
  * management in a second place, and read the URL off its last line.
+ *
+ * ASYNC, deliberately. This used to be execFileSync, which blocks Electron's main
+ * process — and it is not quick: measured 4.3s to return, 5.3s before the window was
+ * shown, 6.6s to a usable app. All of that was spent with NOTHING on screen, because
+ * a blocked main process cannot paint. The window now opens first and this resolves
+ * behind it.
  */
+/**
+ * The fast path: is a daemon for this project already serving /app?
+ *
+ * Shelling out to `kage app` costs 2.33s EVEN WHEN THE DAEMON IS ALREADY RUNNING,
+ * because it spawns node and loads the whole kernel just to read a status file and
+ * probe a URL. Both of those the shell can do itself in milliseconds, and after the
+ * first launch of a session this is the case that actually happens. The CLI is still
+ * the authority when a daemon must be STARTED — that logic stays in one place.
+ */
+async function existingDaemonUrl() {
+  try {
+    const status = JSON.parse(readFileSync(join(projectDir, ".agent_memory", "daemon", "status.json"), "utf8"));
+    if (!status || !status.pid || !status.rest_port) return null;
+    // A live pid is not a live app: probe the route we are about to open.
+    process.kill(status.pid, 0);
+    const url = `http://${status.host || "127.0.0.1"}:${status.rest_port}/app`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
+    return res.status === 200 ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function ensureDaemon() {
   const cli = resolveCli();
-  // In the Electron main process, process.execPath is Electron itself — running the
-  // CLI with it would launch a second app instance. ELECTRON_RUN_AS_NODE makes the
-  // same binary behave as plain Node for this child. (Only needed when we invoke the
-  // script through Electron's own node; a real `kage` binary needs no such help.)
-  const out = execFileSync(cli.command, [...cli.args, "app", "--project", projectDir, "--no-open"], {
-    encoding: "utf8",
-    timeout: 30_000,
-    env: cli.viaNode ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" } : process.env,
+  return new Promise((resolve, reject) => {
+    // In the Electron main process, process.execPath is Electron itself — running the
+    // CLI with it would launch a second app instance. ELECTRON_RUN_AS_NODE makes the
+    // same binary behave as plain Node for this child. (Only needed when we invoke the
+    // script through Electron's own node; a real `kage` binary needs no such help.)
+    execFile(
+      cli.command,
+      [...cli.args, "app", "--project", projectDir, "--no-open"],
+      {
+        encoding: "utf8",
+        timeout: 60_000,
+        env: cli.viaNode ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" } : process.env,
+      },
+      (error, stdout, stderr) => {
+        if (error) return reject(new Error(String(stderr || error.message).trim()));
+        const match = String(stdout).match(/https?:\/\/[^\s]+/);
+        if (!match) return reject(new Error(`kage app did not report a URL:\n${stdout}`));
+        resolve(match[0]);
+      },
+    );
   });
-  const match = out.match(/https?:\/\/[^\s]+/);
-  if (!match) throw new Error(`kage app did not report a URL:\n${out}`);
-  return match[0];
+}
+
+/**
+ * What the user looks at while the daemon comes up. Inlined as a data URL because there
+ * is, by definition, no server yet — and painted in the app's own palette so the launch
+ * reads as Kage starting rather than as a blank window that might be broken.
+ */
+function splashUrl(message) {
+  const html = `<!doctype html><meta charset="utf-8"><style>
+    :root{color-scheme:dark}
+    html,body{height:100%;margin:0}
+    body{background:#121413;color:#a4aba1;display:flex;align-items:center;justify-content:center;
+      font:400 13px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-app-region:drag}
+    .w{text-align:center;transform:translateY(-8px)}
+    svg{width:52px;height:52px;display:block;margin:0 auto 18px;animation:b 2.4s ease-in-out infinite}
+    @keyframes b{0%,92%,100%{opacity:1}96%{opacity:.35}}
+    @media (prefers-reduced-motion:reduce){svg{animation:none}}
+    h1{margin:0 0 5px;font:600 17px/1.2 "Fraunces","Iowan Old Style",Palatino,Georgia,serif;color:#edefe9;letter-spacing:.01em}
+    p{margin:0;font-size:12.5px;color:#767d74}
+    .e{color:#e07a8c;max-width:520px;text-align:left;font:400 12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+  </style><div class="w">
+    <svg viewBox="0 0 96 96"><defs><radialGradient id="i" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#i)"/><circle cx="48" cy="48" r="6" fill="#020405"/></svg>
+    <h1>Kage</h1><p class="${message.includes("\n") ? "e" : ""}">${message.replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))}</p>
+  </div>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 let win = null;
 
-function createWindow(url) {
+function createWindow() {
   win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -101,8 +164,6 @@ function createWindow(url) {
       sandbox: true,
     },
   });
-  win.loadURL(url);
-
   // The renderer sets document.title to "Kage · N" when N decisions need a human.
   // The title is the one channel a sandboxed page and its shell already share, so
   // the dock badge needs no IPC surface at all.
@@ -139,17 +200,25 @@ function createWindow(url) {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   applyDockIcon();
-  let url;
+  // Window FIRST, daemon second. The old order blocked on a synchronous 4.3s call and
+  // showed nothing for 5.3s; the user's first impression of the app was an empty
+  // screen they could not tell from a hang.
+  createWindow();
+  win.loadURL(splashUrl("Starting…"));
+
   try {
-    url = ensureDaemon();
+    // Try the cheap check first; fall back to the CLI only when it cannot answer.
+    const url = (await existingDaemonUrl()) || (await ensureDaemon());
+    if (win && !win.isDestroyed()) win.loadURL(url);
   } catch (error) {
-    console.error(String(error && error.message ? error.message : error));
-    app.exit(2);
-    return;
+    // A failure belongs IN the window, where the user can read it — exiting the app
+    // silently was indistinguishable from a crash.
+    const detail = String(error && error.message ? error.message : error);
+    if (win && !win.isDestroyed()) win.loadURL(splashUrl(`Kage could not start.\n\n${detail}`));
+    console.error(detail);
   }
-  createWindow(url);
 
   // ⌥K from anywhere: summon Kage. (⌥L/⌥H next/prev-needing-you arrive with the
   // focused-run protocol; a summon key is useful from day one.)
@@ -163,7 +232,7 @@ app.whenReady().then(() => {
   });
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(url);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else win?.show();
   });
 });

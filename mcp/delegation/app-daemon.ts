@@ -102,7 +102,10 @@ export async function ensureAppDaemon(
         healthy = true;
         break;
       }
-      await new Promise((pause) => setTimeout(pause, 250));
+      // 60ms, not 250ms: the daemon listens ~1.8s in, and a coarse poll adds up to a
+      // quarter second of pure waiting to every single app launch for no benefit —
+      // a refused connection on loopback costs microseconds.
+      await new Promise((pause) => setTimeout(pause, 60));
     }
   }
 

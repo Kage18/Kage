@@ -901,6 +901,29 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
 
   await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
+
+  // Warm the request path against ourselves.
+  //
+  // The FIRST request to this server — any route — costs ~0.8-1.2s while V8 compiles
+  // the handler chain and the lazy bits of the guard/route modules initialise;
+  // everything after is ~1ms. Measured on /health (0.76s) and /app (1.17s) alike, so
+  // it is generic warm-up rather than anything /app does. Left alone, the user pays
+  // it on the very first thing they do, every time the daemon starts. Paying it here
+  // instead moves it into the window where they are already waiting for the app.
+  void (async () => {
+    for (const path of ["/health", APP_ROUTE]) {
+      try {
+        const res = await fetch(`http://${host}:${restPort}${path}`, {
+          headers: { host: `${host}:${restPort}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        // Drain, or the socket stays half-open and the warm-up is only partial.
+        await res.arrayBuffer();
+      } catch {
+        // Warming is best effort — never let it affect startup.
+      }
+    }
+  })();
   console.log(`Project: ${projectDir}`);
   console.log(`Status: ${status.status_path}`);
 
