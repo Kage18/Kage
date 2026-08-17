@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  sweepDeadRuns,
   recordSpend,
   buildClaim,
   createRun,
@@ -1071,4 +1072,44 @@ test("recordSpend writes agent-reported cost to the run, and never invents it", 
   recordSpend(project, run2.id, undefined);
   assert.equal(readRun(project, run2.id).spend.usd_est, 0, "the untouched default, not a recorded zero");
   assert.equal(readRun(project, run2.id).tokens_used, undefined);
+});
+
+test("every manager spawn site grants the kage tools — headless has no permission dialog", () => {
+  // The held room session ran for the entire session unable to call a single kage
+  // tool: manager-client.ts (the fallback) passed --allowedTools and
+  // room-supervisor.ts (the live path) did not, so the manager looped asking the user
+  // to approve in a dialog that does not exist in -p mode. Third drift of this shape
+  // (claim writers, stream readers, now spawn args) — so, third gate.
+  const { readFileSync } = require("node:fs") as typeof import("node:fs");
+  const { join } = require("node:path") as typeof import("node:path");
+  for (const file of ["manager-client.ts", "room-supervisor.ts"]) {
+    const source = readFileSync(join(__dirname, "..", "delegation", file), "utf8");
+    assert.ok(source.includes("--allowedTools"), `${file} spawns a headless manager without granting its tools`);
+    assert.ok(source.includes("MANAGER_ALLOWED_TOOLS"), `${file} must use the shared allow-list, not a copy`);
+  }
+});
+
+test("sweepDeadRuns persists death for stuck runs, including verifying, after grace", () => {
+  const project = tempProject();
+  // A running run whose pid can never be alive, and a verifying one — the state the
+  // stale detection used to miss entirely (rows showed "verifying · no activity yet"
+  // for sixteen hours).
+  for (const target of ["running", "verifying"] as const) {
+    const run = createRun(project, { intent: `stuck ${target}`, type: "chore", agent: "stub" });
+    transitionRun(project, run.id, "briefed", "kernel");
+    transitionRun(project, run.id, "dispatched", "kernel");
+    transitionRun(project, run.id, "running", "kernel");
+    if (target === "verifying") transitionRun(project, run.id, "verifying", "kernel");
+    patchRun(project, run.id, { agent_pid: 999999999 });
+  }
+  // Inside the grace window nothing is reaped — a supervisor may still be starting.
+  assert.equal(sweepDeadRuns(project).length, 0, "grace must protect fresh transitions");
+  // Past grace, both are persisted as failed with a ledger entry.
+  const reaped = sweepDeadRuns(project, 0);
+  assert.equal(reaped.length, 2);
+  for (const run of listRuns(project)) {
+    assert.equal(run.display_state, "failed", run.intent + " must be persisted, not derived forever");
+  }
+  // Idempotent: a second sweep finds nothing.
+  assert.equal(sweepDeadRuns(project, 0).length, 0);
 });

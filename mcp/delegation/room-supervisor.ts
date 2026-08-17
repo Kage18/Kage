@@ -25,7 +25,8 @@ import { dirname, join, resolve } from "node:path";
 import { isProcessAlive } from "./contract.js";
 import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
-import { managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
+import {
+  MANAGER_ALLOWED_TOOLS, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 
@@ -133,6 +134,15 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
     MANAGER_CONSTITUTION,
     "--permission-mode",
     "acceptEdits",
+    // Without this, the held manager is permission-denied on EVERY kage tool, forever:
+    // -p is headless, so there is no dialog anywhere for a human to approve, and the
+    // manager loops asking the user to "check the permission prompt" that does not
+    // exist. The one-shot fallback in manager-client.ts always passed this — the two
+    // spawn sites drifted, so the fallback could dispatch and the live session (the
+    // path that actually runs) never could. acceptEdits covers file edits only; MCP
+    // tools need an explicit allow in headless mode.
+    "--allowedTools",
+    [...MANAGER_ALLOWED_TOOLS, "ToolSearch"].join(","),
   ];
   const child: ChildProcess = spawn("claude", args, { cwd: projectDir, stdio: ["pipe", "pipe", "pipe"] });
 

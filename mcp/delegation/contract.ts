@@ -432,7 +432,10 @@ export function isProcessAlive(pid: number | undefined): boolean {
 }
 
 export function liveState(task: TaskRecord): { state: RunState; stale: boolean } {
-  const inFlight = task.state === "running" || task.state === "dispatched";
+  // verifying counts as in-flight: the checks run inside the same supervisor process,
+  // so a verifying record with no live pid is exactly as dead as a running one. Rows
+  // sat at "verifying · no activity yet" for sixteen hours because this list missed it.
+  const inFlight = task.state === "running" || task.state === "dispatched" || task.state === "verifying";
   if (inFlight && !isProcessAlive(task.agent_pid)) return { state: task.state, stale: true };
   return { state: task.state, stale: false };
 }
@@ -483,6 +486,26 @@ export function reapRun(projectDir: string, runId: string, note = "agent process
   // `failed` keeps it retryable and rejectable — a lost run is not a terminal verdict.
   const reaped = transitionRun(projectDir, runId, "failed", "kernel", note);
   appendRunLedger(projectDir, { kind: "reaped", run_id: runId, note });
+  return reaped;
+}
+
+/**
+ * Persist death for every run that has derived it. reapRun existed with ZERO callers —
+ * the law was written and never executed, so a dead run stayed a derived "dropped"
+ * forever: holding its concurrency slot, sitting in Lost with no ledger entry, and
+ * showing "no activity yet" for as long as anyone cared to look. The daemon calls this
+ * at startup and on a timer; it is idempotent and cheap (one listRuns pass).
+ */
+export function sweepDeadRuns(projectDir: string, graceMs = 5 * 60_000): RunView[] {
+  const reaped: RunView[] = [];
+  for (const run of listRuns(projectDir)) {
+    if (run.display_state !== "dropped") continue;
+    // Grace: a supervisor that just started may not have written its pid yet.
+    const last = run.state_history[run.state_history.length - 1];
+    if (last && Date.now() - new Date(last.at).getTime() < graceMs) continue;
+    const result = reapRun(projectDir, run.id);
+    if (result) reaped.push(result);
+  }
   return reaped;
 }
 

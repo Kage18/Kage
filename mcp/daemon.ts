@@ -54,6 +54,7 @@ import {
 import { guardRequest, loopbackOrigins, makeToken } from "./delegation/guard.js";
 import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
 import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
+import { sweepDeadRuns } from "./delegation/contract.js";
 
 export interface DaemonStatus {
   ok: boolean;
@@ -901,6 +902,24 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
 
   await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
+
+  // Persist death on a heartbeat. reapRun existed with no callers, so dead runs held
+  // their derived "dropped" forever — concurrency slots included. Startup + every
+  // minute; sweepDeadRuns is idempotent and one cheap listRuns pass.
+  try {
+    sweepDeadRuns(projectDir);
+  } catch {
+    // Never let a sweep failure stop the daemon.
+  }
+  const reapTimer = setInterval(() => {
+    try {
+      const reaped = sweepDeadRuns(projectDir);
+      for (const run of reaped) delegationFeed.notify(run.id);
+    } catch {
+      // Same: sweeping is maintenance, not a dependency.
+    }
+  }, 60_000);
+  reapTimer.unref?.();
 
   // Warm the request path against ourselves.
   //
