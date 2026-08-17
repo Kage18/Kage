@@ -113,7 +113,12 @@ expansion would otherwise swallow the dependents as "intra-change"). Nothing hon
 to say → the line stays hidden. Warmed at daemon start; ~0.26s per keystroke-pause.
 Risk before work, which nobody else can do.
 
-**F. The flywheel made visible.** *(proposed)*
-Memory ↔ runs cross-links: each packet shows the runs that recalled it and the run
-that ratified it; each merged run shows what it taught. The compounding loop as
-navigation.
+**F. The flywheel made visible.** *(built)*
+Memory ↔ runs cross-links, both directions, as navigation: a packet shows TAUGHT BY
+(the merged run that ratified it) and BRIEFED INTO (every run whose brief carried
+it); a merged run's receipt shows RATIFIED INTO MEMORY with each packet clickable.
+Dispatch records `brief_memory_ids` (both createRun call sites — the drift disease
+dodged for once), ratified packets carry the run's tag (format owned by the kernel
+contract), and runs from before these fields have no edges — the surfaces then say
+nothing rather than guess. Verified live: seed → brief → learn → merge → the next
+brief carried the ratified packet, and every link navigated.
