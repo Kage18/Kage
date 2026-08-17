@@ -566,6 +566,43 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent); padding-top:12px; margin-top:12px; }
 
   /* diff + raw */
+  /* The changed-files tree: one chip per file, click to jump; the toggle switches
+     unified ⇄ side-by-side and the choice persists. */
+  .difftree { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:12px; }
+  .dfchip { display:inline-flex; gap:7px; align-items:baseline; font-family:var(--mono); font-size:10.5px;
+    padding:4px 10px; border-radius:999px; border:1px solid var(--line); background:var(--surface); color:var(--text2); }
+  .dfchip:hover { border-color:var(--text3); color:var(--text); }
+  .dfchip .a, .dfh .a { color:var(--jade); }
+  .dfchip .d, .dfh .d { color:var(--crimson); }
+  .dfview { margin-left:auto; font-family:var(--mono); font-size:10.5px; padding:4px 11px;
+    border-radius:var(--r-panel); border:1px solid var(--line); background:var(--surface); color:var(--text2); }
+  .dfview:hover { color:var(--text); border-color:var(--text3); }
+  .diffcard { margin-bottom:12px; }
+  .dfh { display:flex; align-items:baseline; gap:9px; width:100%; text-align:left;
+    font-family:var(--mono); font-size:11.5px; color:var(--text); padding:8px 12px;
+    background:var(--surface2); border:1px solid var(--line); border-radius:var(--r-card); }
+  .diffcard .dfh .n { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dfh .tw { color:var(--text3); }
+  .dfh .c { margin-left:auto; display:flex; gap:8px; flex:none; }
+  .codepane.indiff { border-top-left-radius:0; border-top-right-radius:0; margin-top:-1px; }
+  /* Side-by-side: what was, beside what is. Meta lines are dropped — the header
+     card above already names the file. */
+  .sgrid { display:grid; grid-template-columns:1fr 1fr; min-width:100%; width:max-content; }
+  .shunk { grid-column:1 / -1; font-family:var(--mono); font-size:11.5px; color:var(--text3);
+    padding:6px 16px 1px; white-space:pre; }
+  .scell { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre; min-width:0; }
+  .scell.del { color:var(--crimson); background:color-mix(in srgb, var(--crimson) 7%, transparent); }
+  .scell.add { color:var(--jade); background:color-mix(in srgb, var(--jade) 7%, transparent); }
+  .scell.blank { background:color-mix(in srgb, var(--line) 25%, transparent); }
+  .scell:nth-child(odd):not(.shunk) { border-right:1px solid var(--line2); }
+
+  /* A folded burst of activity — the run summarizing itself. */
+  .foldrow { display:flex; align-items:baseline; gap:9px; width:100%; text-align:left;
+    font-family:var(--mono); font-size:11.5px; color:var(--text2); padding:6px 10px; margin:3px 0;
+    border:1px dashed var(--line); border-radius:var(--r-panel); background:var(--inset); }
+  .foldrow:hover { color:var(--text); border-color:var(--text3); }
+  .foldrow .tw { color:var(--text3); }
+
   .codepane { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     padding:10px 0; overflow-x:auto; box-shadow:var(--shadow-sm); }
   .dline { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre;
@@ -635,6 +672,34 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .acard .arow { display:flex; gap:10px; margin-top:7px; align-items:baseline; }
   .acard .tm { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3); }
+
+  /* ---- persistent error surface + offline state ----
+     flash() is for successes; an ERROR that vanishes after a glance is an error the
+     user never saw. This bar stays until dismissed. And when the event stream drops,
+     the board must LOOK stale — a frozen board that looks live is worse than an
+     error, so the ribbon names the state plainly. */
+  .errbar { display:none; position:fixed; left:50%; transform:translateX(-50%); bottom:40px; z-index:40;
+    max-width:min(680px, 92vw); align-items:baseline; gap:12px; padding:11px 16px;
+    background:color-mix(in srgb, var(--crimson) 12%, var(--surface));
+    border:1px solid color-mix(in srgb, var(--crimson) 45%, var(--line));
+    border-radius:var(--r-card); box-shadow:var(--shadow-md); }
+  .errbar.on { display:flex; }
+  .errbar .et { font-size:13px; line-height:1.5; color:var(--text); overflow-wrap:anywhere; }
+  .errbar .ex { color:var(--text3); font-size:12px; padding:2px 6px; border-radius:var(--r-control); flex:none; }
+  .errbar .ex:hover { color:var(--text); background:var(--surface2); }
+  .offline-ribbon { display:none; text-align:center; font-family:var(--mono); font-size:10.5px;
+    padding:5px 12px; color:var(--amber); background:color-mix(in srgb, var(--amber) 9%, var(--bg));
+    border-bottom:1px solid color-mix(in srgb, var(--amber) 35%, var(--line)); }
+  body.offline .offline-ribbon { display:block; }
+  body.offline .conn { background:var(--crimson); }
+
+  /* ---- the first-run loop strip: teach the LOOP, not the labels ---- */
+  .loopstrip { display:flex; flex-wrap:wrap; justify-content:center; align-items:baseline;
+    gap:7px; margin-top:20px; }
+  .ls-step { font-family:var(--mono); font-size:10.5px; color:var(--text2);
+    border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:4px 11px; }
+  .ls-arrow { color:var(--text3); font-family:var(--mono); font-size:10px; }
+  .loophint { margin-top:12px; font-family:var(--mono); font-size:10px; color:var(--text3); }
 
   /* ---- notification center ---- */
   .notif { display:none; position:absolute; top:42px; right:14px; z-index:30; width:min(420px,88vw);

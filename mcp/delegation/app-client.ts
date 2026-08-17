@@ -17,8 +17,10 @@ var state = {
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
   workLayout: "list", dover: false, showAllDone: false, workOrder: [],
+  diffView: "unified", collapsedDiff: {}, expandedGroups: {},
 };
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
+try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
 
 if (navigator.userAgent.indexOf("Electron") >= 0) document.body.classList.add("electron");
 
@@ -157,7 +159,8 @@ function workRow(run) {
       var msg = field.value.trim();
       field.disabled = true;
       api("/runs/" + run.id + "/tell", { method: "POST", body: { message: msg } }).then(function (out) {
-        flash(out.ok ? "delivery: " + out.delivery : (out.error || "failed"));
+        if (!out.ok) showError(out.error || "the answer was not delivered");
+        else flash("delivery: " + out.delivery);
         refresh();
       });
     };
@@ -169,16 +172,13 @@ function workRow(run) {
   right.appendChild(h("span", "qtime", ago(run.updated_at)));
   if (run.display_state === "ready") {
     var acts = h("div", "qbtns");
-    var merge = h("button", "btn primary sm", "Merge");
+    var pending = pendingActions[run.id];
+    var merge = h("button", "btn primary sm", pending || "Merge");
     merge.title = "Land the code and ratify what it learned";
+    if (pending) merge.disabled = true;
     merge.onclick = function (ev) {
       ev.stopPropagation();
-      merge.disabled = true;
-      merge.textContent = "Merging…";
-      api("/runs/" + run.id + "/merge", { method: "POST" }).then(function (out) {
-        flash(out.detail || (out.ok ? "merged" : "merge failed"));
-        refresh();
-      });
+      actOnRun(run.id, "merge", null, "Merging…", "merged");
     };
     acts.appendChild(merge);
     right.appendChild(acts);
@@ -249,7 +249,7 @@ function renderWorkList() {
 function selectRun(id) {
   var changed = state.selected !== id;
   state.selected = id;
-  if (changed) { state.tab = "follow"; state.detail = null; }
+  if (changed) { state.tab = "follow"; state.detail = null; state.collapsedDiff = {}; state.expandedGroups = {}; }
   if (state.workLayout === "board") state.dover = true;
   renderWork();
   api("/runs/" + id).then(function (detail) {
@@ -719,6 +719,8 @@ function renderThreads() {
       close.title = "close this thread and delete its transcript";
       close.onclick = function (event) {
         event.stopPropagation();
+        // Deleting a transcript is irreversible — a hover title is not a warning.
+        if (!window.confirm("Close “" + session.title + "”? Its transcript is deleted — there is no undo.")) return;
         closeThread(session.key);
       };
       tab.appendChild(close);
@@ -772,7 +774,7 @@ function dispatchFromComposer() {
   schedulePreflight("", "room-preflight");
   api("/runs", { method: "POST", body: { intent: intent, agent: composerPrefs.agent, type: composerPrefs.type } })
     .then(function (out) {
-      if (!out.ok) { flash(out.error || "dispatch failed"); input.value = intent; return; }
+      if (!out.ok) { showError(out.error || "dispatch failed"); input.value = intent; return; }
       flash("dispatched — watch the rail above");
       refresh();
     });
@@ -842,7 +844,7 @@ function sendRoomMessage() {
   state.roomStreaming = [];
   renderRoom();
   api("/room/message?session=" + encodeURIComponent(state.session), { method: "POST", body: { message: message } }).then(function (out) {
-    if (!out.ok) { state.room.busy = false; renderRoom(); return; }
+    if (!out.ok) { state.room.busy = false; renderRoom(); showError(out.error || "the room did not accept that message"); return; }
     refreshRoom();
   });
 }
@@ -1228,18 +1230,7 @@ function renderDetail() {
   } else if (state.tab === "diff") {
     if (d.diffText === undefined) body.appendChild(h("div", "empty", "loading diff…"));
     else if (!d.diffText || d.diffText === "no changes yet") body.appendChild(h("div", "empty", "No changes yet."));
-    else {
-      var pane = h("div", "codepane");
-      d.diffText.split("\\n").forEach(function (line) {
-        var cls = "dline";
-        if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 || line.indexOf("#") === 0) cls += " file";
-        else if (line.indexOf("@@") === 0) cls += " hunk";
-        else if (line.indexOf("+") === 0) cls += " add";
-        else if (line.indexOf("-") === 0) cls += " del";
-        pane.appendChild(h("div", cls, line || " "));
-      });
-      body.appendChild(pane);
-    }
+    else renderDiff(body, d.diffText);
   } else if (state.tab === "raw") {
     if (d.rawText === undefined) body.appendChild(h("div", "empty", "loading transcript…"));
     else body.appendChild(h("div", "rawpane", d.rawText));
@@ -1277,7 +1268,8 @@ function renderDetail() {
     var message = input.value.trim();
     input.value = "";
     api("/runs/" + run.id + "/tell", { method: "POST", body: { message: message } }).then(function (out) {
-      flash(out.ok ? "delivery: " + out.delivery : (out.error || "failed"));
+      if (!out.ok) showError(out.error || "the message was not delivered");
+      else flash("delivery: " + out.delivery);
       refresh();
     });
   };
@@ -1287,26 +1279,26 @@ function renderDetail() {
   el.appendChild(composer);
 
   var bar = h("div", "actionbar");
+  var pendingLabel = pendingActions[run.id];
   if (run.display_state === "ready") {
-    var merge = h("button", "btn primary", "Merge & ratify");
-    merge.onclick = function () {
-      api("/runs/" + run.id + "/merge", { method: "POST" }).then(function (out) { flash(out.detail || ""); refresh(); });
-    };
+    var merge = h("button", "btn primary", pendingLabel || "Merge & ratify");
+    if (pendingLabel) merge.disabled = true;
+    merge.onclick = function () { actOnRun(run.id, "merge", null, "Merging…", "merged"); };
     bar.appendChild(merge);
   }
   if (["running", "dispatched", "verifying"].indexOf(run.display_state) >= 0) {
-    var stop = h("button", "btn", "Stop");
-    stop.onclick = function () {
-      api("/runs/" + run.id + "/stop", { method: "POST" }).then(function (out) { flash(out.detail || ""); refresh(); });
-    };
+    var stop = h("button", "btn", pendingLabel === "Stopping…" ? pendingLabel : "Stop");
+    if (pendingLabel) stop.disabled = true;
+    stop.onclick = function () { actOnRun(run.id, "stop", null, "Stopping…", "stopped"); };
     bar.appendChild(stop);
   }
   if (["merged", "rejected"].indexOf(run.display_state) < 0) {
     var reject = h("button", "btn danger", "Reject…");
+    if (pendingLabel) reject.disabled = true;
     reject.onclick = function () {
       var reason = window.prompt("Why? The reason is kept as memory — the next brief carries it.");
       if (!reason) return;
-      api("/runs/" + run.id + "/reject", { method: "POST", body: { reason: reason } }).then(function (out) { flash(out.detail || ""); refresh(); });
+      actOnRun(run.id, "reject", { reason: reason }, "Rejecting…", "rejected");
     };
     bar.appendChild(reject);
   }
@@ -1319,6 +1311,35 @@ function renderDetail() {
 function flash(text) {
   var el = document.getElementById("flash");
   if (el) { el.textContent = text; el.title = text; }
+}
+
+// Errors persist until dismissed. flash() is a status blip for successes; an error
+// that vanishes after a glance is an error the user never saw.
+function showError(text) {
+  document.getElementById("errbar-text").textContent = String(text || "something failed");
+  document.getElementById("errbar").classList.add("on");
+}
+document.getElementById("errbar-x").onclick = function () {
+  document.getElementById("errbar").classList.remove("on");
+};
+
+// Optimistic action state that SURVIVES re-renders. Mutating a button in place
+// ("Merging…") lasted only until the next SSE re-read rebuilt the row; the state
+// now lives outside the DOM and every renderer consults it.
+var pendingActions = {};
+function actOnRun(runId, action, body, workingLabel, doneLabel) {
+  pendingActions[runId] = workingLabel;
+  render();
+  api("/runs/" + runId + "/" + action, { method: "POST", body: body || {} }).then(function (out) {
+    delete pendingActions[runId];
+    if (!out.ok) showError(out.detail || out.error || (action + " failed"));
+    else flash(out.detail || doneLabel);
+    refresh();
+  }).catch(function () {
+    delete pendingActions[runId];
+    showError(action + " failed — is the daemon running?");
+    refresh();
+  });
 }
 
 // --- board: the second ARRANGEMENT of the work surface, not a third door.
@@ -1475,8 +1496,8 @@ function openProject(dir, row) {
   api("/projects/open", { method: "POST", body: { dir: dir } }).then(function (out) {
     if (out.ok && out.url) { window.location.href = out.url; return; }
     renderProjects();
-    flash(out.error || "could not open that project");
-  }).catch(function () { renderProjects(); flash("could not open that project"); });
+    showError(out.error || "could not open that project");
+  }).catch(function () { renderProjects(); showError("could not open that project"); });
 }
 function addProject() {
   var dir = window.prompt("Path to a git repo:", state.projectDir || "");
@@ -1531,6 +1552,134 @@ function openRun(id) {
   selectRun(id);
 }
 
+// --- the diff viewer: a changed-files tree, per-file collapse, unified or
+// side-by-side. Deliberately NO token-level syntax highlighting: a diff pane's
+// color channel already carries the change semantics (add/del), and syntax tints
+// on top of it fight the one signal the reviewer is here for.
+function parseDiff(text) {
+  var files = [];
+  var current = null;
+  text.split("\\n").forEach(function (line) {
+    if (line.indexOf("diff --git ") === 0) {
+      var at = line.lastIndexOf(" b/");
+      current = { name: at >= 0 ? line.slice(at + 3) : line.slice(11), adds: 0, dels: 0, lines: [line] };
+      files.push(current);
+      return;
+    }
+    if (!current) {
+      // A preamble section (e.g. "# uncommitted in the worktree") before any header.
+      current = { name: line.indexOf("# ") === 0 ? line.slice(2) : "changes", adds: 0, dels: 0, lines: [] };
+      files.push(current);
+    }
+    current.lines.push(line);
+    if (line.indexOf("+") === 0 && line.indexOf("+++") !== 0) current.adds += 1;
+    else if (line.indexOf("-") === 0 && line.indexOf("---") !== 0) current.dels += 1;
+  });
+  return files;
+}
+function diffLineClass(line) {
+  if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 || line.indexOf("#") === 0) return "dline file";
+  if (line.indexOf("@@") === 0) return "dline hunk";
+  if (line.indexOf("+") === 0) return "dline add";
+  if (line.indexOf("-") === 0) return "dline del";
+  return "dline";
+}
+// Pair deletion runs with the additions that replaced them, hunk by hunk.
+function splitRows(lines) {
+  var rows = [];
+  var dels = [];
+  var adds = [];
+  function flush() {
+    var n = Math.max(dels.length, adds.length);
+    for (var i = 0; i < n; i += 1) {
+      rows.push({
+        left: dels[i] === undefined ? "" : dels[i],
+        right: adds[i] === undefined ? "" : adds[i],
+        lcls: dels[i] === undefined ? "blank" : "del",
+        rcls: adds[i] === undefined ? "blank" : "add",
+      });
+    }
+    dels = [];
+    adds = [];
+  }
+  lines.forEach(function (line) {
+    if (line.indexOf("@@") === 0) { flush(); rows.push({ hunk: line }); return; }
+    if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 ||
+        line.indexOf("index ") === 0 || line.indexOf("new file") === 0 || line.indexOf("deleted file") === 0 ||
+        line.indexOf("# ") === 0 || line.indexOf("Binary files") === 0) { flush(); return; }
+    if (line.indexOf("-") === 0) { dels.push(line.slice(1)); return; }
+    if (line.indexOf("+") === 0) { adds.push(line.slice(1)); return; }
+    flush();
+    rows.push({ left: line.slice(1), right: line.slice(1), lcls: "ctx", rcls: "ctx" });
+  });
+  flush();
+  return rows;
+}
+function renderDiff(body, diffText) {
+  var files = parseDiff(diffText);
+  var split = state.diffView === "split";
+
+  var bar = h("div", "difftree");
+  files.forEach(function (file, index) {
+    var chip = h("button", "dfchip");
+    chip.appendChild(h("span", "n", file.name));
+    if (file.adds) chip.appendChild(h("span", "a", "+" + file.adds));
+    if (file.dels) chip.appendChild(h("span", "d", "−" + file.dels));
+    chip.onclick = function () {
+      var card = document.querySelector('[data-df="' + index + '"]');
+      if (card) card.scrollIntoView({ block: "start", behavior: "smooth" });
+    };
+    bar.appendChild(chip);
+  });
+  var toggle = h("button", "dfview", split ? "Unified view" : "Side by side");
+  toggle.onclick = function () {
+    state.diffView = split ? "unified" : "split";
+    try { localStorage.setItem("kageDiff", state.diffView); } catch (e) {}
+    renderDetail();
+  };
+  bar.appendChild(toggle);
+  body.appendChild(bar);
+
+  files.forEach(function (file, index) {
+    var card = h("div", "diffcard");
+    card.setAttribute("data-df", index);
+    var collapsed = Boolean(state.collapsedDiff[file.name]);
+    var head = h("button", "dfh");
+    head.appendChild(h("span", "tw", collapsed ? "▸" : "▾"));
+    head.appendChild(h("span", "n", file.name));
+    var counts = h("span", "c");
+    if (file.adds) counts.appendChild(h("span", "a", "+" + file.adds));
+    if (file.dels) counts.appendChild(h("span", "d", "−" + file.dels));
+    head.appendChild(counts);
+    head.onclick = function () {
+      state.collapsedDiff[file.name] = !collapsed;
+      renderDetail();
+    };
+    card.appendChild(head);
+    if (!collapsed) {
+      var pane = h("div", "codepane indiff");
+      if (split) {
+        var grid = h("div", "sgrid");
+        splitRows(file.lines).forEach(function (row) {
+          if (row.hunk !== undefined) {
+            grid.appendChild(h("div", "shunk", row.hunk));
+            return;
+          }
+          grid.appendChild(h("div", "scell " + row.lcls, row.left || " "));
+          grid.appendChild(h("div", "scell " + row.rcls, row.right || " "));
+        });
+        pane.appendChild(grid);
+      } else {
+        file.lines.forEach(function (line) {
+          pane.appendChild(h("div", diffLineClass(line), line || " "));
+        });
+      }
+      card.appendChild(pane);
+    }
+    body.appendChild(card);
+  });
+}
+
 // Diff and raw are plain-text routes, fetched lazily per tab and cached on the detail.
 function loadTabText(runId) {
   if (!state.detail) return;
@@ -1573,8 +1722,19 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
   });
   ledgerEvents.forEach(function (e) { entries.push({ kind: "_ledger", at: e.at, label: e.kind === "state" && e.to ? e.from + " → " + e.to : e.kind, note: e.note || e.message }); });
   entries.sort(function (a, b) { return String(a.at || "").localeCompare(String(b.at || "")); });
-  var shown = entries.slice(-160);
-  shown.forEach(function (e, i) {
+  // Filter to entries that actually RENDER before windowing or grouping. The
+  // transcript journals stdout and bookkeeping kinds this pane never shows; they
+  // were silently eating the 160-entry window (130 of 160 on a real run, starving
+  // the visible history to 30 rows) and breaking every tool burst so nothing
+  // ever folded.
+  var renderable = entries.filter(function (e) {
+    if (e.kind === "tool" || e.kind === "_ledger" || e.kind === "start") return true;
+    if (e.kind === "say") return Boolean(String(e.label || "").trim());
+    if (e.kind === "final") return Boolean(String(e.message || "").trim());
+    return false;
+  });
+  var shown = renderable.slice(-160);
+  function renderEntry(e) {
     if (e.kind === "_ledger") {
       var lrow = h("div", "ev");
       lrow.appendChild(h("span", "lifecycle", e.label + (e.note ? "  ·  " + e.note : "")));
@@ -1606,6 +1766,50 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
       brow.appendChild(h("span", "ts", (e.at || "").slice(11, 19)));
       body.appendChild(brow);
     }
+  }
+  // The run self-summarizes: a burst of 8+ consecutive tool actions folds into one
+  // line ("14 actions — 9 reads · 4 edits · 1 command") that expands on demand. The
+  // LIVE tail never folds — a streaming action hidden inside a summary is live
+  // output that is live to nobody.
+  var blocks = [];
+  shown.forEach(function (e) {
+    var last = blocks[blocks.length - 1];
+    if (e.kind === "tool") {
+      if (last && last.tools) last.tools.push(e);
+      else blocks.push({ tools: [e] });
+    } else blocks.push({ one: e });
+  });
+  blocks.forEach(function (block, index) {
+    if (block.one) { renderEntry(block.one); return; }
+    var liveTail = isLive && index === blocks.length - 1;
+    var expanded = Boolean(state.expandedGroups[index]);
+    if (block.tools.length < 8 || liveTail || expanded) {
+      if (expanded && block.tools.length >= 8) {
+        var closer = h("button", "foldrow open");
+        closer.appendChild(h("span", "tw", "▾"));
+        closer.appendChild(h("span", "", block.tools.length + " actions"));
+        closer.onclick = function () { state.expandedGroups[index] = false; renderDetail(); };
+        body.appendChild(closer);
+      }
+      block.tools.forEach(renderEntry);
+      return;
+    }
+    var reads = 0, edits = 0, commands = 0;
+    block.tools.forEach(function (t) {
+      var l = String(t.label || "");
+      if (l.indexOf("editing") === 0 || l.indexOf("writing") === 0) edits += 1;
+      else if (l.indexOf("running") === 0) commands += 1;
+      else reads += 1;
+    });
+    var parts = [];
+    if (reads) parts.push(reads + " read" + (reads === 1 ? "" : "s"));
+    if (edits) parts.push(edits + " edit" + (edits === 1 ? "" : "s"));
+    if (commands) parts.push(commands + " command" + (commands === 1 ? "" : "s"));
+    var fold = h("button", "foldrow");
+    fold.appendChild(h("span", "tw", "▸"));
+    fold.appendChild(h("span", "", block.tools.length + " actions — " + parts.join(" · ")));
+    fold.onclick = function () { state.expandedGroups[index] = true; renderDetail(); };
+    body.appendChild(fold);
   });
   if (isLive) {
     var live = h("div", "ev");
@@ -2008,8 +2212,16 @@ Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function 
 // --- SSE: notifications, never state. Any run event triggers a re-read.
 function connect() {
   var source = new EventSource("/runs/events");
+  source.onopen = function () {
+    // Reconnect after an outage means the board may have MISSED events — re-read
+    // everything rather than trusting what was on screen when the stream dropped.
+    var wasOffline = document.body.classList.contains("offline");
+    document.body.classList.remove("offline");
+    if (wasOffline) { refresh(); refreshRoom(); }
+  };
   source.addEventListener("hello", function () {
     state.connected = true;
+    document.body.classList.remove("offline");
     document.getElementById("conn").classList.remove("off");
     document.getElementById("st-left").textContent = "live";
   });
@@ -2050,9 +2262,10 @@ function connect() {
   });
   source.onerror = function () {
     state.connected = false;
+    document.body.classList.add("offline");
     document.getElementById("conn").classList.add("off");
     document.getElementById("st-left").textContent = "disconnected — retrying";
-    // EventSource reconnects on its own; the dot + label are the explicit
+    // EventSource reconnects on its own; the ribbon + dot are the explicit
     // disconnected state (a frozen board that looks live is worse than an error).
   };
 }

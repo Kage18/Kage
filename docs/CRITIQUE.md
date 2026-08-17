@@ -113,6 +113,28 @@ expansion would otherwise swallow the dependents as "intra-change"). Nothing hon
 to say → the line stays hidden. Warmed at daemon start; ~0.26s per keystroke-pause.
 Risk before work, which nobody else can do.
 
+## Status of the ten defects (2026-08-17)
+
+1 manager tax — **fixed** (two-speed composer). 2 lying pickers — **fixed** (pickers
+drive ⌘⏎). 3 five doors — **fixed** (one Work surface). 4 no selection model —
+**largely fixed** (j/k/arrows, Enter, visible focus; full screen-reader pass still
+open). 5 receipt as grey text — **fixed** (the printed receipt). 6 jumpy updates —
+**fixed** (optimistic state survives re-renders, scroll preserved, errors persist
+until dismissed, disconnect is a visible state that resyncs on reconnect). 7 not a
+Mac app — **largely fixed** (real menu bar, context menus, ⌘W keeps the app alive,
+window position restored; drag-and-drop still absent). 8 memory filing cabinet —
+**fixed** (the flywheel). 9 no undo — **partly fixed** (destructive confirms on
+thread close and reject; true undo of a merge stays unbuilt rather than faked).
+10 first run teaches labels — **improved** (the loop strip teaches
+ask → brief → worktree → checks → merge; an interactive practice run was considered
+and rejected — a demo merge would land a real commit in the user's repo).
+
+Still deliberately open: queue EDITING (steers are an append-only log with no
+consumed-cursor, so "queued vs already delivered" cannot be answered honestly —
+needs a kernel cursor first); token-level syntax highlighting in diffs (rejected:
+the color channel carries add/del semantics, syntax tints fight it); drag-and-drop;
+a full accessibility audit.
+
 **F. The flywheel made visible.** *(built)*
 Memory ↔ runs cross-links, both directions, as navigation: a packet shows TAUGHT BY
 (the merged run that ratified it) and BRIEFED INTO (every run whose brief carried

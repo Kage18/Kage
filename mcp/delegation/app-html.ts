@@ -76,6 +76,8 @@ ${APP_STYLES}
   <span class="bellwrap"><button class="iconbtn" id="m-bell" title="notify when a run needs you">🔔</button><span class="badge" id="bell-badge" style="display:none">0</span></span>
 </div>
 <div class="notif" id="notif"><div class="nh">Notifications</div><div class="nlist" id="notif-list"></div></div>
+<div class="errbar" id="errbar"><span class="et" id="errbar-text"></span><button class="ex" id="errbar-x">✕</button></div>
+<div class="offline-ribbon" id="offline-ribbon">connection lost — showing the last known state · reconnecting…</div>
 <div class="split">
 <aside class="side">
   <div class="sidehead">Projects<button id="p-add" title="open another repo">+</button></div>
@@ -95,6 +97,14 @@ ${APP_STYLES}
         <div class="primer" id="room-primer">
           <div class="pseal"><svg class="pseal-eye" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris2" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris2)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg></div>
           <p>Tell Kage what should happen. It reads the room, compiles a brief from what this repo has learned, hires an agent in a worktree, and reports back once the kernel — not the agent — has checked the work.</p>
+          <div class="loopstrip">
+            <span class="ls-step">you ask</span><span class="ls-arrow">→</span>
+            <span class="ls-step">brief from repo memory</span><span class="ls-arrow">→</span>
+            <span class="ls-step">agent works in a worktree</span><span class="ls-arrow">→</span>
+            <span class="ls-step">Kage re-runs the checks</span><span class="ls-arrow">→</span>
+            <span class="ls-step">merge lands code + learnings</span>
+          </div>
+          <div class="loophint">⌘⏎ skips the conversation and dispatches a run immediately</div>
         </div>
         <div id="room-turns"></div>
         <div class="typing" id="room-typing" style="display:none"><span id="room-typing-text">thinking</span><span class="dots"><i></i><i></i><i></i></span></div>
