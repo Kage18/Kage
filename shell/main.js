@@ -8,7 +8,7 @@
 // grows opinions becomes a second renderer that drifts (the AO/TUI lesson).
 "use strict";
 
-const { app, BrowserWindow, globalShortcut, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, globalShortcut, nativeImage, shell } = require("electron");
 const { execFile, execFileSync } = require("node:child_process");
 const { writeFileSync, existsSync, readFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
@@ -144,10 +144,24 @@ function splashUrl(message) {
 
 let win = null;
 
+// Where the window was is part of the user's muscle memory — restore it.
+function windowStatePath() {
+  return join(app.getPath("userData"), "window-state.json");
+}
+function savedWindowState() {
+  try {
+    const state = JSON.parse(readFileSync(windowStatePath(), "utf8"));
+    if (state && state.width >= 760 && state.height >= 480) return state;
+  } catch {
+    // First launch, or a torn file: the defaults below are fine.
+  }
+  return null;
+}
+
 function createWindow() {
+  const saved = savedWindowState();
   win = new BrowserWindow({
-    width: 1280,
-    height: 840,
+    ...(saved ?? { width: 1280, height: 840 }),
     minWidth: 760,
     minHeight: 480,
     title: "Kage",
@@ -179,6 +193,37 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  win.on("close", () => {
+    try {
+      writeFileSync(windowStatePath(), JSON.stringify(win.getBounds()));
+    } catch {
+      // Losing the saved position is not worth interrupting a close.
+    }
+  });
+
+  // A right-click that does nothing is the fastest way to feel like a kiosk, not a
+  // Mac app. Editable fields get the full edit menu; selected text gets Copy.
+  win.webContents.on("context-menu", (_event, params) => {
+    const template = [];
+    if (params.isEditable) {
+      template.push(
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      );
+    } else if (params.selectionText && params.selectionText.trim()) {
+      template.push({ role: "copy" });
+    }
+    if (params.linkURL) {
+      template.push({ label: "Open Link in Browser", click: () => shell.openExternal(params.linkURL) });
+    }
+    if (template.length) Menu.buildFromTemplate(template).popup();
+  });
+
   // Verification hook: KAGE_SHELL_SHOT=/path.png writes a capture of the real
   // window after load, so "the desktop app runs" is a checkable claim.
   const shot = process.env.KAGE_SHELL_SHOT;
@@ -200,14 +245,65 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(async () => {
-  applyDockIcon();
-  // Window FIRST, daemon second. The old order blocked on a synchronous 4.3s call and
-  // showed nothing for 5.3s; the user's first impression of the app was an empty
-  // screen they could not tell from a hang.
-  createWindow();
-  win.loadURL(splashUrl("Starting…"));
+// Run a page-defined function in the renderer. The renderer's globals ARE the
+// command surface (showOverlay, setView, showPalette) — the same functions its own
+// keyboard map calls, so the menu can never drift from what keys do. Silently a
+// no-op on the splash page, which defines none of them.
+function runInPage(code) {
+  if (win && !win.isDestroyed()) win.webContents.executeJavaScript(code).catch(() => {});
+}
 
+// A real menu bar is most of what separates "a Mac app" from "a web page in a
+// frame": ⌘C/⌘V work because Edit exists, ⌘W closes the window without killing the
+// app, and the app's own verbs are discoverable next to them.
+function buildMenu() {
+  const template = [
+    ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
+    {
+      label: "File",
+      submenu: [
+        { label: "New Run…", accelerator: "CmdOrCtrl+N", click: () => runInPage("showOverlay(true)") },
+        { label: "New Thread", click: () => runInPage('setView("room"); newThread()') },
+        { type: "separator" },
+        { role: "close" },
+      ],
+    },
+    { role: "editMenu" },
+    {
+      label: "Go",
+      submenu: [
+        { label: "Room", accelerator: "CmdOrCtrl+1", click: () => runInPage('setView("room")') },
+        { label: "Work", accelerator: "CmdOrCtrl+2", click: () => runInPage('setView("work")') },
+        { label: "Memory", accelerator: "CmdOrCtrl+3", click: () => runInPage('setView("memory")') },
+        { type: "separator" },
+        { label: "Next Needing You", accelerator: "Alt+L", click: () => runInPage("cycleNeedsYou(1)") },
+        { label: "Command Palette…", accelerator: "CmdOrCtrl+K", click: () => runInPage("showPalette(true)") },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    { role: "windowMenu" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// Load the app into the current window: splash, then the daemon's own page. Shared
+// by first launch and by reopening from the dock — the activate path used to
+// recreate the window and never load a URL into it, a blank window bug.
+async function openAppInWindow() {
+  if (!win || win.isDestroyed()) return;
+  win.loadURL(splashUrl("Starting…"));
   try {
     // Try the cheap check first; fall back to the CLI only when it cannot answer.
     const url = (await existingDaemonUrl()) || (await ensureDaemon());
@@ -219,6 +315,16 @@ app.whenReady().then(async () => {
     if (win && !win.isDestroyed()) win.loadURL(splashUrl(`Kage could not start.\n\n${detail}`));
     console.error(detail);
   }
+}
+
+app.whenReady().then(async () => {
+  applyDockIcon();
+  buildMenu();
+  // Window FIRST, daemon second. The old order blocked on a synchronous 4.3s call and
+  // showed nothing for 5.3s; the user's first impression of the app was an empty
+  // screen they could not tell from a hang.
+  createWindow();
+  await openAppInWindow();
 
   // ⌥K from anywhere: summon Kage. (⌥L/⌥H next/prev-needing-you arrive with the
   // focused-run protocol; a summon key is useful from day one.)
@@ -232,8 +338,10 @@ app.whenReady().then(async () => {
   });
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else win?.show();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+      void openAppInWindow();
+    } else win?.show();
   });
 });
 
