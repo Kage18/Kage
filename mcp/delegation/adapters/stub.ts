@@ -20,7 +20,15 @@ export interface StubOptions {
    * lets the blocked → tell → ready loop be exercised end to end without a real CLI
    * installed.
    */
-  live?: { question: string };
+  live?: {
+    question: string;
+    /**
+     * What the FIRST stdin line gets back. "blocked" (default) exercises the
+     * blocked → tell → claim loop; "claim" answers immediately, for exercising a
+     * reattached resume where the first line IS the answer, not a fresh brief.
+     */
+    firstResult?: "blocked" | "claim";
+  };
 }
 
 // A minimal stream-json speaker: advance one phase per stdin line it receives, exactly
@@ -37,10 +45,11 @@ const readline = require("node:readline");
 const edit = JSON.parse(process.env.KAGE_STUB_EDIT);
 const target = path.join(process.cwd(), edit.path);
 fs.mkdirSync(path.dirname(target), { recursive: true });
+const firstResult = process.env.KAGE_STUB_LIVE_FIRST || "blocked";
 let phase = 0;
 readline.createInterface({ input: process.stdin }).on("line", () => {
   phase += 1;
-  if (phase === 1) {
+  if (phase === 1 && firstResult === "blocked") {
     process.stdout.write(JSON.stringify({ type: "result", result: process.env.KAGE_STUB_BLOCKED }) + "\\n");
   } else {
     fs.writeFileSync(target, edit.content, "utf8");
@@ -97,6 +106,7 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
   };
 
   if (options.live) {
+    const firstResult = options.live.firstResult ?? "blocked";
     const blocked = [
       "```kage-blocked",
       JSON.stringify({ need: "a decision", question: options.live.question }),
@@ -115,7 +125,13 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
       spawn(process.execPath, ["-e", LIVE_STUB_SCRIPT], {
         cwd: workDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, KAGE_STUB_BLOCKED: blocked, KAGE_STUB_CLAIM: claim, KAGE_STUB_EDIT: JSON.stringify(edit) },
+        env: {
+          ...process.env,
+          KAGE_STUB_BLOCKED: blocked,
+          KAGE_STUB_CLAIM: claim,
+          KAGE_STUB_EDIT: JSON.stringify(edit),
+          KAGE_STUB_LIVE_FIRST: firstResult,
+        },
       });
   }
 

@@ -27,6 +27,7 @@ import { interruptFrame, superviseRun, userMessageFrame } from "./delegation/sup
 import { isRunLive, sendControl } from "./delegation/control.js";
 import { eventsSincePage, renderStatusBoard } from "./delegation/report.js";
 import { sessionIdFrom, waitingSignal } from "./delegation/adapters/cli-agent.js";
+import { claudeLiveArgs } from "./delegation/adapters/index.js";
 import { loadRunRows } from "./delegation/tui/app.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
@@ -872,30 +873,90 @@ test("a ledger written before sequencing still advances its cursor", () => {
 
 // --- steering that actually reaches the agent ----------------------------------
 
-test("a blocked agent is ANSWERED in place, resuming its own session", async () => {
+test("REGRESSION: steering a run with a dead supervisor reattaches one instead of orphaning the claim", async () => {
+  // The bug, observed three times live: no supervisor was listening, so steerRun fell
+  // back to a fire-and-forget `claude --resume` — the message was delivered, the agent
+  // finished a turn, and its claim landed in a transcript nobody was left to collect.
+  // The fix reattaches a real supervisor (the `reattach` seam here stands in for the
+  // real detached `dispatchDetached` spawn) so the SAME process that took the steer is
+  // the one that collects the eventual claim.
   const project = tempGitProject({ testCommand: "true" });
-  const { task } = await dispatchRun(project, { intent: "will block", type: "chore" }, stubAdapter({ behavior: "blocked" }));
-  assert.equal(task.state, "blocked");
-  const sessionId = readRun(project, task.id).agent_session_id;
-  assert.ok(sessionId, "a session id must be recorded at dispatch or the agent can never be answered");
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+  transitionRun(project, task.id, "dispatched", "kernel");
+  transitionRun(project, task.id, "running", "kernel");
+  transitionRun(project, task.id, "failed", "kernel", "its supervisor died mid-turn");
+  patchRun(project, task.id, { agent_session_id: "dead-session", agent_pid: 999_999 });
 
-  // The stub records what it was resumed with, so we can prove the answer reached it.
-  const resumes: Array<{ resume?: string; body: string }> = [];
-  const recording = {
-    name: "stub",
-    async run(input: { resumeSessionId?: string; briefBody: string; transcriptPath: string; runId: string; workDir: string }) {
-      resumes.push({ resume: input.resumeSessionId, body: input.briefBody });
-      return { exit_code: 0, final_message: '```kage-claim\n{"statement":"continued after the answer"}\n```' };
-    },
+  const liveStub = stubAdapter({ live: { question: "n/a", firstResult: "claim" }, statement: "resumed and finished" });
+  const spawnCalls: Array<{ sessionId?: string; resumeSessionId?: string }> = [];
+  const realSpawnLive = liveStub.spawnLive!;
+  liveStub.spawnLive = (input) => {
+    spawnCalls.push({ sessionId: input.sessionId, resumeSessionId: input.resumeSessionId });
+    return realSpawnLive(input);
   };
 
-  const result = await steerRun(project, task.id, "use plan B", () => recording as never);
+  let supervised: Promise<void> | null = null;
+  const reattach = (_projectDir: string, reentrantTask: { id: string }) => {
+    supervised = superviseRun(project, reentrantTask.id, liveStub);
+    return { pid: 424_242 };
+  };
+
+  const result = await steerRun(project, task.id, "continue with plan A", () => liveStub, reattach);
   assert.equal(result.delivery, "resumed");
-  assert.match(result.message, /in place/);
-  // The SAME session was continued — not a fresh agent that lost everything.
-  assert.equal(resumes[0].resume, sessionId);
-  assert.equal(resumes[0].body, "use plan B");
-  assert.notEqual(readRun(project, task.id).state, "blocked");
+  assert.match(result.message, /reattaching/);
+  assert.ok(supervised, "steering a dead-supervisor run must reattach one");
+  assert.deepEqual(readSteers(project, task.id), ["continue with plan A"]);
+
+  await supervised!;
+
+  assert.equal(spawnCalls[0]?.resumeSessionId, "dead-session", "reattaching must RESUME the same session, not start a new one");
+  assert.equal(spawnCalls[0]?.sessionId, undefined);
+
+  const finished = readRun(project, task.id);
+  assert.equal(finished.state, "ready", "the reattached supervisor's claim must actually be collected");
+  const claim = JSON.parse(readFileSync(join(runDir(project, task.id), "claim.json"), "utf8")) as {
+    protocol_ok: boolean;
+    statement: string;
+  };
+  assert.equal(claim.protocol_ok, true, "a real kage-claim fence from the resumed turn, not a fallback");
+  assert.equal(claim.statement, "resumed and finished");
+});
+
+test("steering a HEALTHY supervised run still goes through the live socket — no reattach spawned", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+
+  const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+  const supervised = superviseRun(project, task.id, liveStub);
+
+  await waitFor(() => readRun(project, task.id).state === "blocked");
+  assert.equal(await isRunLive(project, task.id), true);
+
+  let reattachCalls = 0;
+  const reattach = (): { pid: number | undefined } => {
+    reattachCalls += 1;
+    return { pid: undefined };
+  };
+
+  const result = await steerRun(project, task.id, "go with plan A", () => liveStub, reattach);
+  assert.equal(result.delivery, "delivered");
+  assert.equal(reattachCalls, 0, "a live socket must never spawn a reattach supervisor");
+
+  await supervised;
+  assert.equal(readRun(project, task.id).state, "ready");
+});
+
+test("claudeLiveArgs resumes an existing session over starting a fresh one, and never both", () => {
+  assert.deepEqual(claudeLiveArgs({}).slice(0, 1), ["-p"], "no id at all: fresh session, agent assigns its own");
+  assert.deepEqual(claudeLiveArgs({ sessionId: "new-id" }).slice(0, 2), ["--session-id", "new-id"]);
+  assert.deepEqual(claudeLiveArgs({ resumeSessionId: "old-id" }).slice(0, 2), ["--resume", "old-id"]);
+  assert.deepEqual(
+    claudeLiveArgs({ sessionId: "new-id", resumeSessionId: "old-id" }).slice(0, 2),
+    ["--resume", "old-id"],
+    "resume wins when both are somehow set",
+  );
 });
 
 test("a message to a LIVE agent is reported as stored, never as delivered", async () => {

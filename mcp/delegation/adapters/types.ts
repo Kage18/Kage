@@ -44,6 +44,12 @@ export interface AdapterLiveInput {
   workDir: string;
   /** Continue an existing session instead of starting one, when the agent supports it. */
   sessionId?: string;
+  /**
+   * Reattach to a session that already exists (its supervisor is gone, but the agent's
+   * own context isn't) — a different spawn shape from `sessionId`, which starts a NEW
+   * session under a chosen id. Mutually exclusive; a caller with both means "resume".
+   */
+  resumeSessionId?: string;
 }
 
 export interface Adapter {

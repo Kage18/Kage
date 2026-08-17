@@ -34,23 +34,29 @@ export const claudeAdapter = (): Adapter => ({
   // can be answered in place. NOTE: with `--input-format stream-json` the prompt does
   // NOT come from `-p` — the agent reads it as a user message on stdin. Passing `-p`
   // here made the agent sit silently waiting for input (found live).
-  spawnLive: ({ workDir, sessionId }) =>
-    spawn(
-      "claude",
-      [
-        ...(sessionId ? ["--session-id", sessionId] : []),
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--permission-mode",
-        "acceptEdits",
-      ],
-      { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
-    ),
+  spawnLive: ({ workDir, sessionId, resumeSessionId }) =>
+    spawn("claude", claudeLiveArgs({ sessionId, resumeSessionId }), { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] }),
 });
+
+/**
+ * Argv for the live (stdin-held) spawn, split out from `spawnLive` so the
+ * `--resume` vs `--session-id` choice is unit-testable without spawning the real CLI.
+ * `--resume` reattaches an existing session (its supervisor died, the agent's context
+ * didn't); `--session-id` starts a fresh one under a chosen id. Never both.
+ */
+export function claudeLiveArgs(input: { sessionId?: string; resumeSessionId?: string }): string[] {
+  return [
+    ...(input.resumeSessionId ? ["--resume", input.resumeSessionId] : input.sessionId ? ["--session-id", input.sessionId] : []),
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "acceptEdits",
+  ];
+}
 
 export const codexAdapter = (): Adapter =>
   cliAgentAdapter({
