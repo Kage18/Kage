@@ -1,14 +1,14 @@
 // Adapter registry + detection. Kage hires labor; it never builds an agent loop.
 // Adding a brand is one spec object — that is the whole point of the contract.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { cliAgentAdapter, lastTextFromStreamJson } from "./cli-agent.js";
 import { stubAdapter } from "./stub.js";
 import type { Adapter } from "./types.js";
 
 const AGENT_RUN_TIMEOUT_MS = 45 * 60_000;
 
-export const claudeAdapter = (): Adapter =>
-  cliAgentAdapter({
+export const claudeAdapter = (): Adapter => ({
+  ...cliAgentAdapter({
     name: "claude",
     bin: "claude",
     // Headless, non-interactive, edits allowed inside the isolated worktree. Rides the
@@ -29,7 +29,28 @@ export const claudeAdapter = (): Adapter =>
     ],
     finalMessage: lastTextFromStreamJson,
     timeoutMs: AGENT_RUN_TIMEOUT_MS,
-  });
+  }),
+  // The supervised path: stdin stays open for the run's whole life so a blocked turn
+  // can be answered in place. NOTE: with `--input-format stream-json` the prompt does
+  // NOT come from `-p` — the agent reads it as a user message on stdin. Passing `-p`
+  // here made the agent sit silently waiting for input (found live).
+  spawnLive: ({ workDir, sessionId }) =>
+    spawn(
+      "claude",
+      [
+        ...(sessionId ? ["--session-id", sessionId] : []),
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "acceptEdits",
+      ],
+      { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] },
+    ),
+});
 
 export const codexAdapter = (): Adapter =>
   cliAgentAdapter({

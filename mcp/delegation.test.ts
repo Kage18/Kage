@@ -634,6 +634,62 @@ test("the detached supervisor runs a non-claude adapter for real — not a place
   assert.ok(claim.diff.files >= 1, "the stub's real file edit must land in the diff — a placeholder child never touches the worktree");
 });
 
+async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("REGRESSION: a blocked supervised run stays live, and a tell completes it in the same session", async () => {
+  // The bug, observed three times live: on a blocked fence superviseRun transitioned to
+  // `blocked` and RETURNED, tearing down its socket and the held child with it. A later
+  // answer had no supervisor to reach, so steer.ts fell back to resuming the agent's
+  // session in a brand-new, unsupervised process — whose eventual claim nobody was left
+  // to collect. Blocked must be a WAITING state: the same supervisor stays up, the same
+  // child stays alive, and a tell through ITS socket is what finishes the run.
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+
+  const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+  const supervised = superviseRun(project, task.id, liveStub);
+
+  await waitFor(() => readRun(project, task.id).state === "blocked");
+  assert.equal(await isRunLive(project, task.id), true, "the socket must still answer — blocked is not an exit");
+
+  const reply = await sendControl(project, task.id, { op: "tell", message: "go with plan A" });
+  assert.equal(reply?.delivered, true, "the tell must reach the SAME live agent, not a queued file");
+
+  await supervised;
+
+  const finished = readRun(project, task.id);
+  assert.equal(finished.state, "ready", "the answered turn's claim must be collected by the same supervisor");
+  const claim = JSON.parse(readFileSync(join(runDir(project, task.id), "claim.json"), "utf8")) as { protocol_ok: boolean };
+  assert.equal(claim.protocol_ok, true, "a real kage-claim fence from the resumed turn, not a fallback");
+});
+
+test("a stop on a blocked supervised run lands stopped and the supervisor exits", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+
+  const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+  const supervised = superviseRun(project, task.id, liveStub);
+
+  await waitFor(() => readRun(project, task.id).state === "blocked");
+  assert.equal(await isRunLive(project, task.id), true);
+
+  const reply = await sendControl(project, task.id, { op: "stop" });
+  assert.equal(reply?.ok, true);
+
+  await supervised;
+
+  assert.equal(readRun(project, task.id).state, "stopped");
+  assert.equal(await isRunLive(project, task.id), false, "the supervisor must actually exit once stopped");
+});
+
 // --- one truth about state, on every surface -----------------------------------
 
 test("ALL surfaces report the same state for a run whose process died", async () => {

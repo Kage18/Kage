@@ -1,6 +1,7 @@
 // Adapter contract: brief in, transcript + final message out. Adapters are thin —
 // they spawn a hired agent (or a stub) in a working directory and stream what happened
 // to transcript.jsonl. The kernel owns everything else: state, claims, verification.
+import type { ChildProcess } from "node:child_process";
 import type { ProgressSink } from "../progress.js";
 
 export interface AdapterInput {
@@ -39,7 +40,21 @@ export interface AdapterOutcome {
   session_id?: string;
 }
 
+export interface AdapterLiveInput {
+  workDir: string;
+  /** Continue an existing session instead of starting one, when the agent supports it. */
+  sessionId?: string;
+}
+
 export interface Adapter {
   name: string;
   run(input: AdapterInput): Promise<AdapterOutcome>;
+  /**
+   * Optional: spawn the agent as a live child with stdin held open for the stream-json
+   * protocol (userMessageFrame in, line-delimited JSON out) — what supervisor.ts's
+   * control loop steers directly so a blocked run can be answered in place instead of
+   * restarted. Adapters without this only offer run(), a single turn with no way to
+   * keep the process alive across a block.
+   */
+  spawnLive?(input: AdapterLiveInput): ChildProcess;
 }
