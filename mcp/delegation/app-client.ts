@@ -16,7 +16,9 @@ var state = {
   room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "",
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
+  workLayout: "list", dover: false, showAllDone: false, workOrder: [],
 };
+try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 
 if (navigator.userAgent.indexOf("Electron") >= 0) document.body.classList.add("electron");
 
@@ -74,140 +76,227 @@ function decisionText(run) {
   return "Lost, resumable: " + run.intent;
 }
 
-// --- inbox
-function renderInbox() {
-  var rows = document.getElementById("inbox-rows");
-  rows.textContent = "";
-  var decisions = state.runs.filter(function (r) { return r.ownership === "needs_you"; });
-  var quiet = state.runs.filter(function (r) { return r.ownership === "working"; }).length;
-  // Order by what it COSTS to ignore, not by when it happened. At twenty decisions a
-  // flat list buried an agent waiting on an answer underneath nine routine merges;
-  // a blocked run holds a whole worktree hostage, a lost one may need re-dispatching,
-  // and a ready one is only waiting for a click.
-  var rank = { blocked: 0, failed: 1, dropped: 1, stopped: 1, ready: 2 };
-  decisions.sort(function (a, b) {
-    var ra = rank[a.display_state] === undefined ? 3 : rank[a.display_state];
-    var rb = rank[b.display_state] === undefined ? 3 : rank[b.display_state];
-    return ra - rb || String(b.updated_at).localeCompare(String(a.updated_at));
-  });
-  var groupOf = function (run) {
-    if (run.display_state === "blocked") return "Asks you";
-    if (run.display_state === "ready") return "Ready to merge";
-    return "Needs a decision";
-  };
-  var lastGroup = null;
-  decisions.forEach(function (run) {
-    // A heading per group, with its own count, so twenty rows read as three piles.
-    var group = groupOf(run);
-    if (group !== lastGroup) {
-      lastGroup = group;
-      var count = decisions.filter(function (r) { return groupOf(r) === group; }).length;
-      var head = h("div", "seclabel");
-      head.appendChild(document.createTextNode(group));
-      head.appendChild(h("span", "n", String(count)));
-      rows.appendChild(head);
-    }
-    var row = h("div", "qrow");
-    var g = glyphFor(run);
-    row.appendChild(h("span", "glyph " + g[1], g[0]));
-    var mid = h("div");
-    mid.appendChild(h("div", "qt", decisionText(run)));
-    var atoms = h("div", "qatoms");
-    atoms.appendChild(h("span", "atom", run.agent));
-    // No branch chip here: a run's branch is its own slugified title, so showing it
-    // beside the title repeats the same words in uglier form. It stays in Runs, where
-    // you actually need it to find the work in git.
-    if (run.display_state === "ready") atoms.appendChild(h("span", "atom jade", "awaiting merge"));
-    if (run.stale) atoms.appendChild(h("span", "atom hot", "process gone"));
-    if (run.display_state === "failed" && !run.stale) atoms.appendChild(h("span", "atom hot", "checks failed"));
-    // What actually changed, so the decision can be made HERE. A row that only
-    // repeats the intent asks you to go and find out somewhere else.
-    if (run.claim_summary) atoms.appendChild(h("span", "atom", run.claim_summary));
-    if (run.blast && run.blast.dependents > 0) {
-      atoms.appendChild(h("span", "atom" + (run.blast.dependents >= 5 ? " hot" : ""),
-        run.blast.dependents + " dependent" + (run.blast.dependents === 1 ? "" : "s")));
-    }
-    mid.appendChild(atoms);
-    row.appendChild(mid);
-
-    var right = h("div", "qact");
-    right.appendChild(h("span", "qtime", ago(run.updated_at)));
-    // An inbox exists to be ACTIONED. This one listed five decisions and offered no
-    // way to take any of them — every row made you leave for Runs to click the same
-    // buttons that could have been here.
-    var acts = h("div", "qbtns");
-    // The question answers where it is asked. A blocked agent's question IS the row's
-    // content; making the user navigate to a detail view to type a one-line reply is
-    // the inbox refusing to be an inbox. Delivery is reported with the kernel's own
-    // vocabulary, never assumed.
-    if (run.display_state === "blocked") {
-      var answer = h("div", "qanswer");
-      var field = document.createElement("input");
-      field.type = "text";
-      field.placeholder = "Answer the agent…";
-      field.onclick = function (ev) { ev.stopPropagation(); };
-      field.onkeydown = function (ev) {
-        ev.stopPropagation();
-        if (ev.key !== "Enter" || !field.value.trim()) return;
-        var msg = field.value.trim();
-        field.disabled = true;
-        api("/runs/" + run.id + "/tell", { method: "POST", body: { message: msg } }).then(function (out) {
-          flash(out.ok ? "delivery: " + out.delivery : (out.error || "failed"));
-          refresh();
-        });
-      };
-      answer.appendChild(field);
-      mid.appendChild(answer);
-    }
-    if (run.display_state === "ready") {
-      var merge = h("button", "btn primary sm", "Merge");
-      merge.title = "Land the code and ratify what it learned";
-      merge.onclick = function (ev) {
-        ev.stopPropagation();
-        merge.disabled = true;
-        merge.textContent = "Merging…";
-        api("/runs/" + run.id + "/merge", { method: "POST" }).then(function (out) {
-          flash(out.detail || (out.ok ? "merged" : "merge failed"));
-          refresh();
-        });
-      };
-      acts.appendChild(merge);
-    }
-    var open = h("button", "btn sm", "Review");
-    open.onclick = function (ev) { ev.stopPropagation(); openRun(run.id); };
-    acts.appendChild(open);
-    right.appendChild(acts);
-    row.appendChild(right);
-    row.onclick = function () { openRun(run.id); };
-    rows.appendChild(row);
-  });
-  document.getElementById("dcount").textContent = decisions.length ? String(decisions.length) : "";
-  if (!decisions.length) {
-    var empty = h("div", "empty");
-    if (state.runs.length) empty.textContent = "Nothing needs you.";
-    else {
-      empty.appendChild(document.createTextNode("Describe what should change — Kage compiles a brief from repo memory, hires an agent in a worktree, and re-runs the checks itself. Press "));
-      empty.appendChild(h("span", "kbd", "n"));
-      empty.appendChild(document.createTextNode(" to start."));
-    }
-    rows.appendChild(empty);
-  }
-  document.getElementById("inbox-quiet").textContent =
-    quiet + " working quietly · " + decisions.length + " decision" + (decisions.length === 1 ? "" : "s");
-  document.title = decisions.length ? "Kage · " + decisions.length : "Kage";
+// --- the work surface: one view, two arrangements, one power set.
+// Inbox/Runs/Board used to be three doors into the same ~25 runs, each with
+// different powers (merge from two of them, steer from one, look-only from the
+// third). The user had to memorize which door could do what. Now there is ONE
+// triaged list beside the run's detail, a Board layout of the same runs, and
+// every power — answer, merge, reject, steer — attaches to the run itself.
+function renderChrome() {
+  // The window-level indicators live outside any view and update on every refresh:
+  // title count, bell badge, status-bar counts, the open notification center.
+  var needs = state.runs.filter(function (r) { return r.ownership === "needs_you"; }).length;
+  var working = state.runs.filter(function (r) { return r.ownership === "working"; }).length;
+  document.title = needs ? "Kage · " + needs : "Kage";
   if (document.getElementById("notif").classList.contains("on")) renderNotifications();
   var badge = document.getElementById("bell-badge");
-  badge.textContent = String(decisions.length);
-  badge.style.display = decisions.length ? "flex" : "none";
+  badge.textContent = String(needs);
+  badge.style.display = needs ? "flex" : "none";
   var counts = document.getElementById("st-counts");
-  counts.textContent = state.runs.length ? quiet + " working · " + decisions.length + " for you" : "";
-  renderHandover();
+  counts.textContent = state.runs.length ? working + " working · " + needs + " for you" : "";
 }
+
+function renderWork() {
+  var view = document.getElementById("v-work");
+  var board = state.workLayout === "board";
+  view.classList.toggle("layout-board", board);
+  view.classList.toggle("dover", board && state.dover && Boolean(state.selected));
+  document.getElementById("wl-list").classList.toggle("on", !board);
+  document.getElementById("wl-board").classList.toggle("on", board);
+  var needs = state.runs.filter(function (r) { return r.ownership === "needs_you"; }).length;
+  var working = state.runs.filter(function (r) { return r.ownership === "working"; }).length;
+  var done = state.runs.filter(function (r) { return r.ownership === "done"; }).length;
+  document.getElementById("work-sum").textContent = state.runs.length
+    ? needs + " need you · " + working + " working · " + done + " done" : "";
+  // The traversal order (j/k, ⌥L) is exactly the order rows are painted in — the
+  // active layout's renderer rebuilds it so the keyboard always matches the eye.
+  state.workOrder = [];
+  if (board) renderBoard();
+  else renderWorkList();
+  renderDetail();
+}
+
+function workRow(run) {
+  var needsYou = run.ownership === "needs_you";
+  var row = h("div", "wrow" + (needsYou ? " attn" : "") + (state.selected === run.id ? " sel" : ""));
+  row.setAttribute("data-run", run.id);
+  row.tabIndex = 0;
+  var g = glyphFor(run);
+  row.appendChild(h("span", "glyph " + g[1], g[0]));
+  var mid = h("div");
+  mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : run.intent));
+  var atoms = h("div", "qatoms");
+  atoms.appendChild(h("span", "atom", run.agent));
+  if (run.display_state === "ready") atoms.appendChild(h("span", "atom jade", "awaiting merge"));
+  if (run.stale) atoms.appendChild(h("span", "atom hot", "process gone"));
+  if (run.display_state === "failed" && !run.stale) atoms.appendChild(h("span", "atom hot", "checks failed"));
+  if (run.ownership === "working" && run.activity) {
+    atoms.appendChild(h("span", "atom", readableLabel(run.activity.last_label) + " · " + run.activity.actions + " actions"));
+  }
+  // What actually changed, so the decision can be made HERE. A row that only
+  // repeats the intent asks you to go and find out somewhere else.
+  if (run.claim_summary) atoms.appendChild(h("span", "atom", run.claim_summary));
+  if (run.blast && run.blast.dependents > 0) {
+    atoms.appendChild(h("span", "atom" + (run.blast.dependents >= 5 ? " hot" : ""),
+      run.blast.dependents + " dependent" + (run.blast.dependents === 1 ? "" : "s")));
+  }
+  var cost = costLabel(run);
+  if (cost && run.ownership !== "working") atoms.appendChild(h("span", "atom", cost));
+  mid.appendChild(atoms);
+  // The question answers where it is asked. Delivery is reported with the kernel's
+  // own vocabulary, never assumed.
+  if (run.display_state === "blocked") {
+    var answer = h("div", "qanswer");
+    var field = document.createElement("input");
+    field.type = "text";
+    field.placeholder = "Answer the agent…";
+    field.onclick = function (ev) { ev.stopPropagation(); };
+    field.onkeydown = function (ev) {
+      ev.stopPropagation();
+      if (ev.key !== "Enter" || !field.value.trim()) return;
+      var msg = field.value.trim();
+      field.disabled = true;
+      api("/runs/" + run.id + "/tell", { method: "POST", body: { message: msg } }).then(function (out) {
+        flash(out.ok ? "delivery: " + out.delivery : (out.error || "failed"));
+        refresh();
+      });
+    };
+    answer.appendChild(field);
+    mid.appendChild(answer);
+  }
+  row.appendChild(mid);
+  var right = h("div", "qact");
+  right.appendChild(h("span", "qtime", ago(run.updated_at)));
+  if (run.display_state === "ready") {
+    var acts = h("div", "qbtns");
+    var merge = h("button", "btn primary sm", "Merge");
+    merge.title = "Land the code and ratify what it learned";
+    merge.onclick = function (ev) {
+      ev.stopPropagation();
+      merge.disabled = true;
+      merge.textContent = "Merging…";
+      api("/runs/" + run.id + "/merge", { method: "POST" }).then(function (out) {
+        flash(out.detail || (out.ok ? "merged" : "merge failed"));
+        refresh();
+      });
+    };
+    acts.appendChild(merge);
+    right.appendChild(acts);
+  }
+  row.appendChild(right);
+  row.onclick = function () { selectRun(run.id); };
+  row.onkeydown = function (ev) {
+    if (ev.target !== row) return;
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      selectRun(run.id);
+      focusPrimary();
+    }
+  };
+  return row;
+}
+
+function renderWorkList() {
+  var listWrap = document.getElementById("run-list");
+  // Rebuilding the rows collapses the scroll container for a frame; restoring the
+  // offset afterwards is what keeps a refresh from yanking the list back to the top.
+  var scroller = listWrap.parentNode;
+  var keepScroll = scroller.scrollTop;
+  listWrap.textContent = "";
+  renderHandover();
+  // Sections ordered by what it COSTS to ignore, not by when it happened: a blocked
+  // run holds a worktree hostage, a lost one may need re-dispatching, a ready one is
+  // only waiting for a click — and everything else is either working or history.
+  var sections = [
+    ["Asks you", function (r) { return r.display_state === "blocked"; }],
+    ["Needs a decision", function (r) { return r.ownership === "needs_you" && r.display_state !== "blocked" && r.display_state !== "ready"; }],
+    ["Ready to merge", function (r) { return r.display_state === "ready"; }],
+    ["Working", function (r) { return r.ownership === "working"; }],
+    ["Done", function (r) { return r.ownership === "done"; }],
+  ];
+  sections.forEach(function (spec) {
+    var members = state.runs.filter(spec[1]);
+    if (!members.length) return;
+    members.sort(function (a, b) { return String(b.updated_at).localeCompare(String(a.updated_at)); });
+    var capped = spec[0] === "Done" && !state.showAllDone && members.length > 8;
+    var shown = capped ? members.slice(0, 8) : members;
+    var head = h("div", "lgroup", spec[0]);
+    head.appendChild(h("em", "", String(members.length)));
+    listWrap.appendChild(head);
+    shown.forEach(function (run) {
+      listWrap.appendChild(workRow(run));
+      state.workOrder.push(run.id);
+    });
+    if (capped) {
+      var more = h("button", "showmore", "show all " + members.length + " done");
+      more.onclick = function () { state.showAllDone = true; renderWork(); };
+      listWrap.appendChild(more);
+    }
+  });
+  if (!state.runs.length) {
+    listWrap.appendChild(emptyBlock(
+      "No runs yet",
+      "A run is one delegated job: Kage briefs an agent from repo memory, it works in its own worktree, and the kernel re-runs your checks before you see a result.",
+      "n"));
+  }
+  scroller.scrollTop = keepScroll;
+}
+
+// Selection is a real model: one selected run, whichever arrangement painted it.
+// Selecting never navigates — the detail is already beside you (list) or slides
+// over (board). openRun is the external jump (rail, palette, notifications).
+function selectRun(id) {
+  var changed = state.selected !== id;
+  state.selected = id;
+  if (changed) { state.tab = "follow"; state.detail = null; }
+  if (state.workLayout === "board") state.dover = true;
+  renderWork();
+  api("/runs/" + id).then(function (detail) {
+    if (state.selected !== id) return;
+    state.detail = detail.ok ? detail : null;
+    renderWork();
+    loadTabText(id);
+  });
+}
+
+function moveSelection(step) {
+  if (!state.workOrder.length) return;
+  var at = state.workOrder.indexOf(state.selected);
+  var to = at < 0 ? (step > 0 ? 0 : state.workOrder.length - 1) : at + step;
+  if (to < 0 || to >= state.workOrder.length) return;
+  selectRun(state.workOrder[to]);
+  var row = document.querySelector('[data-run="' + state.workOrder[to] + '"]');
+  if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+}
+
+// Enter lands where the selected run actually needs you: a blocked run's answer
+// field, else the steer composer in the detail.
+function focusPrimary() {
+  var run = state.runs.filter(function (r) { return r.id === state.selected; })[0];
+  if (!run) return;
+  if (run.display_state === "blocked") {
+    var field = document.querySelector('.wrow[data-run="' + run.id + '"] .qanswer input');
+    if (field) { field.focus(); return; }
+  }
+  var steer = document.getElementById("steer-input");
+  if (steer) steer.focus();
+}
+
+function setWorkLayout(layout) {
+  state.workLayout = layout;
+  state.dover = false;
+  try { localStorage.setItem("kageLayout", layout); } catch (e) {}
+  renderWork();
+}
+document.getElementById("wl-list").onclick = function () { setWorkLayout("list"); };
+document.getElementById("wl-board").onclick = function () { setWorkLayout("board"); };
 
 function renderHandover() {
   var el = document.getElementById("handover");
-  var last = localStorage.getItem("kageLastSeen");
-  if (!last) { el.style.display = "none"; localStorage.setItem("kageLastSeen", new Date().toISOString()); return; }
+  var last = null;
+  try { last = localStorage.getItem("kageLastSeen"); } catch (e) {}
+  if (!last) { el.style.display = "none"; try { localStorage.setItem("kageLastSeen", new Date().toISOString()); } catch (e) {} return; }
   var since = state.runs.filter(function (r) { return r.updated_at > last; });
   var merged = since.filter(function (r) { return r.display_state === "merged"; }).length;
   var held = since.filter(function (r) { return r.ownership === "needs_you"; }).length;
@@ -219,7 +308,7 @@ function renderHandover() {
   el.textContent = "";
   var head = h("div", "hhead", "Since you left");
   var dismiss = h("button", "", "mark seen");
-  dismiss.onclick = function () { localStorage.setItem("kageLastSeen", new Date().toISOString()); renderInbox(); };
+  dismiss.onclick = function () { try { localStorage.setItem("kageLastSeen", new Date().toISOString()); } catch (e) {} render(); };
   head.appendChild(dismiss);
   el.appendChild(head);
   function line(ic, cls, tx, atom) {
@@ -232,7 +321,7 @@ function renderHandover() {
   // Only report what is NOT already visible as a decision card below. Repeating
   // "1 lost / 1 held for you" directly above the very rows that say the same thing
   // is noise pretending to be a summary.
-  if (merged) line("✓", "jade", merged + " merged, verified", "receipts in Runs");
+  if (merged) line("✓", "jade", merged + " merged, verified", "receipts below");
   if (!merged && !lost) line("·", "dim", held + " arrived while you were away", "below");
 }
 
@@ -313,8 +402,8 @@ function renderLiveRail() {
   // Never imply four is all of it. Twenty runs needing a human, showing four, with no
   // hint of the rest is the app quietly hiding work from you.
   if (all.length > 4) {
-    var more = h("button", "railmore", "+" + (all.length - 4) + " more waiting — open the inbox");
-    more.onclick = function () { setView("inbox"); };
+    var more = h("button", "railmore", "+" + (all.length - 4) + " more waiting — open Work");
+    more.onclick = function () { setView("work"); };
     rail.appendChild(more);
   }
 }
@@ -864,41 +953,6 @@ window.addEventListener("resize", function () {
   }
 });
 
-// --- runs
-function renderRunList() {
-  var list = document.getElementById("run-list");
-  list.textContent = "";
-  var groups = [
-    ["Needs you", function (r) { return r.ownership === "needs_you"; }, "amber"],
-    ["Working", function (r) { return r.ownership === "working"; }, "grey"],
-    ["Done", function (r) { return r.ownership === "done"; }, "jade"],
-  ];
-  groups.forEach(function (spec) {
-    var members = state.runs.filter(spec[1]);
-    if (!members.length) return;
-    var head = h("div", "lgroup", spec[0]);
-    head.appendChild(h("em", "", String(members.length)));
-    list.appendChild(head);
-    members.forEach(function (run) {
-      var row = h("div", "ws" + (run.ownership === "needs_you" ? " attn" : "") + (state.selected === run.id ? " sel" : ""));
-      var mid = h("div");
-      mid.appendChild(h("div", "t", run.intent));
-      var metaText = run.activity
-        ? run.activity.last_label + " · " + run.activity.actions + " actions"
-        : run.display_state + " · " + ago(run.updated_at);
-      mid.appendChild(h("div", "meta", metaText));
-      row.appendChild(mid);
-      row.appendChild(h("span", "dot " + spec[2]));
-      row.onclick = function () { openRun(run.id); };
-      list.appendChild(row);
-    });
-  });
-  if (!state.runs.length) list.appendChild(emptyBlock(
-    "No runs yet",
-    "A run is one delegated job: Kage briefs an agent from repo memory, it works in its own worktree, and the kernel re-runs your checks before you see a result.",
-    "n"));
-}
-
 // The receipt, composed from the claim's STRUCTURED fields.
 //
 // This previously re-rendered renderClaimCard()'s output — a string formatted for a
@@ -1022,6 +1076,14 @@ function renderDetail() {
   var run = d.run;
 
   var head = h("div", "dhead");
+  // In Board layout the detail is a slide-over — give it a way out that isn't
+  // knowing the esc key.
+  if (state.workLayout === "board") {
+    var close = h("button", "dclose", "✕");
+    close.title = "close (esc)";
+    close.onclick = function () { state.dover = false; renderWork(); };
+    head.appendChild(close);
+  }
   head.appendChild(h("h2", "", run.intent));
   var chips = h("div", "chips");
   chips.appendChild(h("span", "chip state-" + run.display_state, run.display_state));
@@ -1112,6 +1174,7 @@ function renderDetail() {
   var cwrap = h("div", "cwrap");
   cwrap.appendChild(h("span", "caret", "›"));
   var input = h("input");
+  input.id = "steer-input";
   input.placeholder = "Message the agent…";
   input.onkeydown = function (ev) {
     if (ev.key !== "Enter" || !input.value.trim()) return;
@@ -1162,9 +1225,12 @@ function flash(text) {
   if (el) { el.textContent = text; el.title = text; }
 }
 
-// --- board
+// --- board: the second ARRANGEMENT of the work surface, not a third door.
+// Cards select the same run the list would; the same detail slides over.
 function renderBoard() {
   var el = document.getElementById("board-cols");
+  var scroller = document.getElementById("work-board");
+  var keepScroll = scroller ? scroller.scrollTop : 0;
   el.textContent = "";
   // Compound columns with split counts, AO's pattern: pairing related states keeps a
   // terminal state visible without spending a whole column on it. It also fixes a real
@@ -1197,7 +1263,9 @@ function renderBoard() {
     // vocabulary instead of showing four zeroes.
     if (!members.length) col.appendChild(h("div", "bempty", spec.hint));
     members.forEach(function (run) {
-      var card = h("div", "acard");
+      var card = h("div", "acard" + (state.selected === run.id ? " sel" : ""));
+      card.setAttribute("data-run", run.id);
+      card.tabIndex = 0;
       card.appendChild(h("span", "av " + run.agent, run.agent.slice(0, 2)));
       var mid = h("div");
       mid.appendChild(h("div", "at", run.intent));
@@ -1212,11 +1280,21 @@ function renderBoard() {
       arow.appendChild(h("span", "tm", ago(run.updated_at)));
       mid.appendChild(arow);
       card.appendChild(mid);
-      card.onclick = function () { openRun(run.id); };
+      card.onclick = function () { selectRun(run.id); };
+      card.onkeydown = function (ev) {
+        if (ev.target !== card) return;
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          selectRun(run.id);
+        }
+      };
       col.appendChild(card);
+      state.workOrder.push(run.id);
     });
     el.appendChild(col);
   });
+  if (scroller) scroller.scrollTop = keepScroll;
 }
 
 // --- navigation + data
@@ -1226,7 +1304,7 @@ function setView(name) {
   // merge mid-session did not exist in the view until a full page reload. Entering the
   // view is the moment freshness matters, and the fetch is ~7ms even at 3,000 packets.
   if (name === "memory") loadMemory();
-  ["room", "inbox", "runs", "board", "memory"].forEach(function (v) {
+  ["room", "work", "memory"].forEach(function (v) {
     document.getElementById("v-" + v).classList.toggle("on", v === name);
     document.getElementById("m-" + v).classList.toggle("on", v === name);
   });
@@ -1312,10 +1390,8 @@ function addProject() {
 function render() {
   renderRoom();
   renderLiveRail();
-  renderInbox();
-  renderRunList();
-  renderDetail();
-  renderBoard();
+  renderChrome();
+  renderWork();
   renderProjects();
 }
 function refresh() {
@@ -1353,15 +1429,10 @@ function refresh() {
     render();
   }).catch(function () {});
 }
+// The external jump — rail, palette, notifications, room links all land here.
 function openRun(id) {
-  state.selected = id;
-  state.tab = "follow";
-  setView("runs");
-  api("/runs/" + id).then(function (detail) {
-    state.detail = detail.ok ? detail : null;
-    render();
-    loadTabText(id);
-  });
+  if (state.view !== "work") setView("work");
+  selectRun(id);
 }
 
 // Diff and raw are plain-text routes, fetched lazily per tab and cached on the detail.
@@ -1711,11 +1782,11 @@ var paletteSel = 0;
 function paletteCommands(query) {
   var cmds = [
     { grp: "go", name: "Room", hint: "1", run: function () { setView("room"); } },
-    { grp: "go", name: "Inbox", hint: "2", run: function () { setView("inbox"); } },
-    { grp: "go", name: "Runs", hint: "3", run: function () { setView("runs"); } },
-    { grp: "go", name: "Board", hint: "4", run: function () { setView("board"); } },
-    { grp: "go", name: "Memory", hint: "5", run: function () { setView("memory"); } },
+    { grp: "go", name: "Work", hint: "2", run: function () { setView("work"); } },
+    { grp: "go", name: "Memory", hint: "3", run: function () { setView("memory"); } },
     { grp: "do", name: "New run…", hint: "n", run: function () { showOverlay(true); } },
+    { grp: "do", name: "Work: list layout", run: function () { setView("work"); setWorkLayout("list"); } },
+    { grp: "do", name: "Work: board layout", run: function () { setView("work"); setWorkLayout("board"); } },
     { grp: "do", name: "Room: chat view", run: function () { setView("room"); setRoomMode("chat"); } },
     { grp: "do", name: "Room: terminal view", run: function () { setView("room"); setRoomMode("terminal"); } },
     { grp: "do", name: "Cycle theme", run: function () { document.getElementById("m-theme").onclick(); } },
@@ -1796,7 +1867,13 @@ document.addEventListener("keydown", function (ev) {
   // ⌘K works from anywhere, including mid-sentence in the composer.
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "k") { ev.preventDefault(); showPalette(true); return; }
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "n") { ev.preventDefault(); showOverlay(true); return; }
-  if (ev.key === "Escape") { showPalette(false); showOverlay(false); showSettings(false); document.getElementById("notif").classList.remove("on"); return; }
+  if (ev.key === "Escape") {
+    var hadOverlay = Boolean(document.querySelector(".overlay.on")) || document.getElementById("notif").classList.contains("on");
+    showPalette(false); showOverlay(false); showSettings(false); document.getElementById("notif").classList.remove("on");
+    // Only once nothing modal was open does esc mean "close the board's slide-over".
+    if (!hadOverlay && state.dover) { state.dover = false; renderWork(); }
+    return;
+  }
   // ⌥L / ⌥H: next / previous run needing you, from anywhere — including mid-sentence
   // (Alt+letter would otherwise insert a symbol into the composer on macOS).
   if (ev.altKey && (ev.code === "KeyL" || ev.code === "KeyH")) {
@@ -1809,11 +1886,14 @@ document.addEventListener("keydown", function (ev) {
     return;
   }
   if (ev.key === "1") setView("room");
-  else if (ev.key === "2") setView("inbox");
-  else if (ev.key === "3") setView("runs");
-  else if (ev.key === "4") setView("board");
-  else if (ev.key === "5") setView("memory");
+  else if (ev.key === "2") setView("work");
+  else if (ev.key === "3") setView("memory");
   else if (ev.key === "n") { ev.preventDefault(); showOverlay(true); }
+  // The selection model: j/k (or arrows) traverse the work surface in paint order,
+  // Enter lands on the selected run's primary action.
+  else if (state.view === "work" && (ev.key === "j" || ev.key === "ArrowDown")) { ev.preventDefault(); moveSelection(1); }
+  else if (state.view === "work" && (ev.key === "k" || ev.key === "ArrowUp")) { ev.preventDefault(); moveSelection(-1); }
+  else if (state.view === "work" && ev.key === "Enter") { ev.preventDefault(); focusPrimary(); }
 });
 Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function (btn) {
   btn.onclick = function () { setView(btn.dataset.view); };

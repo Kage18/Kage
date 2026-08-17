@@ -301,7 +301,12 @@ test("the app HTML is self-contained, carries the token, and never leaks the pla
   assert.ok(html.includes('"tok-abc123"'), "the mutation token is injected");
   assert.ok(!html.includes("__KAGE_TOKEN__"), "the placeholder must be replaced");
   assert.ok(!/https?:\/\/(?!127\.0\.0\.1)/.test(html), "no external hosts — the page must work offline behind the guard");
-  for (const view of ["v-inbox", "v-runs", "v-board"]) assert.ok(html.includes(view), `${view} missing`);
+  for (const view of ["v-room", "v-work", "v-memory"]) assert.ok(html.includes(view), `${view} missing`);
+  // One surface, one power set. Inbox/Runs/Board were three doors into the same runs
+  // with different powers each; if a second detail pane (or a resurrected door) ever
+  // appears, powers have started depending on the door again.
+  for (const gone of ["v-inbox", "v-runs", "v-board"]) assert.ok(!html.includes(gone), `${gone} resurrected — Work is the one surface`);
+  assert.equal(html.split('id="run-detail"').length, 2, "exactly one run detail — powers attach to the run, not the view");
   assert.ok(html.includes("/runs/events"), "the SSE re-read loop is wired");
 });
 

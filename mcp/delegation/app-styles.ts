@@ -350,12 +350,43 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .picker .opt .n { font-size:13px; }
   .picker .opt .d { font-size:11px; color:var(--text3); margin-top:2px; line-height:1.4; }
 
-  /* ---- inbox: a centered column of decision cards ---- */
-  .inbox-scroll { overflow-y:auto; flex:1; }
-  .inbox-col { max-width:820px; margin:0 auto; padding:26px 24px 48px; }
-  .seclabel { font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--text3); margin:0 2px 10px; display:flex; align-items:baseline; }
-  .seclabel .n { margin-left:auto; }
+  /* ---- work: one surface, two arrangements ----
+     Inbox/Runs/Board were the same runs behind three doors with different powers
+     each. This is the collapse: a triaged list beside the detail, or the same runs
+     as board columns — and every power works from both, because powers attach to
+     the run, not to the view that happened to render it. */
+  .workbar { display:flex; align-items:center; gap:12px; height:40px; padding:0 16px;
+    background:var(--chrome); border-bottom:1px solid var(--line); flex:none; }
+  .wsum { font-family:var(--mono); font-size:11px; color:var(--text3); }
+  .wlayout { margin-left:auto; display:flex; background:var(--inset); border:1px solid var(--line);
+    border-radius:var(--r-panel); padding:2px; gap:2px; }
+  .wlayout button { font-size:11px; padding:3px 12px; border-radius:var(--r-control); color:var(--text2); }
+  .wlayout button.on { background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm); }
+  .workmain { flex:1; min-height:0; position:relative; display:flex; flex-direction:column; }
+  #work-board { display:none; }
+  #v-work.layout-board #work-split { display:none; }
+  #v-work.layout-board #work-board { display:block; flex:1; }
+  /* Board layout opens the SAME detail as a slide-over — one detail element, one
+     power set, whichever arrangement you were in when you clicked. */
+  #v-work.layout-board.dover #work-split { display:grid; grid-template-columns:1fr; position:absolute;
+    inset:0 0 0 auto; width:min(820px, 84%); z-index:5; background:var(--bg);
+    border-left:1px solid var(--line); box-shadow:var(--shadow-md); }
+  #v-work.layout-board.dover #work-split .list { display:none; }
+
+  /* A work row: glyph · title+atoms(+answer) · time+actions. tabindex'd, focusable,
+     and the selection is visible — the start of an actual keyboard story. */
+  .wrow { display:grid; grid-template-columns:30px 1fr auto; gap:10px; margin:2px 8px;
+    padding:11px 12px 11px 8px; border-radius:var(--r-card); cursor:pointer;
+    border:1px solid transparent; outline:none; }
+  .wrow:hover { background:var(--surface2); }
+  .wrow.sel { background:var(--surface); border-color:var(--line); box-shadow:var(--shadow-sm); }
+  .wrow:focus-visible { border-color:var(--green); }
+  .wrow .qt { font-size:13px; font-weight:500; }
+  .wrow.attn .qt { font-weight:600; }
+  .showmore { display:block; margin:6px auto 2px; font-family:var(--mono); font-size:10.5px;
+    color:var(--text3); padding:4px 10px; border-radius:var(--r-control); }
+  .showmore:hover { color:var(--text); background:var(--surface2); }
+
   .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     box-shadow:var(--shadow-sm); overflow:hidden; }
   .qact { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
@@ -367,22 +398,17 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .qanswer input:disabled { opacity:.5; }
   .qbtns { display:flex; gap:6px; }
   .btn.sm { font-size:11.5px; padding:4px 11px; }
-  .qrow { display:grid; grid-template-columns:34px 1fr auto; gap:12px; padding:15px 18px 15px 14px;
-    cursor:pointer; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
-    box-shadow:var(--shadow-sm); margin-bottom:10px; transition:border-color .12s, box-shadow .12s; }
-  .qrow:hover { border-color:var(--text3); box-shadow:var(--shadow-md); }
   .glyph { font-family:var(--mono); font-size:15px; text-align:center; padding-top:1px; }
   .qt { font-size:14.5px; font-weight:550; line-height:1.45; letter-spacing:-.006em;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .qatoms { display:flex; gap:12px; margin-top:6px; flex-wrap:wrap; align-items:baseline; }
   .atom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
-  .atom.branch { max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .atom.jade { color:var(--jade); } .atom.amber { color:var(--amber); } .atom.hot { color:var(--crimson); }
   .qtime { font-family:var(--mono); font-size:10.5px; color:var(--text3); padding-top:3px; }
-  .quiet { text-align:center; font-family:var(--mono); font-size:11px; color:var(--text3); padding:18px 0 4px; }
 
   /* handover card */
   .hand { margin-bottom:22px; }
+  .list .hand { margin:8px 10px 14px; }
   .hand .hhead { display:flex; align-items:baseline; padding:11px 18px; border-bottom:1px solid var(--line2);
     font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--text3); }
   .hand .hhead button { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3); letter-spacing:.05em; }
@@ -393,27 +419,20 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .hic { font-family:var(--mono); text-align:center; }
   .hatom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
 
-  /* ---- runs: sidebar + detail ---- */
-  .runs { display:grid; grid-template-columns:300px 1fr; flex:1; min-height:0; }
+  /* ---- the triaged list + detail split ---- */
+  .runs { display:grid; grid-template-columns:340px 1fr; flex:1; min-height:0; }
   .list { border-right:1px solid var(--line); overflow-y:auto; background:var(--inset); padding:8px 0 20px; }
   .lgroup { padding:14px 16px 6px; font-family:var(--mono); font-size:10px; letter-spacing:.14em;
     text-transform:uppercase; color:var(--text3); display:flex; }
   .lgroup em { font-style:normal; margin-left:auto; }
-  .ws { margin:1px 8px; padding:9px 10px; border-radius:var(--r-card); cursor:pointer;
-    display:grid; grid-template-columns:1fr auto; gap:8px; align-items:start; border:1px solid transparent; }
-  .ws:hover { background:var(--surface2); }
-  .ws.sel { background:var(--surface); border-color:var(--line); box-shadow:var(--shadow-sm); }
-  .ws .t { font-size:12.5px; font-weight:500; line-height:1.4;
-    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-  .ws.attn .t { font-weight:650; }
-  .ws .meta { font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:3px;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:230px; }
   .dot { width:7px; height:7px; border-radius:50%; margin-top:5px; }
-  .dot.amber { background:var(--amber); } .dot.jade { background:var(--jade); } .dot.grey { background:var(--text3); }
 
   .detail { overflow:hidden; display:flex; flex-direction:column; background:var(--bg); min-width:0; }
-  .dhead { padding:18px 26px 0; background:var(--surface); border-bottom:1px solid var(--line); flex:none; }
-  .dhead h2 { margin:0 0 9px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35; }
+  .dhead { position:relative; padding:18px 26px 0; background:var(--surface); border-bottom:1px solid var(--line); flex:none; }
+  .dclose { position:absolute; top:14px; right:16px; font-size:13px; color:var(--text3);
+    padding:4px 9px; border-radius:var(--r-control); }
+  .dclose:hover { color:var(--text); background:var(--surface2); }
+  .dhead h2 { margin:0 0 9px; padding-right:36px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35; }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:var(--r-panel);
     border:1px solid var(--line); color:var(--text2); background:var(--surface2);
@@ -577,6 +596,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     padding:11px 12px; margin-bottom:8px; display:grid; grid-template-columns:26px 1fr; gap:10px;
     cursor:pointer; box-shadow:var(--shadow-sm); transition:border-color .12s, box-shadow .12s; }
   .acard:hover { border-color:var(--text3); box-shadow:var(--shadow-md); }
+  .acard.sel { border-color:var(--green); }
+  .acard:focus-visible { outline:none; border-color:var(--green); }
   /* A grid item defaults to min-width:auto, so the nowrap branch slug inside forced
      the card to its full text width — which widened the column, which pushed the
      fourth column off the right edge of the board entirely. */

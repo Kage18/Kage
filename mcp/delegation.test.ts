@@ -653,6 +653,20 @@ test("a live process is not reported as dropped", () => {
   assert.equal(view.ownership, "working");
 });
 
+test("a stopped run needs a human — it cannot make progress by itself", () => {
+  // Mapped to "working" for months. The three-door UI hid it: the inbox never
+  // listed a stopped run (not needs_you), the run list filed it under Working, and
+  // the board filed it under Lost — three surfaces, three stories. The unified
+  // work surface put all three side by side and exposed the contradiction.
+  const project = tempGitProject({ testCommand: "true" });
+  const run = createRun(project, { intent: "halted mid-flight", type: "chore", agent: "claude" });
+  transitionRun(project, run.id, "briefed", "kernel");
+  transitionRun(project, run.id, "dispatched", "kernel");
+  transitionRun(project, run.id, "running", "kernel");
+  transitionRun(project, run.id, "stopped", "user");
+  assert.equal(readRun(project, run.id).ownership, "needs_you");
+});
+
 // --- the ledger cursor must not lose events -------------------------------------
 
 test("same-millisecond events survive the cursor, and truncation is reported", () => {

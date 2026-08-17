@@ -9,17 +9,24 @@
 // becomes a real newline inside a client string literal and kills the entire script
 // at parse time. The "emitted client script is syntactically valid" test guards this.
 //
-// Design contract (v7 — the room is the front door):
-//   - IDE shape: title bar · content · status bar. Four views: Room (1, default),
-//     Inbox (2), Runs (3), Board (4). "n" still opens the fast-path dispatch modal —
+// Design contract (v8 — one work surface):
+//   - IDE shape: title bar · content · status bar. Three views: Room (1, default),
+//     Work (2), Memory (3). "n" still opens the fast-path dispatch modal —
 //     AO's board offers both "Orchestrator" and "+ New task" side by side, and that
 //     split earns its keep: talking is how trust gets built, a modal is for when you
 //     already know exactly what you want.
 //   - The room is a conversation, not a queue. You land in it on open. It talks to
 //     the SAME manager `kage room` launches interactively (askManager, one MCP
 //     surface, one constitution) — dispatch, judgment and reporting all happen by
-//     talking, not by filling a form. Inbox/Runs/Board are the manager's own
-//     bookkeeping: what it dispatched, verified, and is waiting on you for.
+//     talking, not by filling a form.
+//   - Work is ONE surface, not three doors. Inbox/Runs/Board used to show the same
+//     ~25 runs in three arrangements with different powers each (merge here, steer
+//     there, look-only over there) — incoherent IA the user had to memorize. Now:
+//     a triaged list (Asks you → Needs a decision → Ready → Working → Done) beside
+//     the run's detail, with a List⇄Board layout toggle. Powers (answer, merge,
+//     reject, steer) attach to the RUN and are reachable from every arrangement;
+//     the board opens the same detail as a slide-over. Selection is a real model:
+//     j/k/arrows traverse, Enter focuses the row's primary action, focus is visible.
 //   - Quiet grammar everywhere else: a row is a name plus atoms; state is
 //     color+glyph, never a sentence; one loud element per screen; dim the prefix,
 //     brighten the payload.
@@ -60,10 +67,8 @@ ${APP_STYLES}
   <span class="proj" id="proj"></span>
   <div class="seg">
     <button class="on" data-view="room" id="m-room">Room<span class="k">1</span></button>
-    <button data-view="inbox" id="m-inbox">Inbox<span class="k">2</span></button>
-    <button data-view="runs" id="m-runs">Runs<span class="k">3</span></button>
-    <button data-view="board" id="m-board">Board<span class="k">4</span></button>
-    <button data-view="memory" id="m-memory">Memory<span class="k">5</span></button>
+    <button data-view="work" id="m-work">Work<span class="k">2</span></button>
+    <button data-view="memory" id="m-memory">Memory<span class="k">3</span></button>
   </div>
   <button class="iconbtn" id="m-new">New run</button>
   <button class="iconbtn" id="m-theme" title="light / dark / follow the system">◐</button>
@@ -106,22 +111,21 @@ ${APP_STYLES}
     </div>
     <div id="room-term-pane"><div id="room-term"></div></div>
   </div>
-  <div class="view" id="v-inbox">
-    <div class="inbox-scroll"><div class="inbox-col">
-      <div class="card hand" id="handover" style="display:none"></div>
-      <div class="seclabel">Decisions<span class="n" id="dcount"></span></div>
-      <div id="inbox-rows"></div>
-      <div class="quiet" id="inbox-quiet"></div>
-    </div></div>
-  </div>
-  <div class="view" id="v-runs">
-    <div class="runs">
-      <div class="list" id="run-list"></div>
-      <div class="detail" id="run-detail"></div>
+  <div class="view" id="v-work">
+    <div class="workbar">
+      <span class="wsum" id="work-sum"></span>
+      <div class="wlayout">
+        <button class="on" id="wl-list" title="a triaged list beside the run's detail">List</button>
+        <button id="wl-board" title="the same runs, the same powers, as columns">Board</button>
+      </div>
     </div>
-  </div>
-  <div class="view" id="v-board">
-    <div class="board-scroll"><div class="board" id="board-cols"></div></div>
+    <div class="workmain">
+      <div class="runs" id="work-split">
+        <div class="list"><div class="card hand" id="handover" style="display:none"></div><div id="run-list"></div></div>
+        <div class="detail" id="run-detail"></div>
+      </div>
+      <div class="board-scroll" id="work-board"><div class="board" id="board-cols"></div></div>
+    </div>
   </div>
   <div class="view" id="v-memory">
     <div class="mem-scroll"><div class="mem-col">

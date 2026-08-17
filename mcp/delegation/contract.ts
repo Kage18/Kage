@@ -461,7 +461,14 @@ export type Ownership = "working" | "needs_you" | "done";
 export function ownership(task: TaskRecord): Ownership {
   const shown = displayState(task);
   if (shown === "merged" || shown === "rejected") return "done";
-  if (shown === "ready" || shown === "blocked" || shown === "failed" || shown === "dropped") return "needs_you";
+  // "stopped" belongs here too: a stopped run cannot make progress by itself — a
+  // human must resume or reject it. It was mapped to "working" for months and the
+  // three-door UI hid the contradiction (the inbox never listed it, the run list
+  // filed it under Working, the board filed it under Lost); the unified work
+  // surface showed all three stories at once and exposed it.
+  if (shown === "ready" || shown === "blocked" || shown === "failed" || shown === "dropped" || shown === "stopped") {
+    return "needs_you";
+  }
   return "working";
 }
 

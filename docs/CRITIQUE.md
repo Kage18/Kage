@@ -91,9 +91,17 @@ A designed proof-of-work: verdict stamp, checks as a ledger with commands and ex
 codes, diff/blast/cost lines, ratified learnings. The thing neither competitor has,
 made screenshot-worthy. Trust as UI.
 
-**D. One work surface.** *(proposed)*
-Collapse Inbox/Runs/Board into one triaged surface with a layout toggle. Powers stop
-depending on which door you entered. Bigger than a session; scheduled next.
+**D. One work surface.** *(built)*
+Inbox/Runs/Board collapsed into Work: a triaged list (Asks you → Needs a decision →
+Ready → Working → Done) beside the run's detail, with a List⇄Board toggle. Powers
+attach to the run — answer, merge, reject, steer all work from both arrangements;
+the board opens the same detail as a slide-over. Brought the selection model with it
+(defect 4, partially): j/k/arrows traverse, Enter lands on the run's primary action,
+rows are focusable with visible focus. Collapsing the doors immediately exposed two
+latent bugs the split had been hiding: `stopped` runs were owned by nobody (the inbox
+never listed them, Runs filed them under Working, Board under Lost — three stories,
+one glance apart), and the daemon was re-indexing the entire repo every ~4 seconds
+forever, because the index loop watched its own output. Both fixed the same day.
 
 **E. Pre-flight blast radius.** *(proposed)*
 At dispatch, before any diff exists: "briefs like this touched retry.ts — 12
