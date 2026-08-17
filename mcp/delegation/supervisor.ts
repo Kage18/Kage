@@ -8,7 +8,7 @@
 //
 // It is a separate process from the daemon on purpose: a daemon restart — crash, upgrade,
 // `daemon stop` — must never kill a 45-minute agent mid-edit.
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { createServer, type Socket } from "node:net";
@@ -17,6 +17,7 @@ import { dirname, join, resolve } from "node:path";
 import { adapterByName } from "./adapters/index.js";
 import {
   usageFrom, sessionIdFrom, waitingSignal } from "./adapters/cli-agent.js";
+import type { Adapter } from "./adapters/types.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
 import {
@@ -99,8 +100,12 @@ interface SupervisorState {
 /**
  * Runs the whole life of one run, in this process, until the agent finishes.
  * Returns when verification is written and the run has left `running`.
+ *
+ * `adapterOverride` exists for tests: superviseRun otherwise resolves the adapter from
+ * the task's stored agent name, but a stub with a scripted spawnLive is how the
+ * blocked → tell → claim loop gets exercised without a real coding-agent CLI installed.
  */
-export async function superviseRun(projectDir: string, runId: string): Promise<void> {
+export async function superviseRun(projectDir: string, runId: string, adapterOverride?: Adapter): Promise<void> {
   const task = readRun(projectDir, runId);
   const plan = compileBrief(projectDir, task.intent, task.type);
   const dir = runDir(projectDir, runId);
@@ -119,38 +124,22 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
   }
 
   const brief = existsSync(join(dir, "brief.md")) ? readBrief(projectDir, runId) : renderBrief(task, plan);
-  const adapter = adapterByName(task.agent);
+  const adapter = adapterOverride ?? adapterByName(task.agent);
   const state: SupervisorState = { finalMessage: "", stopped: false };
 
-  // The agent, with stdin held open for its whole life.
-  // NOTE: with `--input-format stream-json` the prompt does NOT come from `-p` — the
-  // agent reads it as a user message on stdin. Passing `-p` here made the agent sit
-  // silently waiting for input, and the run only moved when a steer arrived and
-  // accidentally became its prompt. Found live; the brief is written below instead.
-  const args = [
-    ...(task.agent_session_id ? ["--session-id", task.agent_session_id] : []),
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--permission-mode",
-    "acceptEdits",
-  ];
-  // Only `claude` has the stream-json stdin protocol this supervisor holds open for
-  // live steering. Earlier this branch spawned a `node -e process.exit(0)` placeholder
-  // for every other agent — real, awaited work only ever happened through the
-  // IN-PROCESS dispatch path (dispatch.ts's executeRun). Any run started through the
-  // web app or `POST /runs` (which always detaches) got a verdict built from that
-  // placeholder's empty stdout: an untouched worktree, a canned "agent skipped the
-  // fence" statement, and generic checks passing trivially against a zero-line diff —
-  // VERIFIED 3/3 for work that never happened. Found while checking the app's live
-  // Follow view actually had something to render. Non-claude agents now run for real,
-  // through the exact same Adapter.run() the in-process path already trusted.
-  const usesLiveStdinProtocol = adapter.name === "claude";
-  const child: ChildProcess | null = usesLiveStdinProtocol
-    ? spawn("claude", args, { cwd: workspace, stdio: ["pipe", "pipe", "pipe"] })
+  // The agent, with stdin held open for its whole life — only an adapter that offers
+  // spawnLive supports this (today: claude). Earlier this branch spawned a
+  // `node -e process.exit(0)` placeholder for every other agent — real, awaited work
+  // only ever happened through the IN-PROCESS dispatch path (dispatch.ts's
+  // executeRun). Any run started through the web app or `POST /runs` (which always
+  // detaches) got a verdict built from that placeholder's empty stdout: an untouched
+  // worktree, a canned "agent skipped the fence" statement, and generic checks passing
+  // trivially against a zero-line diff — VERIFIED 3/3 for work that never happened.
+  // Found while checking the app's live Follow view actually had something to render.
+  // Non-live adapters now run for real, through the exact same Adapter.run() the
+  // in-process path already trusted.
+  const child: ChildProcess | null = adapter.spawnLive
+    ? adapter.spawnLive({ workDir: workspace, sessionId: task.agent_session_id })
     : null;
 
   if (child) {
@@ -234,6 +223,16 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
     // `tell`: a message the agent receives at its next tool-result boundary. Report the
     // WRITE result — a false return means the buffer is full and it is not delivered.
     const wrote = child?.stdin?.write(userMessageFrame(op.message)) ?? false;
+    // Blocked is a WAITING state, not an exit: the child stayed alive holding stdin
+    // open specifically so this write could land in the SAME session, rather than a
+    // later `kage retry` starting a fresh one that discards the agent's context. This
+    // is the only path that resumes a blocked run — queued/auto steers never do.
+    if (wrote && readRun(projectDir, runId).state === "blocked") {
+      transitionRun(projectDir, runId, "running", "user", `answered: ${op.message.slice(0, 80)}`);
+      state.waiting = undefined;
+      patchRun(projectDir, runId, { waiting_on: undefined });
+      log({ kind: "resumed", label: "answered — the same session continues" });
+    }
     return { ok: wrote, delivered: wrote, detail: wrote ? "delivered to the live agent" : "agent stdin is not writable" };
   }
 
@@ -275,15 +274,26 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
             if (typeof parsed.result === "string" && parsed.result.trim()) state.finalMessage = parsed.result;
             // Holding stdin open is what makes a run steerable — but it also means the
             // agent waits for more input instead of exiting, so process death can never be
-            // the "turn is over" signal. The `result` event is. Close stdin on it, and the
-            // agent shuts down cleanly into verification. (Found live: a finished run sat
-            // in `running` forever with its work already done.)
+            // the "turn is over" signal. The `result` event is what ends a TURN. Whether it
+            // ends the SUPERVISION depends on what the turn actually reported: a claim
+            // closes stdin so the agent shuts down cleanly into verification, but a block
+            // must NOT — the whole point of holding stdin open is that a blocked turn stays
+            // a live, answerable session instead of a process a later steer has to restart
+            // from scratch (found live: a finished blocked turn closed stdin same as a
+            // claim, killing the very session `kage tell` needed to answer).
             if (parsed.type === "result" && !state.stopped) {
-              log({ kind: "turn_complete", label: "agent finished its turn" });
-              try {
-                child.stdin?.end();
-              } catch {
-                // If stdin is already gone the close handler still fires.
+              const fence = parseReportFence(state.finalMessage);
+              if (fence?.kind === "blocked" || (!fence && state.waiting)) {
+                const note = fence?.question ?? fence?.need ?? state.waiting?.detail ?? "blocked without a stated question";
+                if (readRun(projectDir, runId).state === "running") transitionRun(projectDir, runId, "blocked", "kernel", note);
+                log({ kind: "turn_complete", label: `agent is blocked, waiting for a tell: ${note}` });
+              } else {
+                log({ kind: "turn_complete", label: "agent finished its turn" });
+                try {
+                  child.stdin?.end();
+                } catch {
+                  // If stdin is already gone the close handler still fires.
+                }
               }
             }
           } catch {
@@ -359,8 +369,15 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
 
   const fence = parseReportFence(state.finalMessage);
   if (fence?.kind === "blocked" || state.waiting) {
-    const note = fence?.question ?? fence?.need ?? state.waiting?.detail ?? "blocked without a stated question";
-    transitionRun(projectDir, runId, "blocked", "kernel", note);
+    // The live-child branch above already transitions to `blocked` the moment the fence
+    // appears, without ending the run — so by the time execution reaches here (the child
+    // died some other way while still waiting, e.g. crashed rather than being told or
+    // stopped) the run is very likely blocked already. Re-transitioning into the same
+    // state is an illegal jump; only act if something upstream has not already said so.
+    if (readRun(projectDir, runId).state !== "blocked") {
+      const note = fence?.question ?? fence?.need ?? state.waiting?.detail ?? "blocked without a stated question";
+      transitionRun(projectDir, runId, "blocked", "kernel", note);
+    }
     return;
   }
 
