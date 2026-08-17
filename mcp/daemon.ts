@@ -12,7 +12,6 @@ import {
   capture,
   deleteContextSlot,
   distillSession,
-  indexProject,
   kageDependencyPath,
   kageContributors,
   kageContextSlots,
@@ -666,8 +665,10 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
   mkdirSync(daemonDir(projectDir), { recursive: true });
   const token = provisionDaemonToken(projectDir);
-  indexProject(projectDir);
-  let lastIndexedAt = new Date().toISOString();
+  // last_indexed_at is stamped when an index CHILD completes (below) — never at
+  // boot, which would claim an index that has not run yet. A fresh daemon carries
+  // the previous run's timestamp forward until its own first index lands.
+  let lastIndexedAt = readDaemonStatus(projectDir)?.last_indexed_at ?? "";
   const status: DaemonStatus = {
     ok: true,
     project_dir: projectDir,
@@ -683,23 +684,69 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   let watcher: FSWatcher | null = null;
   let refreshTimer: NodeJS.Timeout | null = null;
-  const refreshIndex = () => {
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      try {
-        indexProject(projectDir);
+  // Indexing runs in a DETACHED CHILD, never in this process. Two reasons, both
+  // measured on this repo:
+  //   1. indexProject blocks the serving thread — the parallel structural build
+  //      parks the main thread in Atomics.wait, so a request landing mid-index
+  //      stalls for seconds. Same law as the viewer reports below.
+  //   2. It used to run in-process on a watcher whose exclusion list only covered
+  //      .agent_memory/indexes|code_graph|graph. indexProject also writes
+  //      .agent_memory/structural/** and this function writes daemon/status.json —
+  //      both re-fired the watcher: index → write → event → index, every ~4
+  //      seconds, forever. Two long-lived daemons burned ~24 CPU-hours each (and
+  //      spawned 8 TypeScript-booting workers per cycle) before last_indexed_at
+  //      was caught advancing on an idle repo.
+  // One child at a time; events during a run coalesce into one follow-up run.
+  let indexChild: ReturnType<typeof spawn> | null = null;
+  let indexAgain = false;
+  const runIndexChild = () => {
+    if (indexChild) {
+      indexAgain = true;
+      return;
+    }
+    try {
+      indexChild = spawn(process.execPath, [__filename.replace(/daemon\.js$/, "cli.js"), "index", "--project", projectDir], {
+        detached: true,
+        stdio: "ignore",
+      });
+    } catch {
+      indexChild = null;
+      return;
+    }
+    indexChild.unref();
+    indexChild.on("exit", (code) => {
+      indexChild = null;
+      if (code === 0) {
         lastIndexedAt = new Date().toISOString();
         status.last_indexed_at = lastIndexedAt;
-        writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
-      } catch {
-        // Keep the daemon alive; doctor/status surfaces stale indexes separately.
+        try {
+          writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
+        } catch {
+          // status file is advisory; the indexes themselves landed
+        }
       }
-    }, 350);
+      if (indexAgain) {
+        indexAgain = false;
+        runIndexChild();
+      }
+    });
+  };
+  const refreshIndex = () => {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    // 3s, not 350ms: source events arrive in bursts (builds, checkouts, saves), and
+    // every fire costs a full child index. The freshness a user can perceive is
+    // "current by the time I look", not sub-second.
+    refreshTimer = setTimeout(runIndexChild, 3000);
+    refreshTimer.unref?.();
   };
   try {
     watcher = watch(projectDir, { recursive: true }, (_event, filename) => {
       const file = String(filename ?? "");
-      if (!file || file.includes("node_modules") || file.includes(".git") || file.includes(".agent_memory/indexes") || file.includes(".agent_memory/code_graph") || file.includes(".agent_memory/graph")) return;
+      // .agent_memory is excluded WHOLESALE: everything under it is Kage's own
+      // output (structural indexes, run ledgers, daemon status, reports). Watching
+      // any of it means the index loop can feed itself — and run ledgers change on
+      // every agent event, which re-indexed the whole repo mid-run.
+      if (!file || file.includes("node_modules") || file.includes(".git") || file.includes(".agent_memory")) return;
       refreshIndex();
     });
     status.index_watch = true;
@@ -708,6 +755,9 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     status.index_watch = false;
     writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   }
+  // The boot index goes through the same child path — a daemon on a large repo
+  // used to block its own listen() for the whole first index.
+  runIndexChild();
 
   const guardContext = { allowedOrigins: loopbackOrigins(restPort), token };
   const delegationFeed = createDelegationFeed(projectDir);
