@@ -34,7 +34,49 @@ function argValue(flag) {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-const projectDir = resolve(argValue("--project") || process.env.KAGE_PROJECT || process.cwd());
+function lastProjectPath() {
+  return join(app.getPath("userData"), "last-project.json");
+}
+
+/**
+ * A Finder/Spotlight launch has no useful cwd — Electron reports it as "/" — so cwd
+ * cannot tell us which project to open. Remembering the last project that actually
+ * loaded lets a second launch find it anyway (same pattern as
+ * windowStatePath/savedWindowState below).
+ */
+function rememberedProjectDir() {
+  try {
+    const state = JSON.parse(readFileSync(lastProjectPath(), "utf8"));
+    if (state && typeof state.projectDir === "string" && existsSync(state.projectDir)) return state.projectDir;
+  } catch {
+    // No remembered project yet, or a torn file: fall through.
+  }
+  return null;
+}
+
+function rememberProjectDir(dir) {
+  try {
+    writeFileSync(lastProjectPath(), JSON.stringify({ projectDir: dir }));
+  } catch {
+    // Losing the remembered project is not worth interrupting.
+  }
+}
+
+/**
+ * --project, then KAGE_PROJECT, then the process cwd — except a cwd of "/" is what a
+ * Finder/Spotlight launch reports, never an actual project, so that case falls through
+ * instead of being trusted. Last resort: whichever project last loaded successfully.
+ */
+function resolveProjectDir() {
+  const fromArg = argValue("--project");
+  if (fromArg) return resolve(fromArg);
+  if (process.env.KAGE_PROJECT) return resolve(process.env.KAGE_PROJECT);
+  const cwd = process.cwd();
+  if (cwd && cwd !== "/") return resolve(cwd);
+  return rememberedProjectDir();
+}
+
+let projectDir = null;
 
 /**
  * Find the Kage CLI.
@@ -56,6 +98,27 @@ function resolveCli() {
     // Fall through to a bare name and let the spawn error say so plainly.
   }
   return { command: "kage", args: [], viaNode: false };
+}
+
+/**
+ * resolveCli() finds the global `kage` binary THROUGH a login shell, precisely
+ * because a Finder-launched app inherits almost none of the user's PATH — no
+ * /opt/homebrew/bin, no nvm shims. But `kage`'s shebang is `#!/usr/bin/env node`, so
+ * running it needs that same PATH at spawn time too, not just at lookup time —
+ * without it the child fails with "env: node: No such file or directory". Cached
+ * because ensureDaemon can run more than once per launch and a login shell is not
+ * free to spawn.
+ */
+let cachedLoginShellPath;
+function loginShellPath() {
+  if (cachedLoginShellPath !== undefined) return cachedLoginShellPath;
+  try {
+    const shellBin = process.env.SHELL || "/bin/zsh";
+    cachedLoginShellPath = execFileSync(shellBin, ["-lic", "echo $PATH"], { encoding: "utf8" }).trim() || process.env.PATH;
+  } catch {
+    cachedLoginShellPath = process.env.PATH;
+  }
+  return cachedLoginShellPath;
 }
 
 /**
@@ -105,7 +168,9 @@ function ensureDaemon() {
       {
         encoding: "utf8",
         timeout: 60_000,
-        env: cli.viaNode ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" } : process.env,
+        env: cli.viaNode
+          ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
+          : { ...process.env, PATH: loginShellPath() },
       },
       (error, stdout, stderr) => {
         if (error) return reject(new Error(String(stderr || error.message).trim()));
@@ -304,10 +369,19 @@ function buildMenu() {
 async function openAppInWindow() {
   if (!win || win.isDestroyed()) return;
   win.loadURL(splashUrl("Starting…"));
+  if (!projectDir) {
+    win.loadURL(
+      splashUrl(
+        "Kage could not start.\n\nNo project is known yet. Open Kage once from a terminal with `kage app`, or launch it with:\nopen -a Kage --args --project <dir>",
+      ),
+    );
+    return;
+  }
   try {
     // Try the cheap check first; fall back to the CLI only when it cannot answer.
     const url = (await existingDaemonUrl()) || (await ensureDaemon());
     if (win && !win.isDestroyed()) win.loadURL(url);
+    rememberProjectDir(projectDir);
   } catch (error) {
     // A failure belongs IN the window, where the user can read it — exiting the app
     // silently was indistinguishable from a crash.
@@ -318,6 +392,7 @@ async function openAppInWindow() {
 }
 
 app.whenReady().then(async () => {
+  projectDir = resolveProjectDir();
   applyDockIcon();
   buildMenu();
   // Window FIRST, daemon second. The old order blocked on a synchronous 4.3s call and
