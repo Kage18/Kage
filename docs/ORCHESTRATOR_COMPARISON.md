@@ -134,7 +134,36 @@ Each of these is a design rule in Kage because someone else paid for it:
 
 ---
 
-## 5. Honest gaps
+## 5. Experience ratings — honest ones
+
+Capability marks above are checkable facts. Experience quality is a different axis,
+and the honest ranking there is **Conductor > AO > Kage**, clearly, not narrowly:
+
+| Experience | AO | Conductor | Kage |
+|---|---|---|---|
+| Watching a live agent | 3.5 | **5** | 3.5 — readable, not refined; no collapse/summary or syntax colour |
+| Controlling mid-run | 3.5 | **4.5** | 3.5 — honest delivery, bare surface; no queue editing |
+| Notifications | 3.5 | **5** | 3.5 — full ladder, untuned; suppression window-level not per-run |
+| Review & merge UX | 3 | **4.5** | 3.5 — unique data (blast/cost/receipt), primitive viewer |
+| Visual polish | 4 | **5** | 3 — correct brand for days, not releases |
+| Usability | 4 | **4.5** | 2.5 — zero real-user hours; no onboarding |
+| Speed | 4 est. | 4.5 est. | **4.5 measured** — 0.3s window, ~1ms routes |
+
+Why Kage's scores are this low despite the feature list: a feature existing and a
+feature being polished are different claims. Conductor has 189 releases of paper-cut
+fixes and AO has 9.4k stars of users filing them; Kage has one builder driving it for
+days — and every deep hands-on pass this branch found bugs the previous pass had
+called verified, which is evidence the tail is not empty. The capability lead
+(verification, memory, graph, honesty) is architectural; the experience gap is
+mileage. Mileage is buyable with users; the architecture is not patchable in a
+sprint. Both statements are true and neither excuses the other.
+
+What "polish" concretely means that Kage lacks today: diff syntax highlighting,
+side-by-side view and a file tree; transcript collapse/expand with summaries; queue
+editing; per-run notification suppression; a first-run tour; an accessibility pass;
+and the hundred paper cuts only real users find.
+
+## 5b. Honest gaps
 
 - **No PR/CI integration or tracker intake.** AO's feedback-loop engine is its strongest
   idea and we have not built it (deliberate — see KAGE_NOT_COPYING.md for the terms).
