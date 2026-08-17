@@ -81,7 +81,10 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     transition:background .12s ease, border-color .12s ease, color .12s ease, opacity .12s ease; }
   .view.on { animation:viewin .16s ease both; }
   @keyframes viewin { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
-  .turn { animation:turnin .18s ease both; }
+  /* Only a turn painted for the first time gets the entry animation — every
+     existing turn used to replay it on every rebuild, which read as continuous
+     shimmer rather than a chat settling in. */
+  .turn.turn-new { animation:turnin .18s ease both; }
   @keyframes turnin { from { opacity:0; transform:translateY(4px) } to { opacity:1; transform:none } }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
@@ -309,6 +312,19 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .turn.you .bubble2 { color:var(--text2); max-width:68ch;
     border-left:2px solid var(--green); padding-left:14px; }
   .turn.kage .bubble2 { color:var(--text); max-width:68ch; }
+  /* Kage speaks markdown — a blank line is a paragraph break, inline code gets the
+     mono/code treatment already used everywhere else in the app. */
+  .turn-para + .turn-para { margin-top:.85em; }
+  .turn-code { font-family:var(--mono); font-size:.92em; color:var(--code);
+    background:var(--inset); padding:1px 5px; border-radius:5px; }
+  /* The kernel's redaction guard says "read the card, not the summary" — this is
+     that card. Kernel facts only: state, intent, claim summary, cost. */
+  .turn-runcard { display:flex; gap:10px; align-items:flex-start; margin-top:6px;
+    padding:10px 12px; border:1px solid var(--line); border-radius:var(--r-card);
+    background:var(--surface2); cursor:pointer; max-width:68ch; }
+  .turn-runcard:hover { border-color:var(--seal); }
+  .turn-runcard-mid { display:flex; flex-direction:column; gap:5px; min-width:0; }
+  .turn-runcard-intent { font-size:12.5px; color:var(--text2); }
   /* A turn boundary with elapsed time, the way AO closes a stretch of work. */
   .turnbreak { display:flex; align-items:center; gap:12px; padding:2px 0 0; opacity:.55; }
   .turnbreak .rule { flex:1; height:1px; background:var(--line2); }

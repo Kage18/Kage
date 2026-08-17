@@ -296,6 +296,15 @@ test("the emitted client script is syntactically valid JavaScript", () => {
   assert.doesNotThrow(() => new Function(script));
 });
 
+test("the client script never assigns innerHTML — DOM nodes only, never string HTML", () => {
+  // The room now renders markdown (bold, inline code) straight from manager text.
+  // innerHTML would turn that into live HTML at the first "<" a manager ever wrote;
+  // the renderer must build every node by hand instead.
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  assert.ok(!script.includes("innerHTML"), "the client script must never use innerHTML");
+});
+
 test("the app HTML is self-contained, carries the token, and never leaks the placeholder", () => {
   const html = delegationAppHtml("tok-abc123");
   assert.ok(html.startsWith("<!doctype html>"));
