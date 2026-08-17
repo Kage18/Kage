@@ -373,6 +373,13 @@ function turnDispatched(turn) {
 // arrival is trustworthy — after a reload there's no way to know which old turn
 // caused which old run.
 var roomLinkedRuns = {};
+// How many turns have ever been painted, and a cheap fingerprint of what was last
+// painted — see renderRoom for why both exist (defect: continuous shimmer).
+var roomPaintedCount = 0;
+var roomSignature = "";
+// A literal backtick would terminate this outer template literal, so inline code
+// spans are found by splitting on the character value instead of writing one.
+var BACKTICK = String.fromCharCode(96);
 
 // What is running right now, shown in the Room. It answers the question the Room
 // could not: you asked Kage to do something, an agent is doing it — where is it?
@@ -408,11 +415,107 @@ function renderLiveRail() {
   }
 }
 
+// The typing indicator is the one thing an in-flight SSE delta is allowed to touch
+// directly — split out so the delta handler never has to call renderRoom (that was
+// the whole-column rebuild that shimmered on every streamed token).
+function updateRoomTyping() {
+  var typingEl = document.getElementById("room-typing");
+  var lastDelta = state.roomStreaming.length ? state.roomStreaming[state.roomStreaming.length - 1] : null;
+  typingEl.style.display = state.room.busy ? "flex" : "none";
+  document.getElementById("room-typing-text").textContent =
+    lastDelta ? (lastDelta.kind === "tool" ? toolLabel(lastDelta.text) + "…" : lastDelta.text.slice(0, 60)) : "thinking";
+}
+
+// Kage speaks markdown; the room rendered it as literal asterisks and backticks.
+// This is a tiny SAFE renderer for kage turns only — bold segments and inline code —
+// built from real DOM nodes, never from HTML strings, by splitting the string and
+// appending each piece as its own node.
+function appendMarkdownInline(container, text) {
+  text.split(BACKTICK).forEach(function (codePart, i) {
+    if (i % 2 === 1) {
+      if (codePart.length) container.appendChild(h("code", "turn-code", codePart));
+      return;
+    }
+    codePart.split("**").forEach(function (part, j) {
+      if (!part.length) return;
+      if (j % 2 === 1) container.appendChild(h("strong", null, part));
+      else container.appendChild(document.createTextNode(part));
+    });
+  });
+}
+function renderTurnBubble(text) {
+  var bubble = h("div", "bubble2");
+  var paras = String(text || "").split("\\n\\n").filter(function (p) { return p.length > 0; });
+  (paras.length ? paras : [""]).forEach(function (para) {
+    var p = h("div", "turn-para");
+    appendMarkdownInline(p, para);
+    bubble.appendChild(p);
+  });
+  return bubble;
+}
+
+// The kernel's redaction guard tells you to read the card, not the summary — this
+// finds which run(s) a kage turn is talking about so that card can exist. Run ids
+// are slugs (hyphens are part of the id, not a delimiter), so tokenizing splits on
+// whitespace and punctuation only, never on a regex.
+function tokenizeText(text) {
+  var delims = [" ", "\\n", "\\t", ",", ".", ";", ":", "!", "?", "(", ")", "\\"", "'", "[", "]", "{", "}", "<", ">"];
+  var tokens = [String(text || "")];
+  delims.forEach(function (d) {
+    var next = [];
+    tokens.forEach(function (t) { next = next.concat(t.split(d)); });
+    tokens = next;
+  });
+  return tokens.filter(function (t) { return t.length > 0; });
+}
+function runsMentionedIn(text) {
+  var byId = {};
+  state.runs.forEach(function (r) { byId[r.id] = r; });
+  var seen = {};
+  var found = [];
+  tokenizeText(text).forEach(function (t) {
+    if (byId[t] && !seen[t]) { seen[t] = true; found.push(byId[t]); }
+  });
+  return found;
+}
+// Compact inline run card: kernel facts only — state, intent, claim summary, cost.
+// Never re-decided here, only rendered, same as every other run surface.
+function turnRunCard(run) {
+  var card = h("div", "turn-runcard");
+  var g = glyphFor(run);
+  card.appendChild(h("span", "glyph " + g[1], g[0]));
+  var mid = h("div", "turn-runcard-mid");
+  var chips = h("div", "chips");
+  chips.appendChild(h("span", "chip state-" + run.display_state, run.display_state));
+  var cost = costLabel(run);
+  if (cost) chips.appendChild(h("span", "chip", cost));
+  mid.appendChild(chips);
+  mid.appendChild(h("div", "turn-runcard-intent", run.intent));
+  if (run.claim_summary) mid.appendChild(h("div", "atom", run.claim_summary));
+  card.appendChild(mid);
+  card.onclick = function () { openRun(run.id); };
+  return card;
+}
+
 function renderRoom() {
+  var turns = state.room.turns || [];
+  var last = turns.length ? turns[turns.length - 1] : null;
+  var linkedCount = Object.keys(roomLinkedRuns).length;
+  // A cheap fingerprint of what would be painted. refreshRoom polls every 15s and
+  // refresh() every 30s, and neither implies the transcript actually changed — every
+  // rebuild replayed the .turn entry animation on every existing turn, so the whole
+  // thread shimmered continuously. Skip the rebuild entirely when nothing moved.
+  var signature = turns.length + "|" + (last ? last.text.length : 0) + "|" +
+    (state.room.busy ? "1" : "0") + "|" + linkedCount;
+
+  updateRoomTyping();
+  document.getElementById("room-send").disabled = state.room.busy;
+  if (signature === roomSignature) return;
+  roomSignature = signature;
+
   var scroll = document.querySelector("#v-room .room-scroll");
   var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   var turnsEl = document.getElementById("room-turns");
-  var turns = state.room.turns || [];
   document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
   turnsEl.textContent = "";
   turns.forEach(function (turn, index) {
@@ -425,11 +528,13 @@ function renderRoom() {
       brk.appendChild(h("span", "label", prev.at ? "done · " + ago(prev.at) : "done"));
       turnsEl.appendChild(brk);
     }
-    var wrap = h("div", "turn " + turn.role);
+    // The entry animation is for turns arriving right now — replaying it on turns
+    // that were already on screen is exactly what made the thread shimmer.
+    var wrap = h("div", "turn " + turn.role + (index >= roomPaintedCount ? " turn-new" : ""));
     // Say who is speaking. Alignment alone carried it before, which meant a transcript
     // you had to decode rather than read.
     wrap.appendChild(h("div", "who", turn.role === "you" ? "You" : "Kage"));
-    wrap.appendChild(h("div", "bubble2", turn.text));
+    wrap.appendChild(turn.role === "kage" ? renderTurnBubble(turn.text) : h("div", "bubble2", turn.text));
     if (turn.role === "kage" && turn.tools && turn.tools.length) {
       var used = turn.tools.map(toolLabel);
       var uniq = used.filter(function (t, i) { return used.indexOf(t) === i; });
@@ -452,17 +557,14 @@ function renderRoom() {
       opener.onclick = function () { openRun(linked.id); };
       wrap.appendChild(opener);
     }
+    // The redaction guard above dangled without this: it says "read the card", and
+    // until now the room rendered no card at all.
+    if (turn.role === "kage") {
+      runsMentionedIn(turn.text).forEach(function (run) { wrap.appendChild(turnRunCard(run)); });
+    }
     turnsEl.appendChild(wrap);
   });
-
-  var typingEl = document.getElementById("room-typing");
-  var lastDelta = state.roomStreaming.length ? state.roomStreaming[state.roomStreaming.length - 1] : null;
-  typingEl.style.display = state.room.busy ? "flex" : "none";
-  document.getElementById("room-typing-text").textContent =
-    lastDelta ? (lastDelta.kind === "tool" ? toolLabel(lastDelta.text) + "…" : lastDelta.text.slice(0, 60)) : "thinking";
-
-  var sendBtn = document.getElementById("room-send");
-  sendBtn.disabled = state.room.busy;
+  roomPaintedCount = turns.length;
 
   if (scroll && (wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
 }
@@ -737,6 +839,11 @@ function switchThread(key) {
   state.room = { turns: [], busy: false };
   state.roomStreaming = [];
   state.threadBusy[key] = false;
+  // The painted-count and signature belong to whichever thread's turns were last
+  // rendered — carrying them over would either skip a real rebuild (stale signature
+  // coincidentally matching) or paint the new thread's turns as "already seen".
+  roomPaintedCount = 0;
+  roomSignature = "";
   if (term) term.reset();
   renderThreads();
   renderRoom();
@@ -2243,9 +2350,12 @@ function connect() {
       return;
     }
     if (payload.kind === "you" || payload.kind === "final") { refreshRoom(); return; }
+    // A delta is a notification about what is being typed, not a change to the
+    // transcript — the transcript only changes once refreshRoom reads the real turns
+    // back. Rebuilding the whole turn column per token is what caused the shimmer.
     state.room.busy = true;
     state.roomStreaming.push(payload);
-    renderRoom();
+    updateRoomTyping();
   });
   // The pty's raw bytes, written straight into xterm — this channel is the ONE place
   // in the whole app that is deliberately NOT structured. Everything claude code
