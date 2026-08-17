@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher, chmodSync } from "node:fs";
 import { spawn } from "node:child_process";
+import type { AddressInfo } from "node:net";
 import { extname, join, normalize, resolve } from "node:path";
 import {
   benchmarkCodingMemoryQuality,
@@ -661,7 +662,11 @@ export function stopDaemon(projectDir: string): { ok: boolean; message: string; 
 
 export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number } = {}): Promise<void> {
   const host = options.host ?? DEFAULT_HOST;
-  const restPort = options.restPort ?? DEFAULT_REST_PORT;
+  const requestedRestPort = options.restPort ?? DEFAULT_REST_PORT;
+  // Reassigned once listen() confirms the real bound port — requesting port 0 asks the
+  // OS for a free one, and everything below (status.json, the guard, the warm-up
+  // fetches, the printed URL) must use what actually got bound, not what was asked for.
+  let restPort = requestedRestPort;
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
   mkdirSync(daemonDir(projectDir), { recursive: true });
   const token = provisionDaemonToken(projectDir);
@@ -950,7 +955,26 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
+  await new Promise<void>((resolve, reject) => {
+    // An explicit nonzero port that is already busy must fail loudly, not silently
+    // move — only a fresh `once` listener here, removed the moment listen settles, so
+    // a LATER runtime error on the server still crashes the process as before.
+    server.once("error", reject);
+    server.listen(requestedRestPort, host, () => {
+      server.removeListener("error", reject);
+      const address = server.address();
+      if (address && typeof address === "object") {
+        restPort = (address as AddressInfo).port;
+      }
+      // The requested port (possibly 0) is not the truth once bound — rewrite the
+      // status file and the guard's allowed origins with the port that is actually
+      // listening, since ensureAppDaemon polls status.json for it.
+      status.rest_port = restPort;
+      guardContext.allowedOrigins = loopbackOrigins(restPort);
+      writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
+      resolve();
+    });
+  });
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
 
   // Persist death on a heartbeat. reapRun existed with no callers, so dead runs held

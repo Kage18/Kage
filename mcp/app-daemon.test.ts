@@ -97,6 +97,16 @@ test("a stale status file pointing at a dead pid starts a fresh daemon", async (
   assert.equal(spawns.length, 1, "a dead pid must not stop the app from starting");
 });
 
+test("no explicit port means an ephemeral one is requested, never DEFAULT_APP_PORT", async () => {
+  const dir = project();
+  const spawns: string[][] = [];
+  // No `port` in options — this is exactly the project-switching call: a new project's
+  // daemon must never ask for the same fixed port the CURRENT daemon already holds.
+  await ensureAppDaemon(dir, { startupTimeoutMs: 200, spawnFn: (_command, args) => spawns.push(args) }).catch(() => {});
+  assert.equal(spawns.length, 1);
+  assert.match(spawns[0].join(" "), /daemon start --project .* --port 0$/, "a fresh daemon with no requested port must ask the OS for one");
+});
+
 test("when the daemon never comes up, the error says how to see why", async () => {
   const dir = project();
   await assert.rejects(
