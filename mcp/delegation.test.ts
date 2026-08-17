@@ -486,6 +486,40 @@ test("rejecting a run captures why as negative_result memory", async () => {
   assert.match(negative, /x-kage-type: "negative_result"/);
 });
 
+test("a stopped run can be rejected — it has no live agent process either", () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const run = createRun(project, { intent: "abandoned approach", type: "chore", agent: "stub" });
+  transitionRun(project, run.id, "briefed", "kernel");
+  transitionRun(project, run.id, "dispatched", "kernel");
+  transitionRun(project, run.id, "running", "kernel");
+  patchRun(project, run.id, { agent_pid: process.pid });
+  transitionRun(project, run.id, "stopped", "user");
+
+  const rejected = rejectRun(project, run.id, "stopped it partway through; the approach was wrong anyway");
+  assert.equal(rejected.ok, true);
+  assert.equal(rejected.captured, true);
+  assert.equal(readRun(project, run.id).state, "rejected");
+
+  const packets = readdirSync(packetsDir(project)).map((name) => readFileSync(join(packetsDir(project), name), "utf8"));
+  const negative = packets.find((content) => content.includes("Rejected approach") && content.includes(run.id));
+  assert.ok(negative, "the rejection reason for the stopped run should become a packet");
+});
+
+test("a running run still refuses rejection, naming its actual state", () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const run = createRun(project, { intent: "still in flight", type: "chore", agent: "stub" });
+  transitionRun(project, run.id, "briefed", "kernel");
+  transitionRun(project, run.id, "dispatched", "kernel");
+  transitionRun(project, run.id, "running", "kernel");
+  patchRun(project, run.id, { agent_pid: process.pid });
+
+  const rejected = rejectRun(project, run.id, "changed my mind");
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.captured, false);
+  assert.match(rejected.message, /running/);
+  assert.equal(readRun(project, run.id).state, "running");
+});
+
 // --- the spine: concurrency, reaping, live control ------------------------------
 
 test("the concurrency gate lives at the kernel so every surface obeys one limit", () => {

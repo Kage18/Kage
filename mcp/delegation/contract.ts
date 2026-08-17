@@ -38,7 +38,9 @@ const LEGAL_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   running: ["verifying", "blocked", "stopped", "failed"],
   verifying: ["ready", "failed"],
   blocked: ["running", "stopped", "failed"],
-  stopped: ["running", "failed"],
+  // A stopped run has no live process either — resume it, or reject it and keep why
+  // as memory, same as a failed one.
+  stopped: ["running", "failed", "rejected"],
   ready: ["merged", "rejected"],
   merged: [],
   rejected: [],
