@@ -47,6 +47,7 @@ import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writ
 import { forgetProject, rememberProject } from "./projects.js";
 import { ensureAppDaemon } from "./app-daemon.js";
 import { readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
+import { blastRadiusFor, type BlastRadius } from "./blast-radius.js";
 import { attachRoomPty, dispatchRoomPtySupervisor, isRoomPtyLive, retirePtyRoom, retireStructuredRoom, type RoomPtyAttachment } from "./room-pty.js";
 import {
   DEFAULT_SESSION,
@@ -454,7 +455,7 @@ function queueRoomTurn(
 function withActivity(
   projectDir: string,
   run: RunView,
-): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string } {
+): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string; blast?: BlastRadius } {
   // A run awaiting a decision carries the one fact needed to make it: how much
   // changed, and whether the kernel's checks passed. Without it the inbox could only
   // repeat the intent back, so every decision meant opening the run to find out.
@@ -465,7 +466,15 @@ function withActivity(
       const files = claim.diff?.files ?? 0;
       const lines = claim.diff?.lines ?? 0;
       const change = files ? `${files} file${files === 1 ? "" : "s"} · ${lines} line${lines === 1 ? "" : "s"}` : "no changes";
-      return { ...run, claim_summary: `${change} · ${passed}/${claim.checks.length} checks` };
+      // The code graph's one sentence at the decision point: how load-bearing is what
+      // changed? Omitted entirely when the index or the claim's paths are missing —
+      // "0 dependents" invented from a missing index would reassure falsely.
+      const blast = blastRadiusFor(projectDir, claim.diff?.paths ?? []);
+      return {
+        ...run,
+        claim_summary: `${change} · ${passed}/${claim.checks.length} checks`,
+        ...(blast ? { blast } : {}),
+      };
     }
   }
   const inFlight = run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "verifying";

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildClaim,
   createRun,
   listRuns,
   liveState,
@@ -1010,4 +1011,26 @@ test("delegation gitignore entries are appended exactly once", async () => {
   const ignore = readFileSync(join(project, ".gitignore"), "utf8");
   assert.equal(ignore.split(".agent_memory/runs/").length - 1, 1);
   assert.equal(ignore.split(".agent_memory/worktrees/").length - 1, 1);
+});
+
+test("every claim is assembled by buildClaim — hand-rolled claims drift", () => {
+  // The supervisor (detached runs, the path real users hit) and dispatch (foreground)
+  // each assembled ClaimRecord by hand, and they drifted: diff paths landed in one and
+  // not the other, so blast radius silently never worked for real runs while every
+  // test of the foreground path passed. The builder is the fix; this keeps it the
+  // only assembly point.
+  const { readFileSync } = require("node:fs") as typeof import("node:fs");
+  const { join } = require("node:path") as typeof import("node:path");
+  for (const file of ["dispatch.ts", "supervisor.ts"]) {
+    const source = readFileSync(join(__dirname, "..", "delegation", file), "utf8");
+    assert.ok(!/schema_version:\s*RUN_SCHEMA_VERSION,\s*\n\s*run_id/.test(source),
+      `${file} assembles a ClaimRecord by hand — use buildClaim so schema changes reach every path`);
+    assert.ok(source.includes("buildClaim("), `${file} must build claims through buildClaim`);
+  }
+  // And the builder itself must keep the paths — the field the drift dropped.
+  const claim = buildClaim({
+    runId: "r1", statement: "s", checks: [], fence: null,
+    diff: { files: 1, lines: 2, paths: ["a.ts"] },
+  });
+  assert.deepEqual(claim.diff.paths, ["a.ts"]);
 });

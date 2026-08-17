@@ -120,7 +120,8 @@ export interface ClaimRecord {
   // pending memory packet ids when merge-ratification lands (build step 5).
   learnings: string[];
   protocol_ok: boolean;
-  diff: { files: number; lines: number };
+  /** paths is optional only because claims written before it existed lack it. */
+  diff: { files: number; lines: number; paths?: string[] };
   created_at: string;
 }
 
@@ -543,6 +544,33 @@ export function writeBrief(projectDir: string, runId: string, content: string): 
 
 export function readBrief(projectDir: string, runId: string): string {
   return readFileSync(briefPath(projectDir, runId), "utf8");
+}
+
+/**
+ * The ONE place a ClaimRecord is assembled. dispatch.ts (foreground runs) and
+ * supervisor.ts (detached runs — the path real users hit) each hand-rolled this
+ * object, and they drifted: a schema addition landed in one and not the other, so
+ * every detached run silently lacked the new field while every test that exercised
+ * the foreground path passed. If the claim grows a field, it grows here.
+ */
+export function buildClaim(input: {
+  runId: string;
+  statement: string;
+  checks: ClaimRecord["checks"];
+  fence: { unsure?: string[]; learned?: string[] } | null;
+  diff: { files: number; lines: number; paths: string[] };
+}): ClaimRecord {
+  return {
+    schema_version: RUN_SCHEMA_VERSION,
+    run_id: input.runId,
+    statement: input.statement,
+    checks: input.checks,
+    unsure: input.fence?.unsure ?? [],
+    learnings: input.fence?.learned ?? [],
+    protocol_ok: Boolean(input.fence),
+    diff: { files: input.diff.files, lines: input.diff.lines, paths: input.diff.paths },
+    created_at: new Date().toISOString(),
+  };
 }
 
 export function writeClaim(projectDir: string, runId: string, claim: ClaimRecord): void {

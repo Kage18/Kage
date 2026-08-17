@@ -19,6 +19,7 @@ import { sessionIdFrom, waitingSignal } from "./adapters/cli-agent.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
 import {
+  buildClaim,
   CLAIM_PROTOCOL_VERSION,
   type ClaimRecord,
   RUN_SCHEMA_VERSION,
@@ -349,17 +350,7 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
   transitionRun(projectDir, runId, "verifying", "kernel");
   const statement = fence?.statement ?? `work delivered — see diff (agent skipped the ${CLAIM_PROTOCOL_VERSION} fence)`;
   const verification = verifyRun(projectDir, runId, workspace, plan.checks, `${statement}\n${(fence?.learned ?? []).join("\n")}`);
-  const claim: ClaimRecord = {
-    schema_version: RUN_SCHEMA_VERSION,
-    run_id: runId,
-    statement,
-    checks: verification.checks,
-    unsure: fence?.unsure ?? [],
-    learnings: fence?.learned ?? [],
-    protocol_ok: Boolean(fence),
-    diff: { files: verification.diff.files, lines: verification.diff.lines },
-    created_at: new Date().toISOString(),
-  };
+  const claim: ClaimRecord = buildClaim({ runId, statement, checks: verification.checks, fence, diff: verification.diff });
   writeFileSync(join(dir, "claim.json"), `${JSON.stringify(claim, null, 2)}\n`, "utf8");
 
   if (workspaceKind === "worktree") {

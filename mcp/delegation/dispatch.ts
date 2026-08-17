@@ -24,6 +24,7 @@ import {
   runWorkDir,
   transitionRun,
   writeBrief,
+  buildClaim,
   writeClaim,
 } from "./contract.js";
 import { dirtyPaths, hasCommits, isGitRepo } from "./git.js";
@@ -208,17 +209,7 @@ export async function executeRun(
     (event) => line?.update(event),
   );
 
-  const claim: ClaimRecord = {
-    schema_version: RUN_SCHEMA_VERSION,
-    run_id: runId,
-    statement,
-    checks: verification.checks,
-    unsure: fence?.unsure ?? [],
-    learnings: fence?.learned ?? [],
-    protocol_ok: Boolean(fence),
-    diff: { files: verification.diff.files, lines: verification.diff.lines },
-    created_at: new Date().toISOString(),
-  };
+  const claim: ClaimRecord = buildClaim({ runId, statement, checks: verification.checks, fence, diff: verification.diff });
   writeClaim(projectDir, runId, claim);
 
   // Learnings ride the branch as pending packets so they are reviewed with the code.
