@@ -145,6 +145,7 @@ ${APP_STYLES}
     <div class="packet">
       <div class="ph"><h3 id="packet-title"></h3><button class="btn" id="packet-close">Close</button></div>
       <div class="pbody" id="packet-body"></div>
+      <div class="pfly" id="packet-flywheel"></div>
       <div class="pfoot">
         <span class="pf-label">Is this still true?</span>
         <button class="btn" data-fb="helpful">Helpful</button>

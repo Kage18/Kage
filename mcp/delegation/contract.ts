@@ -90,6 +90,12 @@ export interface TaskRecord {
   agent_session_id?: string;
   /** Last known child pid, so a dead process can never keep claiming to be running. */
   agent_pid?: number;
+  /**
+   * The memory packets the brief carried (post-judgment). One half of the flywheel:
+   * a packet's view can say which runs it was briefed into. Absent on runs dispatched
+   * before this field existed — the surface then says nothing, never guesses.
+   */
+  brief_memory_ids?: string[];
   /** The question the agent is waiting on, in its own words. */
   waiting_on?: { detail: string; needs: string };
   state_history: RunStateChange[];
@@ -334,6 +340,17 @@ export interface CreateRunInput {
   budgets?: Partial<RunBudgets>;
   confidence?: RunConfidence;
   curatedBy?: "manager" | "kernel";
+  briefMemoryIds?: string[];
+}
+
+/**
+ * Tag written onto every packet a run ratifies, linking memory back to the run that
+ * taught it — the other half of the flywheel. Owned here so ratification (writer)
+ * and the memory view (reader) can never drift apart on the format.
+ */
+export const RUN_TAG_PREFIX = "kage-run:";
+export function runTag(runId: string): string {
+  return `${RUN_TAG_PREFIX}${runId}`;
 }
 
 export function createRun(projectDir: string, input: CreateRunInput): RunView {
@@ -355,6 +372,7 @@ export function createRun(projectDir: string, input: CreateRunInput): RunView {
     spend: { usd_est: 0, minutes: 0 },
     confidence: input.confidence ?? { band: "low", basis: "no track record yet" },
     curated_by: input.curatedBy ?? "kernel",
+    ...(input.briefMemoryIds?.length ? { brief_memory_ids: input.briefMemoryIds } : {}),
     state_history: [{ state: "draft", at, by: "kernel" }],
     created_at: at,
     updated_at: at,

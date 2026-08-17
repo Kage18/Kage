@@ -653,10 +653,37 @@ function sendPacketFeedback(id, kind, button) {
     loadMemory();
   }).catch(function () { msg.textContent = "could not record that"; });
 }
+// The flywheel section of a packet: the run that taught it, and the runs its
+// knowledge was briefed into. This is the compounding loop as NAVIGATION — click
+// through to the run, read its receipt, come back. Old runs recorded no edges,
+// so the section simply is not there for them.
+function renderPacketFlywheel(el, out) {
+  el.textContent = "";
+  var born = out.born_from_run;
+  var used = out.used_by_runs || [];
+  if (!born && !used.length) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  function runRow(label, run) {
+    var row = h("div", "flyrow");
+    row.appendChild(h("span", "fk", label));
+    row.appendChild(h("span", "fv", run.intent));
+    var g = glyphFor(run);
+    row.appendChild(h("span", "fs " + g[1], run.display_state));
+    row.onclick = function () {
+      document.getElementById("packet-overlay").classList.remove("on");
+      openRun(run.id);
+    };
+    el.appendChild(row);
+  }
+  if (born) runRow("taught by", born);
+  used.forEach(function (run) { runRow("briefed into", run); });
+}
+
 function openPacket(id) {
   var overlay = document.getElementById("packet-overlay");
   document.getElementById("packet-title").textContent = "Loading…";
   document.getElementById("packet-body").textContent = "";
+  document.getElementById("packet-flywheel").style.display = "none";
   overlay.classList.add("on");
   Array.prototype.forEach.call(overlay.querySelectorAll("[data-fb]"), function (button) {
     button.classList.remove("primary");
@@ -666,6 +693,7 @@ function openPacket(id) {
   api("/memory/" + encodeURIComponent(id)).then(function (out) {
     document.getElementById("packet-title").textContent = out.ok ? out.title : "Not found";
     document.getElementById("packet-body").textContent = out.ok ? out.body : (out.error || "");
+    renderPacketFlywheel(document.getElementById("packet-flywheel"), out.ok ? out : {});
   });
 }
 
@@ -1018,7 +1046,7 @@ window.addEventListener("resize", function () {
 // facts are already available as data (checks[], diff, unsure, learnings), so the GUI
 // composes its own presentation and the CLI keeps its own. One source of truth, two
 // honest renderings — instead of one rendering pretending to work in both places.
-function renderReceipt(bodyOuter, claim, run, verdict) {
+function renderReceipt(bodyOuter, claim, run, verdict, taught) {
   // The receipt is the one artifact neither competitor has — the kernel's proof of
   // work — and it used to render as grey monospace rows, indistinguishable from a
   // debug dump. It is now a designed object: the site's own tokens say terminals
@@ -1109,7 +1137,18 @@ function renderReceipt(bodyOuter, claim, run, verdict) {
     });
   }
 
-  if ((claim.learnings || []).length) {
+  // Once ratified, the learnings ARE packets — show them as the memory they became,
+  // each row a door into the Memory view. Before merge, show what WILL be learned.
+  if ((taught || []).length) {
+    body.appendChild(h("div", "seclabel-sm", "Ratified into memory"));
+    taught.forEach(function (packet) {
+      var row = h("div", "note-row learn taught");
+      row.appendChild(h("span", "ic", "+"));
+      row.appendChild(h("span", "t", packet.title));
+      row.onclick = function () { openPacket(packet.id); };
+      body.appendChild(row);
+    });
+  } else if ((claim.learnings || []).length) {
     body.appendChild(h("div", "seclabel-sm", "Learns on merge"));
     claim.learnings.forEach(function (l) {
       var row = h("div", "note-row learn");
@@ -1180,7 +1219,7 @@ function renderDetail() {
   if (state.tab === "receipt") {
     // Prefer the structured claim; d.receipt (the CLI's text card) is only a fallback
     // for a run whose claim.json could not be parsed.
-    if (d.claim) renderReceipt(body, d.claim, run, d.verdict);
+    if (d.claim) renderReceipt(body, d.claim, run, d.verdict, d.taught);
     else if (d.receipt) body.appendChild(h("div", "rawpane", d.receipt));
     else body.appendChild(h("div", "empty", "No claim yet — the receipt appears when the run finishes."));
   } else if (state.tab === "brief") {

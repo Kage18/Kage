@@ -14,6 +14,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { RUN_TAG_PREFIX, type RunView, listRuns, runTag } from "./contract.js";
+
 function readJson<T>(path: string, fallback: T): T {
   try {
     if (!existsSync(path)) return fallback;
@@ -211,6 +213,60 @@ export function stripPacketChrome(raw: string): string {
   const fence = text.indexOf("## Kage state");
   if (fence >= 0) text = text.slice(0, fence);
   return text.trim();
+}
+
+// ── the flywheel, made visible ────────────────────────────────────────────────
+// Memory and runs already reference each other — a ratified packet carries the
+// run's tag, and a run records the packets its brief carried — but until now
+// neither surface showed the other's half. These two readers close the loop:
+// a packet can name the run that taught it and the runs it was briefed into; a
+// merged run can name the packets it left behind. Runs from before these fields
+// existed simply have no edges, and the surfaces then say nothing.
+
+export interface FlywheelRunRef {
+  id: string;
+  intent: string;
+  display_state: string;
+}
+
+function runRef(run: RunView): FlywheelRunRef {
+  return { id: run.id, intent: run.intent, display_state: run.display_state };
+}
+
+export function packetFlywheel(
+  projectDir: string,
+  id: string,
+): { born_from_run: FlywheelRunRef | null; used_by_runs: FlywheelRunRef[] } {
+  const catalog = readJson<CatalogFile>(join(memoryDir(projectDir), "indexes", "catalog.json"), {});
+  const entry = (catalog.packets ?? []).find((packet) => String(packet.id) === id);
+  const tags = (entry?.tags ?? []).map(String);
+  let runs: RunView[] = [];
+  try {
+    runs = listRuns(projectDir);
+  } catch {
+    runs = [];
+  }
+  const bornTag = tags.find((tag) => tag.startsWith(RUN_TAG_PREFIX));
+  const bornRun = bornTag ? runs.find((run) => run.id === bornTag.slice(RUN_TAG_PREFIX.length)) : undefined;
+  return {
+    born_from_run: bornRun ? runRef(bornRun) : null,
+    used_by_runs: runs.filter((run) => (run.brief_memory_ids ?? []).includes(id)).map(runRef),
+  };
+}
+
+export function packetsTaughtByRun(
+  projectDir: string,
+  runId: string,
+): Array<{ id: string; title: string; status: string }> {
+  const catalog = readJson<CatalogFile>(join(memoryDir(projectDir), "indexes", "catalog.json"), {});
+  const tag = runTag(runId);
+  return (catalog.packets ?? [])
+    .filter((packet) => Array.isArray(packet.tags) && packet.tags.map(String).includes(tag))
+    .map((packet) => ({
+      id: String(packet.id ?? ""),
+      title: String(packet.title ?? "(untitled)"),
+      status: String(packet.status ?? "active"),
+    }));
 }
 
 /**

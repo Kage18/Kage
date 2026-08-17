@@ -12,16 +12,11 @@ import {
   appendRunLedger,
   readClaim,
   readRun,
+  runTag,
   transitionRun,
 } from "./contract.js";
 import { commitIdentityArgs, currentBranch, dirtyPaths, git } from "./git.js";
 import { commitWorktree, removeWorktree, worktreePath } from "./worktree.js";
-
-const RUN_TAG_PREFIX = "kage-run:";
-
-function runTag(runId: string): string {
-  return `${RUN_TAG_PREFIX}${runId}`;
-}
 
 // Rewrite a packet file's status in place, preserving the lossless OKF round-trip.
 function setPacketStatus(path: string, status: "pending" | "approved"): boolean {

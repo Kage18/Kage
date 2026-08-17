@@ -36,6 +36,7 @@ import { dirtyTreeWarning, readSteers } from "./delegation/dispatch.js";
 import { formatElapsed, progressFromStreamEvent } from "./delegation/progress.js";
 import { compileBrief, renderBrief, renderBriefCard } from "./delegation/brief.js";
 import { mergeRun, rejectRun } from "./delegation/ratify.js";
+import { packetFlywheel, packetsTaughtByRun } from "./delegation/memory-view.js";
 import { buildReport, renderReport, roomState } from "./delegation/report.js";
 import { computeTrackRecord, confidenceFor, curationComparison, renderCurationLine } from "./delegation/trackrecord.js";
 import { buildJudgment, readJudgment, renderJudgment } from "./delegation/manager.js";
@@ -651,6 +652,59 @@ test("a live process is not reported as dropped", () => {
   const view = readRun(project, run.id);
   assert.equal(view.display_state, "running");
   assert.equal(view.ownership, "working");
+});
+
+test("THE FLYWHEEL: dispatch records the brief's memories, merge tags what it taught, both directions resolve", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const { capture } = await import("./kernel.js");
+  capture({
+    projectDir: project,
+    title: "Retry helper must stay idempotent",
+    body: "src/retry.ts is called from the payment path; retries must be idempotent.",
+    type: "decision",
+    paths: ["src/retry.ts"],
+  });
+  execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore", env: GIT_ENV });
+  execFileSync("git", ["commit", "-m", "memory"], { cwd: project, stdio: "ignore", env: GIT_ENV });
+
+  // Run 1: its brief carries the seeded memory; its agent reports a learning.
+  const first = await dispatchRun(
+    project,
+    { intent: "make the retry helper idempotent", type: "bugfix" },
+    stubAdapter({
+      editFile: { path: "src/retry.ts", content: "export function retry() { return 1; }\n" },
+      learned: ["The retry helper is now guarded by an idempotency token"],
+    }),
+  );
+  const carriedIn = readRun(project, first.task.id).brief_memory_ids ?? [];
+  assert.ok(carriedIn.length >= 1, "dispatch records which packets the brief carried");
+  assert.equal(readRun(project, first.task.id).display_state, "ready");
+
+  const merge = mergeRun(project, first.task.id);
+  assert.equal(merge.ok, true, merge.message);
+  assert.equal(merge.ratified, 1);
+
+  // Backward edge: the run knows what it taught, and the merge approved it.
+  const taught = packetsTaughtByRun(project, first.task.id);
+  assert.equal(taught.length, 1);
+  assert.match(taught[0].title, /idempotency token/);
+  assert.equal(taught[0].status, "approved");
+
+  // Forward edge: the packet names the run that taught it.
+  const flywheel = packetFlywheel(project, taught[0].id);
+  assert.equal(flywheel.born_from_run?.id, first.task.id);
+
+  // And the loop closes: the NEXT brief carries the ratified learning, and the
+  // packet can name that run too.
+  const second = await dispatchRun(
+    project,
+    { intent: "extend the idempotency token guard on the retry helper", type: "chore" },
+    stubAdapter({}),
+  );
+  const carriedOn = readRun(project, second.task.id).brief_memory_ids ?? [];
+  assert.ok(carriedOn.includes(taught[0].id), "the next brief carries what the merge ratified");
+  const closed = packetFlywheel(project, taught[0].id);
+  assert.ok(closed.used_by_runs.some((run) => run.id === second.task.id), "the packet lists the run it was briefed into");
 });
 
 test("a stopped run needs a human — it cannot make progress by itself", () => {

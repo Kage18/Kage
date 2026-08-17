@@ -15,6 +15,7 @@ import { guardRequest } from "./delegation/guard.js";
 import { RUN_STATES, createRun, patchRun, readRun, runTranscriptPath, transitionRun } from "./delegation/contract.js";
 import { delegationAppHtml } from "./delegation/app-html.js";
 import { dispatchRun } from "./delegation/dispatch.js";
+import { mergeRun } from "./delegation/ratify.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
 import { writeDelegationConfig } from "./delegation/config.js";
 
@@ -452,6 +453,39 @@ test("pre-flight stays silent when memory and the graph have nothing to say", as
     const out = await (await apiFetch(port, `/preflight?intent=${encodeURIComponent("refactor the payment retry pipeline")}`)).json() as { ok: boolean; forecast: unknown };
     assert.equal(out.ok, true);
     assert.equal(out.forecast, null);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("the flywheel rides the API: a merged run lists what it taught, the packet links back", async () => {
+  const project = tempGitProject();
+  const dispatched = await dispatchRun(
+    project,
+    { intent: "leave a lesson behind", type: "chore" },
+    stubAdapter({
+      editFile: { path: "src/note.md", content: "note\n" },
+      learned: ["Notes belong in src, and the build ignores them"],
+    }),
+  );
+  const merge = mergeRun(project, dispatched.task.id);
+  assert.equal(merge.ok, true, merge.message);
+
+  const { server, port, feed } = await startApi(project);
+  try {
+    const detail = await (await apiFetch(port, `/runs/${dispatched.task.id}`)).json() as {
+      taught?: Array<{ id: string; title: string; status: string }>;
+    };
+    assert.ok(detail.taught?.length, "a merged run lists the packets it ratified");
+    assert.equal(detail.taught[0].status, "approved");
+
+    const packet = await (await apiFetch(port, `/memory/${encodeURIComponent(detail.taught[0].id)}`)).json() as {
+      ok: boolean;
+      born_from_run: { id: string } | null;
+    };
+    assert.equal(packet.ok, true);
+    assert.equal(packet.born_from_run?.id, dispatched.task.id, "the packet names the run that taught it");
   } finally {
     feed.close();
     server.close();

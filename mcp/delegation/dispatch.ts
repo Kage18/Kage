@@ -141,6 +141,9 @@ export async function dispatchRun(projectDir: string, options: DispatchOptions, 
     agent: adapter.name,
     confidence: plan.confidence,
     curatedBy: judgment ? "manager" : "kernel",
+    // The flywheel's forward edge: which packets this brief carries (post-judgment,
+    // so a memory the manager dropped is not claimed as briefed).
+    briefMemoryIds: plan.memories.map((memory) => memory.id),
   });
   if (judgment) writeJudgment(projectDir, { ...judgment, run_id: task.id });
   writeBrief(projectDir, task.id, renderBrief(task, plan));

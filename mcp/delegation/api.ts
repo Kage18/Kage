@@ -47,7 +47,7 @@ import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
 import { ensureAppDaemon } from "./app-daemon.js";
-import { readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
+import { packetFlywheel, packetsTaughtByRun, readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
 import { blastRadiusFor, type BlastRadius } from "./blast-radius.js";
 import { attachRoomPty, dispatchRoomPtySupervisor, isRoomPtyLive, retirePtyRoom, retireStructuredRoom, type RoomPtyAttachment } from "./room-pty.js";
 import {
@@ -530,6 +530,10 @@ function runDetail(projectDir: string, runId: string): Record<string, unknown> {
       // A torn claim never breaks the detail view; the receipt tab shows nothing.
     }
   }
+  // The flywheel's backward edge: the packets this run ratified into team memory.
+  // Empty until a merge ratifies something — the surface then says nothing.
+  const taught = packetsTaughtByRun(projectDir, runId);
+  if (taught.length) detail.taught = taught;
   return detail;
 }
 
@@ -596,7 +600,9 @@ export async function handleDelegationRoute(
   if (path.startsWith("/memory/") && method === "GET") {
     const id = decodeURIComponent(path.slice("/memory/".length));
     const packet = readMemoryPacket(projectDir, id);
-    json(res, packet.ok ? 200 : 404, packet);
+    // The flywheel travels with the packet: the run that taught it, the runs its
+    // knowledge was briefed into. Old runs recorded no edges — then there are none.
+    json(res, packet.ok ? 200 : 404, packet.ok ? { ...packet, ...packetFlywheel(projectDir, id) } : packet);
     return true;
   }
 
@@ -926,7 +932,16 @@ export async function handleDelegationRoute(
       // the daemon must never hold a live agent (a daemon restart cannot be allowed to
       // kill a 45-minute run).
       const plan = compileBrief(projectDir, intent, type);
-      const task = createRun(projectDir, { intent, type, agent, confidence: plan.confidence });
+      // briefMemoryIds here too, not only in dispatchRun — this route is the path the
+      // app's ⌘N and ⌘⏎ actually take, and every previous drift in this codebase was
+      // exactly "the fallback path got the field, the live path did not".
+      const task = createRun(projectDir, {
+        intent,
+        type,
+        agent,
+        confidence: plan.confidence,
+        briefMemoryIds: plan.memories.map((memory) => memory.id),
+      });
       writeBrief(projectDir, task.id, renderBrief(task, plan));
       const briefed = transitionRun(projectDir, task.id, "briefed", "kernel");
       const spawned = body.hold === true ? { pid: undefined } : dispatchDetached(projectDir, briefed);

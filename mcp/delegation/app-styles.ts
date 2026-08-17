@@ -242,6 +242,17 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .packet .ph h3 { margin:0; font-family:var(--serif); font-size:17px; font-weight:600; flex:1; letter-spacing:.005em; }
   .packet .pbody { overflow-y:auto; padding:18px 22px 24px; font-size:13.5px; line-height:1.65;
     white-space:pre-wrap; word-break:break-word; color:var(--text2); font-family:var(--mono); }
+  /* The flywheel: which run taught this memory, which briefs carried it onward. */
+  .packet .pfly { display:none; border-top:1px solid var(--line2); padding:10px 20px 12px; }
+  .flyrow { display:grid; grid-template-columns:86px 1fr auto; gap:12px; align-items:baseline;
+    padding:7px 8px; margin:0 -8px; border-radius:var(--r-panel); cursor:pointer; }
+  .flyrow:hover { background:var(--surface2); }
+  .flyrow .fk { font-family:var(--mono); font-size:10px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--text3); }
+  .flyrow .fv { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .flyrow .fs { font-family:var(--mono); font-size:10.5px; }
+  .note-row.taught { cursor:pointer; }
+  .note-row.taught:hover .t { text-decoration:underline; text-underline-offset:3px; }
   .packet .pfoot { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
     padding:13px 20px; border-top:1px solid var(--line); }
   .packet .pf-label { font-size:12px; color:var(--text3); margin-right:2px; }
