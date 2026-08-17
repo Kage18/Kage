@@ -46,6 +46,14 @@ function api(path, opts) {
 }
 
 // --- derived truth (rendered, never re-decided: display_state/ownership come from the kernel)
+function costLabel(run) {
+  if (!run.spend || !run.spend.usd_est) return null;
+  var usd = run.spend.usd_est;
+  var out = usd >= 0.995 ? "$" + usd.toFixed(2) : "$" + usd.toFixed(usd < 0.01 ? 3 : 2).replace(/^\$0/, "$0");
+  if (run.tokens_used) out += " · " + compact(run.tokens_used) + " tok";
+  return out;
+}
+
 function glyphFor(run) {
   var s = run.display_state;
   if (s === "ready") return ["✓", "jade"];
@@ -953,6 +961,14 @@ function renderDetail() {
   chips.appendChild(h("span", "chip", shortBranch(run.branch)));
   chips.appendChild(h("span", "chip", run.agent));
   if (run.confidence) chips.appendChild(h("span", "chip", "confidence " + run.confidence.band));
+  // What this run actually cost, as the agent CLI itself reported — both competitors
+  // show cost; ours only appears when the agent reported real numbers.
+  var cost = costLabel(run);
+  if (cost) {
+    var costChip = h("span", "chip", cost);
+    costChip.title = "cost and tokens reported by the agent CLI";
+    chips.appendChild(costChip);
+  }
   // The code graph's contribution to the merge decision: is the changed code a leaf
   // or load-bearing? Absent entirely when the graph cannot say — never a fake zero.
   if (run.blast) {
@@ -1124,6 +1140,8 @@ function renderBoard() {
       else if (run.display_state === "blocked") arow.appendChild(h("span", "atom amber", "? waiting"));
       else if (run.stale || run.display_state === "failed") arow.appendChild(h("span", "atom hot", "resumable"));
       else if (run.activity) arow.appendChild(h("span", "atom", run.activity.last_label));
+      var cardCost = costLabel(run);
+      if (cardCost) arow.appendChild(h("span", "atom", cardCost.split(" · ")[0]));
       arow.appendChild(h("span", "tm", ago(run.updated_at)));
       mid.appendChild(arow);
       card.appendChild(mid);
@@ -1369,18 +1387,53 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
 // --- notifications: only a run that newly needs you earns one, and never while
 // the app is both visible and focused (the design's suppression law).
 var prevOwnership = {};
+// A short two-note chime — WebAudio, so nothing ships as an asset. Same suppression
+// rule as the toast: silent whenever the window is focused and visible, and off
+// entirely via the palette ("Toggle completion sound") or when notifications are.
+function chime() {
+  try {
+    if (localStorage.getItem("kageSound") === "off") return;
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [[660, 0], [880, 0.12]].forEach(function (note) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.frequency.value = note[0];
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + note[1]);
+      gain.gain.exponentialRampToValueAtTime(0.06, ctx.currentTime + note[1] + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + note[1] + 0.22);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(ctx.currentTime + note[1]);
+      osc.stop(ctx.currentTime + note[1] + 0.25);
+    });
+    setTimeout(function () { ctx.close(); }, 600);
+  } catch (e) {
+    // No audio device, autoplay policy, whatever — sound is never worth an error.
+  }
+}
+function cycleNeedsYou(step) {
+  var waiting = state.runs.filter(function (r) { return r.ownership === "needs_you"; });
+  if (!waiting.length) { flash("nothing needs you"); return; }
+  var at = waiting.findIndex(function (r) { return r.id === state.selected; });
+  var next = waiting[(at + step + waiting.length) % waiting.length];
+  openRun(next.id);
+}
+
 function maybeNotify() {
   var granted = window.Notification && Notification.permission === "granted";
+  var arrived = false;
   state.runs.forEach(function (run) {
     var was = prevOwnership[run.id];
     if (was && was !== "needs_you" && run.ownership === "needs_you" && granted) {
       if (!(document.hasFocus() && document.visibilityState === "visible")) {
+        arrived = true;
         var note = new Notification("Kage — needs you", { body: run.intent, tag: run.id });
         note.onclick = function () { window.focus(); openRun(run.id); };
       }
     }
     prevOwnership[run.id] = run.ownership;
   });
+  if (arrived) chime();
 }
 function bellLabel() {
   var el = document.getElementById("m-bell");
@@ -1600,6 +1653,13 @@ function paletteCommands(query) {
     { grp: "do", name: "Open another project…", run: function () { addProject(); } },
     { grp: "do", name: "Toggle the projects rail", run: function () { toggleRail(); } },
     { grp: "do", name: "New conversation thread", run: function () { setView("room"); newThread(); } },
+    { grp: "do", name: "Next needing you", hint: "⌥L", run: function () { cycleNeedsYou(1); } },
+    { grp: "do", name: "Toggle completion sound", run: function () {
+      var off = localStorage.getItem("kageSound") === "off";
+      localStorage.setItem("kageSound", off ? "on" : "off");
+      flash(off ? "sound on" : "sound off");
+      if (off) chime();
+    } },
   ];
   (state.sessions || []).forEach(function (session) {
     if (session.key === state.session) return;
@@ -1666,6 +1726,13 @@ document.addEventListener("keydown", function (ev) {
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "k") { ev.preventDefault(); showPalette(true); return; }
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "n") { ev.preventDefault(); showOverlay(true); return; }
   if (ev.key === "Escape") { showPalette(false); showOverlay(false); showSettings(false); document.getElementById("notif").classList.remove("on"); return; }
+  // ⌥L / ⌥H: next / previous run needing you, from anywhere — including mid-sentence
+  // (Alt+letter would otherwise insert a symbol into the composer on macOS).
+  if (ev.altKey && (ev.code === "KeyL" || ev.code === "KeyH")) {
+    ev.preventDefault();
+    cycleNeedsYou(ev.code === "KeyL" ? 1 : -1);
+    return;
+  }
   if (typing) {
     if (ev.key === "Enter" && ev.target.id === "intent" && (ev.metaKey || ev.ctrlKey)) dispatchNow();
     return;

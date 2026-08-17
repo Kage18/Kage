@@ -15,10 +15,12 @@ import { createServer, type Socket } from "node:net";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { adapterByName } from "./adapters/index.js";
-import { sessionIdFrom, waitingSignal } from "./adapters/cli-agent.js";
+import {
+  usageFrom, sessionIdFrom, waitingSignal } from "./adapters/cli-agent.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
 import {
+  recordSpend,
   buildClaim,
   CLAIM_PROTOCOL_VERSION,
   type ClaimRecord,
@@ -87,6 +89,7 @@ export function interruptFrame(requestId = "kage-interrupt"): string {
 }
 
 interface SupervisorState {
+  usage?: { usd: number; tokens: number };
   waiting?: { detail: string; needs: string };
   sessionId?: string;
   finalMessage: string;
@@ -251,6 +254,19 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
           }
           const id = sessionIdFrom(line);
           if (id) state.sessionId = id;
+          // THIRD stream consumer, third chance to drop data. Cost capture went into
+          // cli-agent.run first and a real held-stdin run still recorded zero, because
+          // this loop parses the same result event independently. Every consumer of
+          // the agent stream must capture usage, or the one real users hit will not.
+          const turnUsage = usageFrom(line);
+          if (turnUsage) {
+            state.usage = {
+              usd: (state.usage?.usd ?? 0) + turnUsage.usd,
+              tokens: (state.usage?.tokens ?? 0) + turnUsage.tokens,
+            };
+            log({ kind: "usage", usd: turnUsage.usd, tokens: turnUsage.tokens });
+            recordSpend(projectDir, runId, state.usage);
+          }
           const event = progressFromStreamEvent(line);
           if (event) log(event as unknown as Record<string, unknown>);
           else log({ kind: "stdout", text: line });
@@ -302,6 +318,7 @@ export async function superviseRun(projectDir: string, runId: string): Promise<v
         sessionId: task.agent_session_id ?? undefined,
         onStart: (pid) => {
           if (pid) patchRun(projectDir, runId, { agent_pid: pid });
+      recordSpend(projectDir, runId, outcome.usage);
         },
       });
       state.finalMessage = outcome.final_message;

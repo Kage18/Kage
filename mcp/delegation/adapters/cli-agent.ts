@@ -55,6 +55,7 @@ export function cliAgentAdapter(spec: CliAgentSpec): Adapter {
         let pending = "";
         let waiting: { detail: string; needs: string } | undefined;
         let sessionId: string | undefined = input.sessionId ?? input.resumeSessionId;
+        let usage = { usd: 0, tokens: 0 };
         const timer = spec.timeoutMs
           ? setTimeout(() => {
               log({ kind: "timeout", ms: spec.timeoutMs });
@@ -84,6 +85,12 @@ export function cliAgentAdapter(spec: CliAgentSpec): Adapter {
             }
             const id = sessionIdFrom(line);
             if (id) sessionId = id;
+            const turnUsage = usageFrom(line);
+            if (turnUsage) {
+              // A steered run has one result event per turn; the run's spend is their sum.
+              usage = { usd: usage.usd + turnUsage.usd, tokens: usage.tokens + turnUsage.tokens };
+              log({ kind: "usage", usd: turnUsage.usd, tokens: turnUsage.tokens });
+            }
             const event = progressFromStreamEvent(line);
             if (event) {
               log(event as unknown as Record<string, unknown>);
@@ -114,6 +121,7 @@ export function cliAgentAdapter(spec: CliAgentSpec): Adapter {
             final_message: finalMessage,
             ...(waiting ? { waiting } : {}),
             ...(sessionId ? { session_id: sessionId } : {}),
+            ...(usage.usd > 0 || usage.tokens > 0 ? { usage } : {}),
           });
         });
       });
@@ -137,6 +145,43 @@ export function waitingSignal(line: string): { detail: string; needs: string } |
     };
     if (event.subtype !== "post_turn_summary" || event.status_category !== "blocked") return null;
     return { detail: (event.status_detail ?? "waiting on you").trim(), needs: (event.needs_action ?? "").trim() };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cost and tokens from claude's `result` stream event. The run schema has carried a
+ * spend field from day one and it was permanently zero: this line was already being
+ * parsed (for session_id) and the total_cost_usd / usage fields on the SAME OBJECT
+ * were discarded — the diff-paths bug again, in miniature. Returns null unless the
+ * agent actually reported numbers; nothing here estimates.
+ */
+export function usageFrom(line: string): { usd: number; tokens: number } | null {
+  try {
+    const event = JSON.parse(line) as {
+      type?: string;
+      total_cost_usd?: number;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
+    };
+    if (event.type !== "result") return null;
+    const usd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : 0;
+    // ALL token fields, cache included: a run's cost is dominated by cache reads, and
+    // "619 tok" beside "$0.19" reads as a contradiction when the other 60k tokens are
+    // sitting in cache fields. The total should explain the price.
+    const usage = event.usage ?? {};
+    const tokens =
+      (usage.input_tokens ?? 0) +
+      (usage.output_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0);
+    if (usd <= 0 && tokens <= 0) return null;
+    return { usd, tokens };
   } catch {
     return null;
   }

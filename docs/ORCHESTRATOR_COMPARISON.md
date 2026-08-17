@@ -3,7 +3,7 @@
 What the two leading agent orchestrators do, what Kage does, and where Kage deliberately
 differs. Sources: AO source at HEAD `e7b4949` (9.4k★, Apache-2.0), Conductor's public
 docs and 189-entry changelog, Sculptor's history doc, and Claude Code's own agent surface.
-Status marks reflect Kage as of the delegation spine landing.
+Status marks reflect Kage as of the release-prep branch (desktop app, memory view, blast radius, cost meter, notification ladder).
 
 ---
 
@@ -63,11 +63,11 @@ Three deliberate choices:
 
 | Capability | AO | Conductor | Kage |
 |---|---|---|---|
-| Board grouped by who must act | ✅ 4 zones | ✅ 4 groups | ◐ list + `ownership` computed; zones are Phase 2 |
+| Board grouped by who must act | ✅ 4 zones | ✅ 4 groups | ✅ compound columns with split counts; empty columns explain themselves |
 | What the agent is doing *right now* | ◐ (users: "just a pulsing dot") | ✅ | ✅ `editing src/x.ts · 12 actions`, from the live stream |
-| Self-summarizing runs, expand on demand | ✅ | ✅ importance-ranked | ○ Phase 2 |
+| Self-summarizing runs, expand on demand | ✅ | ✅ importance-ranked | ◐ readable live feed with the agent's own summary; no collapse/expand yet |
 | Genuine raw escape hatch | ✅ terminal | ✅ ⌃O | ✅ `raw` tab — unfiltered transcript |
-| Token / context / cost meter | ✅ tokens + context | ✅ live ring + cents | ○ Phase 2 |
+| Token / context / cost meter | ✅ tokens + context | ✅ live ring + cents | ✅ `$0.19 · 209k tok` per run, agent-reported (never estimated); absent when the agent reported nothing |
 | Raw PTY attach | ✅ | — | — **deliberately cut** (timeline only) |
 
 ### Control
@@ -80,16 +80,16 @@ Three deliberate choices:
 | True interrupt without killing | ◐ | ✅ | ✅ `control_request` |
 | Resume after process death | ✅ `--resume` | ✅ | ✅ `--resume`, session id pre-assigned |
 | Delivery honestly reported | ◐ (4 bugs on this) | ◐ | ✅ `delivered / resumed / stored / refused` |
-| Queue as a first-class object | ○ | ✅ edit/reorder | ○ Phase 2 |
+| Queue as a first-class object | ○ | ✅ edit/reorder | ◐ undeliverable messages are `stored` and reported honestly; no queue-editing UI |
 | Concurrency limit | ✅ | ✅ | ✅ enforced at the kernel, so every surface obeys |
 
 ### Notifications & review
 
 | Capability | AO | Conductor | Kage |
 |---|---|---|---|
-| OS toast / dock badge / sounds | ✅ toast+badge, no sound | ✅ all three | ○ Phase 3 (Electron) |
-| Next-needing-attention hotkey | ○ | ✅ ⌥L/⌥H | ○ Phase 3 |
-| Built-in diff review | ◐ punts to GitHub | ✅ | ◐ TUI has it; web viewer is Phase 2 |
+| OS toast / dock badge / sounds | ✅ toast+badge, no sound | ✅ all three | ✅ all three — toast suppressed while focused, chime togglable from the palette |
+| Next-needing-attention hotkey | ○ | ✅ ⌥L/⌥H | ✅ ⌥L/⌥H, works even mid-sentence in the composer |
+| Built-in diff review | ◐ punts to GitHub | ✅ | ✅ Diff tab, tinted rows that survive horizontal scroll |
 | PR / CI state on the card | ✅ | ✅ | ○ deferred |
 | CI failure routed back to the agent | ✅ its best idea | ◐ | ○ deferred |
 
@@ -104,6 +104,9 @@ Three deliberate choices:
 | Rejection reason captured as memory | — | — | ✅ `negative_result` |
 | **Manager judgment recorded and measured** | — | — | ✅ curated vs kernel briefs compared |
 | Manager prose stripped of restated verdicts | — | — | ✅ kernel-side guard |
+| **Blast radius at the merge decision** ("5 files depend on this", from the code graph) | — | — | ✅ prebuilt-index read; chip absent rather than a fake zero when unindexed |
+| Inbox triaged by cost-of-ignoring (asks you → decisions → merges) | ◐ arrival order | ◐ | ✅ |
+| Memory browsable, searchable, correctable in-app | — | — | ✅ helpful / out-of-date / wrong feed recall |
 
 Sculptor built an auto-review layer and **removed it**; AO's `auto_review` is advisory.
 Nobody re-runs the checks. That is the wedge.
@@ -133,13 +136,14 @@ Each of these is a design rule in Kage because someone else paid for it:
 
 ## 5. Honest gaps
 
-- **No board zones, timeline, or context meter yet** — Phase 2.
-- **No OS notifications or hotkey** — Phase 3; the desktop shell is the only thing that
-  genuinely requires a shell.
 - **No PR/CI integration or tracker intake.** AO's feedback-loop engine is its strongest
-  idea and we have not built it.
-- **Two agents supported** (claude, codex) against AO's 26.
-- **Single machine, single repo.**
+  idea and we have not built it (deliberate — see KAGE_NOT_COPYING.md for the terms).
+- **No queue-editing UI.** Undeliverable messages are stored and reported honestly, but
+  cannot be edited or reordered the way Conductor's queue can.
+- **No run self-summary/collapse.** The feed is readable, not compressible.
+- **Two agents supported** (claude, codex) against AO's 26 — held live only where the
+  protocol is verified to support it.
+- **Single machine; multi-project via the rail, one daemon per repo.**
 
 The bet: verification and memory compound, and polish is catchable. A board is a week's
 work; a verified claim is an architecture.

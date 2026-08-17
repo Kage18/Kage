@@ -9,6 +9,7 @@ import type { Adapter } from "./adapters/types.js";
 import { type BriefPlan, compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
 import {
+  recordSpend,
   CLAIM_PROTOCOL_VERSION,
   type ClaimRecord,
   type RunType,
@@ -184,6 +185,7 @@ export async function executeRun(
     sessionId,
     onStart: (pid) => patchRun(projectDir, runId, { agent_pid: pid }),
   });
+  recordSpend(projectDir, runId, outcome.usage);
   patchRun(projectDir, runId, { agent_session_id: outcome.session_id ?? sessionId });
 
   const fence = parseReportFence(outcome.final_message);

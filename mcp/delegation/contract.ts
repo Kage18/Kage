@@ -78,6 +78,8 @@ export interface TaskRecord {
   branch: string;
   budgets: RunBudgets;
   spend: { usd_est: number; minutes: number };
+  /** input+output tokens the agent reported; absent when it reported nothing. */
+  tokens_used?: number;
   confidence: RunConfidence;
   /**
    * Who shaped this brief: a manager agent that curated it, or kernel defaults. Recorded
@@ -386,6 +388,28 @@ export function listRuns(projectDir: string): RunView[] {
 }
 
 /** Merge fields into a run record without touching its state machine. */
+/**
+ * Record what a run actually cost, from the agent CLI's own report. One function,
+ * called by BOTH execution paths (dispatch foreground, supervisor detached), because
+ * the claim assembly drifted the last time each path hand-rolled the same write.
+ * Never estimates: absent usage leaves spend untouched rather than inventing zeros
+ * that read as "measured free".
+ */
+export function recordSpend(
+  projectDir: string,
+  runId: string,
+  usage: { usd: number; tokens: number } | undefined,
+): void {
+  if (!usage || (usage.usd <= 0 && usage.tokens <= 0)) return;
+  const task = readRun(projectDir, runId);
+  const started = task.state_history.find((entry) => entry.state === "running")?.at ?? task.created_at;
+  const minutes = Math.max(0, (Date.now() - new Date(started).getTime()) / 60_000);
+  patchRun(projectDir, runId, {
+    spend: { usd_est: Math.round(usage.usd * 10_000) / 10_000, minutes: Math.round(minutes * 10) / 10 },
+    tokens_used: usage.tokens,
+  });
+}
+
 export function patchRun(projectDir: string, runId: string, patch: Partial<TaskRecord>): RunView {
   const task = { ...readRun(projectDir, runId), ...patch, updated_at: nowIso() };
   atomicWriteJson(join(runDir(projectDir, runId), "task.json"), task);

@@ -22,7 +22,16 @@ export interface AdapterInput {
   onStart?: (pid: number | undefined) => void;
 }
 
+export interface AdapterUsage {
+  /** Cost as the agent CLI itself reported it (claude: total_cost_usd). */
+  usd: number;
+  /** input + output tokens, as reported. */
+  tokens: number;
+}
+
 export interface AdapterOutcome {
+  /** Present only when the agent's own stream reported it — never estimated here. */
+  usage?: AdapterUsage;
   exit_code: number;
   final_message: string;
   /** The agent's own report that it is waiting on a human, straight from its stream. */

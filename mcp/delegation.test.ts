@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  recordSpend,
   buildClaim,
   createRun,
   listRuns,
@@ -1033,4 +1034,41 @@ test("every claim is assembled by buildClaim — hand-rolled claims drift", () =
     diff: { files: 1, lines: 2, paths: ["a.ts"] },
   });
   assert.deepEqual(claim.diff.paths, ["a.ts"]);
+});
+
+test("usageFrom reads cost and tokens only from a genuine result event", () => {
+  const { usageFrom } = require("./delegation/adapters/cli-agent.js") as typeof import("./delegation/adapters/cli-agent.js");
+  // The real shape claude emits.
+  const line = JSON.stringify({
+    type: "result", total_cost_usd: 0.0421,
+    usage: { input_tokens: 800, output_tokens: 640, cache_read_input_tokens: 9000, cache_creation_input_tokens: 2000 },
+  });
+  // Cache tokens count: they dominate the price, and a total that excludes them makes
+  // the cost label read as a contradiction.
+  assert.deepEqual(usageFrom(line), { usd: 0.0421, tokens: 12440 });
+  // Non-result events with usage-looking fields must not count (assistant deltas carry usage too).
+  assert.equal(usageFrom(JSON.stringify({ type: "assistant", usage: { input_tokens: 5 } })), null);
+  // A result that reported nothing is null, not zeros — spend stays untouched.
+  assert.equal(usageFrom(JSON.stringify({ type: "result" })), null);
+  assert.equal(usageFrom("not json"), null);
+});
+
+test("recordSpend writes agent-reported cost to the run, and never invents it", () => {
+  const project = tempProject();
+  const run = createRun(project, { intent: "spend check", type: "chore", agent: "stub" });
+  transitionRun(project, run.id, "briefed", "kernel");
+  transitionRun(project, run.id, "dispatched", "kernel");
+  transitionRun(project, run.id, "running", "kernel");
+
+  recordSpend(project, run.id, { usd: 0.0421, tokens: 12440 });
+  const after = readRun(project, run.id);
+  assert.equal(after.spend.usd_est, 0.0421);
+  assert.equal(after.tokens_used, 12440);
+  assert.ok(after.spend.minutes >= 0);
+
+  // No usage reported → the write must not happen at all.
+  const run2 = createRun(project, { intent: "no usage", type: "chore", agent: "stub" });
+  recordSpend(project, run2.id, undefined);
+  assert.equal(readRun(project, run2.id).spend.usd_est, 0, "the untouched default, not a recorded zero");
+  assert.equal(readRun(project, run2.id).tokens_used, undefined);
 });

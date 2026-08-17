@@ -154,7 +154,7 @@ ${APP_STYLES}
 <div class="status">
   <span class="conn" id="conn" title="live"></span>
   <span id="st-left">connecting…</span>
-  <span class="right"><span id="st-counts"></span><span>press ⌘K for commands · ⌘N for a new run</span></span>
+  <span class="right"><span id="st-counts"></span><span>⌘K commands · ⌘N new run · ⌥L next needing you</span></span>
 </div>
 <div class="overlay" id="settings-overlay">
   <div class="settings">
