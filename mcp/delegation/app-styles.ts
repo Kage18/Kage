@@ -359,6 +359,12 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     box-shadow:var(--shadow-sm); overflow:hidden; }
   .qact { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+  .qanswer { margin-top:9px; }
+  .qanswer input { width:100%; box-sizing:border-box; font:inherit; font-size:13px;
+    padding:8px 12px; border-radius:var(--r-control); border:1px solid color-mix(in srgb, var(--amber) 40%, var(--line));
+    background:var(--inset); color:var(--text); }
+  .qanswer input:focus { outline:none; border-color:var(--amber); }
+  .qanswer input:disabled { opacity:.5; }
   .qbtns { display:flex; gap:6px; }
   .btn.sm { font-size:11.5px; padding:4px 11px; }
   .qrow { display:grid; grid-template-columns:34px 1fr auto; gap:12px; padding:15px 18px 15px 14px;
@@ -452,38 +458,73 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .livepulse { width:6px; height:6px; border-radius:50%; background:var(--jade); display:inline-block;
     animation:pulse2 1.1s ease-in-out infinite; margin-right:7px; vertical-align:1px; }
 
-  /* receipt — rendered from the claim's STRUCTURED data, never from the CLI's
-     terminal-formatted card. Box-drawing characters and evidence paths belong in a
-     terminal; a GUI has rows, weights and colour to say the same things better. */
-  .verdict-head { display:flex; align-items:center; gap:12px; margin-bottom:6px; }
-  .stamp { display:inline-flex; align-items:baseline; gap:8px; padding:8px 15px; border:2px solid var(--jade);
-    border-radius:var(--r-panel); color:var(--jade); font-weight:700; font-size:14px; letter-spacing:.02em;
-    background:color-mix(in srgb, var(--jade) 8%, transparent); }
-  .stamp .count { font-family:var(--mono); font-size:13px; }
-  .stamp.warn { border-color:var(--amber); color:var(--amber); background:color-mix(in srgb, var(--amber) 8%, transparent); }
-  .stamp.bad { border-color:var(--crimson); color:var(--crimson); background:color-mix(in srgb, var(--crimson) 8%, transparent); }
-  .verdict-sub { font-size:12.5px; color:var(--text3); }
-  .claim-statement { font-size:15px; line-height:1.55; color:var(--text); border-left:2px solid var(--line);
-    padding-left:14px; margin:16px 0 20px; max-width:62ch; }
-  .checks { display:flex; flex-direction:column; gap:1px; background:var(--line2); border:1px solid var(--line);
-    border-radius:var(--r-card); overflow:hidden; margin-bottom:18px; }
-  .check { display:grid; grid-template-columns:22px 130px 1fr auto; gap:12px; align-items:baseline;
-    padding:11px 14px; background:var(--surface); font-size:13px; }
-  .check .mark { font-family:var(--mono); font-weight:700; text-align:center; }
-  .check.pass .mark { color:var(--jade); }
+  /* ── the receipt ──────────────────────────────────────────────────────────
+     The kernel's proof of work, and the one artifact AO and Conductor do not have.
+     It is designed as what it is named: a printed receipt. The site's tokens declare
+     terminals "stay dark in both schemes, like a printed receipt" — so this object
+     keeps the dark code ground in BOTH themes, with perforated edges and a rubber
+     stamp. Every number on it is the kernel's, never the agent's. */
+  .paper-receipt { background:var(--code-bg); color:var(--code-text); border-radius:2px;
+    max-width:560px; margin:4px auto 20px; padding:26px 30px 22px; position:relative;
+    box-shadow:var(--shadow-md);
+    /* Perforated top and bottom, cut from the card itself. */
+    -webkit-mask:
+      radial-gradient(circle 5px at 8px 0, transparent 98%, black) top left / 16px 51% repeat-x,
+      radial-gradient(circle 5px at 8px 16px, transparent 98%, black) bottom left / 16px 50% repeat-x;
+    mask:
+      radial-gradient(circle 5px at 8px 0, transparent 98%, black) top left / 16px 51% repeat-x,
+      radial-gradient(circle 5px at 8px 16px, transparent 98%, black) bottom left / 16px 50% repeat-x; }
+  .verdict-head { display:flex; flex-direction:column; align-items:center; gap:7px;
+    margin:6px 0 18px; text-align:center; }
+  .stamp { display:inline-flex; align-items:baseline; gap:10px; padding:9px 20px;
+    border:2.5px double var(--green); border-radius:3px; color:var(--green);
+    font-family:var(--serif); font-weight:700; font-size:19px; letter-spacing:.12em;
+    transform:rotate(-1.5deg); text-transform:uppercase; }
+  .stamp .count { font-family:var(--mono); font-size:13px; letter-spacing:0; align-self:center; }
+  .stamp.warn { border-color:var(--amber); color:var(--amber); }
+  .stamp.bad { border-color:var(--crimson); color:var(--crimson); }
+  .verdict-sub { font-size:11px; color:color-mix(in srgb, var(--code-text) 55%, transparent);
+    font-family:var(--mono); letter-spacing:.04em; }
+  .claim-statement { font-size:14px; line-height:1.6; color:var(--code-text);
+    text-align:center; margin:0 auto 18px; max-width:46ch;
+    border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent);
+    padding-top:16px; }
+  .checks { display:flex; flex-direction:column; margin-bottom:6px;
+    border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent);
+    padding-top:12px; }
+  .check { display:grid; grid-template-columns:20px 120px 1fr auto; gap:10px; align-items:baseline;
+    padding:6px 0; font-size:12.5px; font-family:var(--mono); }
+  .check .mark { font-weight:700; text-align:center; }
+  .check.pass .mark { color:var(--green); }
   .check.fail .mark { color:var(--crimson); }
   .check.skip .mark { color:var(--amber); }
-  .check .name { font-weight:600; }
-  .check .detail { color:var(--text3); font-family:var(--mono); font-size:11.5px;
+  .check .name { font-weight:600; color:var(--code-text); }
+  .check .detail { color:color-mix(in srgb, var(--code-text) 55%, transparent); font-size:11px;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .check .ev { font-family:var(--mono); font-size:10.5px; color:var(--text3); opacity:.75; }
-  .note-row { display:grid; grid-template-columns:20px 1fr; gap:10px; font-size:13.5px; line-height:1.5;
-    padding:7px 0; color:var(--text2); max-width:64ch; }
+  .check .ev { font-size:10.5px; color:color-mix(in srgb, var(--code-text) 55%, transparent); }
+  /* The bill: dotted leaders between the item and its amount, like a till roll. */
+  .rc-fixit { font-family:var(--mono); font-size:11.5px; line-height:1.6; color:var(--amber);
+    border:1px dashed color-mix(in srgb, var(--amber) 45%, transparent); border-radius:3px;
+    padding:9px 12px; margin-bottom:12px; }
+  .rc-fixlink { color:var(--amber); text-decoration:underline; font:inherit; }
+  .rc-totals { border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent);
+    margin-top:10px; padding-top:12px; display:flex; flex-direction:column; gap:6px; }
+  .rc-row { display:flex; align-items:baseline; gap:8px; font-family:var(--mono); font-size:12.5px; }
+  .rc-row .rc-k { color:color-mix(in srgb, var(--code-text) 65%, transparent);
+    text-transform:uppercase; letter-spacing:.08em; font-size:10.5px; }
+  .rc-row .rc-dots { flex:1; border-bottom:1px dotted color-mix(in srgb, var(--code-text) 30%, transparent);
+    transform:translateY(-3px); }
+  .rc-row .rc-v { color:var(--code-text); font-variant-numeric:tabular-nums; }
+  .rc-row.hot .rc-v { color:var(--amber); }
+  .note-row { display:grid; grid-template-columns:20px 1fr; gap:10px; font-size:12.5px; line-height:1.55;
+    padding:5px 0; color:color-mix(in srgb, var(--code-text) 80%, transparent); font-family:var(--mono); }
   .note-row .ic { text-align:center; }
   .note-row.unsure .ic { color:var(--amber); }
-  .note-row.learn .ic { color:var(--seal); }
-  .seclabel-sm { font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--text3); margin:18px 0 8px; }
+  .note-row.learn .ic { color:var(--green); }
+  .paper-receipt .seclabel-sm, .seclabel-sm { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--text3); margin:16px 0 6px; }
+  .paper-receipt .seclabel-sm { color:color-mix(in srgb, var(--code-text) 55%, transparent);
+    border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent); padding-top:12px; margin-top:12px; }
 
   /* diff + raw */
   .codepane { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);

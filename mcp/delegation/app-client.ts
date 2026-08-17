@@ -136,6 +136,29 @@ function renderInbox() {
     // way to take any of them — every row made you leave for Runs to click the same
     // buttons that could have been here.
     var acts = h("div", "qbtns");
+    // The question answers where it is asked. A blocked agent's question IS the row's
+    // content; making the user navigate to a detail view to type a one-line reply is
+    // the inbox refusing to be an inbox. Delivery is reported with the kernel's own
+    // vocabulary, never assumed.
+    if (run.display_state === "blocked") {
+      var answer = h("div", "qanswer");
+      var field = document.createElement("input");
+      field.type = "text";
+      field.placeholder = "Answer the agent…";
+      field.onclick = function (ev) { ev.stopPropagation(); };
+      field.onkeydown = function (ev) {
+        ev.stopPropagation();
+        if (ev.key !== "Enter" || !field.value.trim()) return;
+        var msg = field.value.trim();
+        field.disabled = true;
+        api("/runs/" + run.id + "/tell", { method: "POST", body: { message: msg } }).then(function (out) {
+          flash(out.ok ? "delivery: " + out.delivery : (out.error || "failed"));
+          refresh();
+        });
+      };
+      answer.appendChild(field);
+      mid.appendChild(answer);
+    }
     if (run.display_state === "ready") {
       var merge = h("button", "btn primary sm", "Merge");
       merge.title = "Land the code and ratify what it learned";
@@ -618,6 +641,25 @@ function closeThread(key) {
   });
 }
 
+// ⌘⏎: skip the manager and dispatch this text as a run right now, configured by the
+// pickers below the box — which is what finally makes those pickers REAL controls.
+// Until this existed they were read by nothing on the Room's path: pick "Codex",
+// send, and the manager did whatever it liked. A decorative control teaches the user
+// that the UI's promises are unreliable, which is fatal in a product about trust.
+function dispatchFromComposer() {
+  var input = document.getElementById("room-input");
+  var intent = input.value.trim();
+  if (!intent) return;
+  input.value = "";
+  autoGrow(input);
+  api("/runs", { method: "POST", body: { intent: intent, agent: composerPrefs.agent, type: composerPrefs.type } })
+    .then(function (out) {
+      if (!out.ok) { flash(out.error || "dispatch failed"); input.value = intent; return; }
+      flash("dispatched — watch the rail above");
+      refresh();
+    });
+}
+
 function sendRoomMessage() {
   var input = document.getElementById("room-input");
   var message = input.value.trim();
@@ -641,13 +683,12 @@ function autoGrow(el) {
 // --- composer pickers. Every option states what it DOES, not just what it's called:
 // "Accept edits — file edits apply without asking; commands still prompt" beats a bare
 // label you have to already know. Choices persist per project.
-var composerPrefs = { agent: "claude", type: "chore", mode: "acceptEdits" };
+var composerPrefs = { agent: "claude", type: "chore" };
 try {
   var savedPrefs = JSON.parse(localStorage.getItem("kageComposer") || "{}");
   if (savedPrefs && typeof savedPrefs === "object") {
     composerPrefs.agent = savedPrefs.agent || composerPrefs.agent;
     composerPrefs.type = savedPrefs.type || composerPrefs.type;
-    composerPrefs.mode = savedPrefs.mode || composerPrefs.mode;
   }
 } catch (e) {}
 function savePrefs() { try { localStorage.setItem("kageComposer", JSON.stringify(composerPrefs)); } catch (e) {} }
@@ -667,12 +708,6 @@ var PICKERS = [
       { v: "refactor", n: "Refactor", d: "Behaviour must not change — the diff is the risk." },
       { v: "migration", n: "Migration", d: "Data or schema movement; reversibility is called out." },
       { v: "investigation", n: "Investigation", d: "Find and report, no merge expected." },
-    ] },
-  { key: "mode", head: "Permission — how much it may do unattended",
-    opts: [
-      { v: "acceptEdits", n: "Accept edits", d: "File edits apply without asking. It works in an isolated worktree, never your tree." },
-      { v: "manual", n: "Manual", d: "Prompts before anything it judges dangerous." },
-      { v: "plan", n: "Plan only", d: "Reads and plans, executes nothing. Use to scope work before committing to it." },
     ] },
 ];
 
@@ -872,7 +907,13 @@ function renderRunList() {
 // facts are already available as data (checks[], diff, unsure, learnings), so the GUI
 // composes its own presentation and the CLI keeps its own. One source of truth, two
 // honest renderings — instead of one rendering pretending to work in both places.
-function renderReceipt(body, claim, run, verdict) {
+function renderReceipt(bodyOuter, claim, run, verdict) {
+  // The receipt is the one artifact neither competitor has — the kernel's proof of
+  // work — and it used to render as grey monospace rows, indistinguishable from a
+  // debug dump. It is now a designed object: the site's own tokens say terminals
+  // stay dark in both schemes "like a printed receipt", so the receipt IS one.
+  var body = h("div", "paper-receipt");
+  bodyOuter.appendChild(body);
   var checks = claim.checks || [];
   var passed = checks.filter(function (c) { return c.result === "pass"; });
   // The verdict comes from the KERNEL (claimVerdict, computed where the checks ran).
@@ -897,6 +938,18 @@ function renderReceipt(body, claim, run, verdict) {
 
   if (claim.statement) body.appendChild(h("div", "claim-statement", claim.statement));
 
+  // An unverifiable claim should say HOW to become verifiable, in the receipt itself.
+  // "Nothing was executed" with no next step strands the user; the fix is one setting.
+  var hasCommandCheck = checks.some(function (c) { return c.kind === "command" || c.id === "tests"; });
+  if (!hasCommandCheck) {
+    var fixit = h("div", "rc-fixit");
+    fixit.appendChild(document.createTextNode("No test command is configured, so nothing can be executed to verify claims. Set one in "));
+    var link = h("button", "rc-fixlink", "Settings");
+    link.onclick = function () { showSettings(true); };
+    fixit.appendChild(link);
+    fixit.appendChild(document.createTextNode("."));
+    body.appendChild(fixit);
+  }
   if (checks.length) {
     var list = h("div", "checks");
     checks.forEach(function (c) {
@@ -911,15 +964,29 @@ function renderReceipt(body, claim, run, verdict) {
     body.appendChild(list);
   }
 
-  if (claim.diff) {
-    var budget = run && run.budgets ? "  ·  budget " + run.budgets.diff_lines : "";
-    body.appendChild(h("div", "seclabel-sm", "Change"));
-    var d = h("div", "note-row");
-    d.appendChild(h("span", "ic", "±"));
-    d.appendChild(h("span", "", claim.diff.files + " file" + (claim.diff.files === 1 ? "" : "s") + "  ·  " +
-      claim.diff.lines + " line" + (claim.diff.lines === 1 ? "" : "s") + budget));
-    body.appendChild(d);
+  // The bill: what it touched, what depends on it, what it cost, how long it took.
+  var totals = h("div", "rc-totals");
+  function totalRow(label, value, tone) {
+    if (value === null || value === undefined || value === "") return;
+    var row = h("div", "rc-row" + (tone ? " " + tone : ""));
+    row.appendChild(h("span", "rc-k", label));
+    row.appendChild(h("span", "rc-dots"));
+    row.appendChild(h("span", "rc-v", value));
+    totals.appendChild(row);
   }
+  if (claim.diff) {
+    totalRow("change", claim.diff.files + " file" + (claim.diff.files === 1 ? "" : "s") + " · " +
+      claim.diff.lines + " line" + (claim.diff.lines === 1 ? "" : "s"));
+  }
+  if (run && run.blast) {
+    totalRow("dependents", run.blast.dependents === 0 ? "none" :
+      run.blast.dependents + " file" + (run.blast.dependents === 1 ? "" : "s"),
+      run.blast.dependents >= 5 ? "hot" : "");
+  }
+  var rcost = run ? costLabel(run) : null;
+  if (rcost) totalRow("cost", rcost);
+  if (run && run.spend && run.spend.minutes) totalRow("time", run.spend.minutes + " min");
+  if (totals.children.length) body.appendChild(totals);
 
   if ((claim.unsure || []).length) {
     body.appendChild(h("div", "seclabel-sm", "The agent flagged"));
@@ -1531,6 +1598,10 @@ function dispatchNow() {
 var roomInput = document.getElementById("room-input");
 roomInput.addEventListener("input", function () { autoGrow(roomInput); });
 roomInput.addEventListener("keydown", function (ev) {
+  // Two speeds, measured: a manager turn is ~17s to any response; direct dispatch is
+  // 0.1s. ⏎ keeps the manager for ambiguity ("what should we do about the flaky
+  // tests?"); ⌘⏎ dispatches clear work immediately — no middleman on the front door.
+  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); dispatchFromComposer(); return; }
   if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); sendRoomMessage(); }
 });
 document.getElementById("room-send").onclick = sendRoomMessage;

@@ -101,7 +101,7 @@ ${APP_STYLES}
           <button class="room-send" id="room-send">Send ⏎</button>
         </div>
         <div class="cbar" id="room-cbar"></div>
-        <div class="room-hint">⏎ send · ⇧⏎ newline · dispatch, merges and answers all happen by talking</div>
+        <div class="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now · ⇧⏎ newline</div>
       </div>
     </div>
     <div id="room-term-pane"><div id="room-term"></div></div>
