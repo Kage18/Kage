@@ -459,7 +459,9 @@ function renderTurnBubble(text) {
 // are slugs (hyphens are part of the id, not a delimiter), so tokenizing splits on
 // whitespace and punctuation only, never on a regex.
 function tokenizeText(text) {
-  var delims = [" ", "\\n", "\\t", ",", ".", ";", ":", "!", "?", "(", ")", "\\"", "'", "[", "]", "{", "}", "<", ">"];
+  var delims = [" ", "\\n", "\\t", ",", ".", ";", ":", "!", "?", "(", ")", "\\"", "'", "[", "]", "{", "}", "<", ">", "*"];
+  // Backtick can't appear as a literal in this TS template literal; append it via charCode.
+  delims.push(String.fromCharCode(96));
   var tokens = [String(text || "")];
   delims.forEach(function (d) {
     var next = [];

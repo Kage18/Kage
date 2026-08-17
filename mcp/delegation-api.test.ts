@@ -305,6 +305,15 @@ test("the client script never assigns innerHTML — DOM nodes only, never string
   assert.ok(!script.includes("innerHTML"), "the client script must never use innerHTML");
 });
 
+test("the tokenizer's delimiter list splits on markdown emphasis so run ids inside **bold** are matched", () => {
+  // The manager writes run ids wrapped in **bold** or inline code; tokenizeText must
+  // split on "*" (and on a backtick, appended via charCode since this file can't hold
+  // a literal backtick) or the token never equals a bare run id.
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  assert.ok(script.includes('"<", ">", "*"'), "the delims array must include \"*\" for markdown emphasis");
+});
+
 test("the app HTML is self-contained, carries the token, and never leaks the placeholder", () => {
   const html = delegationAppHtml("tok-abc123");
   assert.ok(html.startsWith("<!doctype html>"));
