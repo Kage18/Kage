@@ -331,6 +331,15 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .room-send { background:var(--seal); color:#fff; border-radius:var(--r-card); padding:7px 14px; font-size:12.5px; font-weight:600; }
   .room-send:disabled { opacity:.45; cursor:default; }
   .room-hint { text-align:center; font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:8px; }
+  /* Pre-flight forecast: risk before the work exists, always labeled a forecast.
+     One quiet line — it informs the dispatch decision, it must not shout over it. */
+  .preflight { display:none; align-items:baseline; gap:12px; flex-wrap:wrap;
+    font-family:var(--mono); font-size:10.5px; color:var(--text3);
+    max-width:720px; margin:8px auto 0; }
+  .modal .preflight { margin:0 18px 10px; max-width:none; }
+  .preflight .pf-hot { color:var(--amber); }
+  .preflight .pf-mem { color:var(--text2); }
+  .preflight .pf-tag { opacity:.6; margin-left:auto; letter-spacing:.08em; text-transform:uppercase; font-size:9.5px; }
   /* composer controls: a row of pickers under the input, each opening a menu whose
      options carry their own one-line explanation. */
   .cbar { display:flex; gap:8px; align-items:center; max-width:720px; margin:8px auto 0; }

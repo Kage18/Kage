@@ -980,11 +980,14 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   // it on the very first thing they do, every time the daemon starts. Paying it here
   // instead moves it into the window where they are already waiting for the app.
   void (async () => {
-    for (const path of ["/health", APP_ROUTE]) {
+    // /preflight is in the list because its first call pays recall's lazy index
+    // load (~1.5s measured); warmed, it answers in ~0.3s — inside the composer's
+    // type-ahead budget.
+    for (const path of ["/health", APP_ROUTE, "/preflight?intent=warm%20the%20recall%20path"]) {
       try {
         const res = await fetch(`http://${host}:${restPort}${path}`, {
           headers: { host: `${host}:${restPort}` },
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(15000),
         });
         // Drain, or the socket stays half-open and the warm-up is only partial.
         await res.arrayBuffer();

@@ -741,6 +741,7 @@ function dispatchFromComposer() {
   if (!intent) return;
   input.value = "";
   autoGrow(input);
+  schedulePreflight("", "room-preflight");
   api("/runs", { method: "POST", body: { intent: intent, agent: composerPrefs.agent, type: composerPrefs.type } })
     .then(function (out) {
       if (!out.ok) { flash(out.error || "dispatch failed"); input.value = intent; return; }
@@ -749,12 +750,66 @@ function dispatchFromComposer() {
     });
 }
 
+// --- pre-flight forecast: risk before the work exists.
+// While you type an intent, the composer asks the kernel what the BRIEF would
+// carry (memory + predicted touch set) and what imports that predicted area —
+// the receipt's blast radius, asked before any diff exists. Rendered as one
+// quiet line and always labeled a forecast; when memory and the graph have
+// nothing to say, the line stays hidden rather than predicting from nothing.
+var preflightTimers = {};
+var preflightSeqs = {};
+function shortPath(path) {
+  var parts = String(path).split("/").filter(Boolean);
+  return parts.length <= 2 ? parts.join("/") : parts.slice(-2).join("/");
+}
+function renderPreflight(el, forecast) {
+  el.textContent = "";
+  if (!forecast) { el.style.display = "none"; return; }
+  var touches = forecast.touches || [];
+  if (touches.length) {
+    var where = touches.slice(0, 2).map(shortPath).join(", ");
+    el.appendChild(h("span", "", "lands near " + where + (touches.length > 2 ? " +" + (touches.length - 2) : "")));
+  }
+  if (forecast.blast && forecast.blast.dependents > 0) {
+    el.appendChild(h("span", forecast.blast.dependents >= 5 ? "pf-hot" : "",
+      forecast.blast.dependents + " file" + (forecast.blast.dependents === 1 ? "" : "s") + " depend on that area"));
+  }
+  if (forecast.memories) {
+    el.appendChild(h("span", "pf-mem",
+      forecast.memories + " " + (forecast.memories === 1 ? "memory" : "memories") + " will ride in the brief"));
+  }
+  if (!el.children.length) { el.style.display = "none"; return; }
+  el.appendChild(h("span", "pf-tag", "forecast"));
+  el.style.display = "flex";
+}
+function schedulePreflight(text, targetId, type) {
+  var el = document.getElementById(targetId);
+  if (!el) return;
+  if (preflightTimers[targetId]) clearTimeout(preflightTimers[targetId]);
+  var trimmed = String(text || "").trim();
+  // A few characters is a keystroke, not an intent.
+  if (trimmed.length < 12) { renderPreflight(el, null); return; }
+  preflightTimers[targetId] = setTimeout(function () {
+    preflightSeqs[targetId] = (preflightSeqs[targetId] || 0) + 1;
+    var seq = preflightSeqs[targetId];
+    fetch("/preflight?intent=" + encodeURIComponent(trimmed) + "&type=" + encodeURIComponent(type || "chore"))
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        // A stale response must never paint over a newer intent's forecast.
+        if (seq !== preflightSeqs[targetId]) return;
+        renderPreflight(el, out && out.ok ? out.forecast : null);
+      })
+      .catch(function () {});
+  }, 450);
+}
+
 function sendRoomMessage() {
   var input = document.getElementById("room-input");
   var message = input.value.trim();
   if (!message || state.room.busy) return;
   input.value = "";
   autoGrow(input);
+  schedulePreflight("", "room-preflight");
   state.room.busy = true;
   state.roomStreaming = [];
   renderRoom();
@@ -827,6 +882,8 @@ function renderComposerBar() {
         savePrefs();
         wrap.classList.remove("open");
         renderComposerBar();
+        // A different run type can change the forecast's confidence basis.
+        schedulePreflight(document.getElementById("room-input").value, "room-preflight", composerPrefs.type);
       };
       menu.appendChild(opt);
     });
@@ -1660,6 +1717,7 @@ function dispatchNow() {
     document.getElementById("dispatch-flash").textContent = out.ok ? "dispatched" : (out.error || "failed");
     if (out.ok) {
       document.getElementById("intent").value = "";
+      schedulePreflight("", "modal-preflight");
       showOverlay(false);
       refresh().then(function () { if (out.run) openRun(out.run.id); });
     }
@@ -1667,7 +1725,16 @@ function dispatchNow() {
 }
 
 var roomInput = document.getElementById("room-input");
-roomInput.addEventListener("input", function () { autoGrow(roomInput); });
+roomInput.addEventListener("input", function () {
+  autoGrow(roomInput);
+  schedulePreflight(roomInput.value, "room-preflight", composerPrefs.type);
+});
+document.getElementById("intent").addEventListener("input", function () {
+  schedulePreflight(this.value, "modal-preflight", document.getElementById("rtype").value);
+});
+document.getElementById("rtype").addEventListener("change", function () {
+  schedulePreflight(document.getElementById("intent").value, "modal-preflight", this.value);
+});
 roomInput.addEventListener("keydown", function (ev) {
   // Two speeds, measured: a manager turn is ~17s to any response; direct dispatch is
   // 0.1s. ⏎ keeps the manager for ambiguity ("what should we do about the flaky

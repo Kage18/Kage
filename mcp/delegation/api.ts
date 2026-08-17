@@ -30,6 +30,7 @@ import {
 } from "./contract.js";
 import { dispatchDetached } from "./dispatch.js";
 import { compileBrief, renderBrief } from "./brief.js";
+import { normalizeRunType, preflightForecast } from "./preflight.js";
 import { steerRun } from "./steer.js";
 import { sendControl } from "./control.js";
 import { mergeRun, rejectRun } from "./ratify.js";
@@ -557,6 +558,17 @@ export async function handleDelegationRoute(
   // analysis functions from a request would be a four-minute mistake.
   if (path === "/memory" && method === "GET") {
     json(res, 200, readMemoryOverview(projectDir));
+    return true;
+  }
+
+  // Pre-flight: risk before the work exists. The forecast is the brief compiler's
+  // own touch prediction plus the imports graph's dependents count — the composer
+  // shows it while you type, labeled as the forecast it is. Null means "nothing
+  // honest to say", and the surface then says nothing.
+  if (path === "/preflight" && method === "GET") {
+    const intent = url.searchParams.get("intent") ?? "";
+    const type = normalizeRunType(url.searchParams.get("type"));
+    json(res, 200, { ok: true, forecast: preflightForecast(projectDir, intent, type) });
     return true;
   }
 

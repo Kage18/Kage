@@ -302,6 +302,7 @@ test("the app HTML is self-contained, carries the token, and never leaks the pla
   assert.ok(!html.includes("__KAGE_TOKEN__"), "the placeholder must be replaced");
   assert.ok(!/https?:\/\/(?!127\.0\.0\.1)/.test(html), "no external hosts — the page must work offline behind the guard");
   for (const view of ["v-room", "v-work", "v-memory"]) assert.ok(html.includes(view), `${view} missing`);
+  assert.ok(html.includes("/preflight?intent="), "the composer asks for a pre-flight forecast while you type");
   // One surface, one power set. Inbox/Runs/Board were three doors into the same runs
   // with different powers each; if a second detail pane (or a resurrected door) ever
   // appears, powers have started depending on the door again.
@@ -398,6 +399,63 @@ test("every CSS class the renderer styles is actually put on an element somewher
   const orphans = [...styled].filter((name) => !new RegExp(`\\b${name}\\b`).test(body));
   assert.ok(styled.size > 40, `the guard must be finding classes to check (found ${styled.size})`);
   assert.deepEqual(orphans, [], `these classes are styled but never applied to any element: ${orphans.join(", ")}`);
+});
+
+test("pre-flight forecast: the brief's own prediction plus its dependents, before any diff exists", async () => {
+  const project = tempGitProject();
+  const { capture } = await import("./kernel.js");
+  const learned = capture({
+    projectDir: project,
+    title: "Retry helper must stay idempotent",
+    body: "src/retry.ts is called from the payment path; retries must be idempotent or charges double.",
+    type: "decision",
+    paths: ["src/retry.ts"],
+  });
+  assert.equal(learned.ok, true);
+  // Two real files really import the area memory predicts this task will land in.
+  // Hand-seeding imports.json does not survive here: recall() keeps the structural
+  // index fresh, so the kernel overwrites the file with what the code actually says
+  // — which is the honest pipeline anyway.
+  writeFileSync(join(project, "src", "a.ts"), 'import { retry } from "./retry.js";\nexport const a = retry();\n', "utf8");
+  writeFileSync(join(project, "src", "b.ts"), 'import { retry } from "./retry.js";\nexport const b = retry();\n', "utf8");
+  execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore", env: GIT_ENV });
+  execFileSync("git", ["commit", "-m", "memory"], { cwd: project, stdio: "ignore", env: GIT_ENV });
+
+  const { server, port, feed } = await startApi(project);
+  try {
+    const out = await (await apiFetch(port, `/preflight?intent=${encodeURIComponent("make the retry helper idempotent")}`)).json() as {
+      ok: boolean;
+      forecast: { touches: string[]; memories: number; blast: { dependents: number } | null } | null;
+    };
+    assert.equal(out.ok, true);
+    assert.ok(out.forecast, "memory has something to say about this intent");
+    assert.ok(out.forecast.touches.includes("src/retry.ts"), "the forecast IS the brief's own touch prediction");
+    assert.ok(out.forecast.memories >= 1, "the packets the brief will carry are counted");
+    assert.equal(out.forecast.blast?.dependents, 2, "dependents come from the same imports index the receipt uses");
+
+    // A keystroke is not an intent — no forecast, never an invented one.
+    const quiet = await (await apiFetch(port, "/preflight?intent=zz")).json() as { forecast: unknown };
+    assert.equal(quiet.forecast, null);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("pre-flight stays silent when memory and the graph have nothing to say", async () => {
+  // A bare repo with no packets and no imports index must produce NO forecast —
+  // a confident-looking prediction from zero evidence would be the pre-flight
+  // lying in the reassuring direction.
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const out = await (await apiFetch(port, `/preflight?intent=${encodeURIComponent("refactor the payment retry pipeline")}`)).json() as { ok: boolean; forecast: unknown };
+    assert.equal(out.ok, true);
+    assert.equal(out.forecast, null);
+  } finally {
+    feed.close();
+    server.close();
+  }
 });
 
 test("diff and raw serve the run's real artifacts after a full stub dispatch", async () => {

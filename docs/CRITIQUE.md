@@ -103,9 +103,15 @@ never listed them, Runs filed them under Working, Board under Lost — three sto
 one glance apart), and the daemon was re-indexing the entire repo every ~4 seconds
 forever, because the index loop watched its own output. Both fixed the same day.
 
-**E. Pre-flight blast radius.** *(proposed)*
-At dispatch, before any diff exists: "briefs like this touched retry.ts — 12
-dependents" from memory + graph. Risk before work, which nobody else can do.
+**E. Pre-flight blast radius.** *(built)*
+As you type an intent — in the Room composer or the ⌘N modal — the kernel answers
+with what the brief WILL carry: "lands near mcp/daemon.ts +6 · 32 files depend on
+that area · 5 memories will ride in the brief", labeled FORECAST. The prediction is
+the brief compiler's own touch set, so it can never disagree with the brief; the
+dependents question is asked of the memory-cited paths (the graph's term-matched
+expansion would otherwise swallow the dependents as "intra-change"). Nothing honest
+to say → the line stays hidden. Warmed at daemon start; ~0.26s per keystroke-pause.
+Risk before work, which nobody else can do.
 
 **F. The flywheel made visible.** *(proposed)*
 Memory ↔ runs cross-links: each packet shows the runs that recalled it and the run

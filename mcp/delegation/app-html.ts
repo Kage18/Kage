@@ -106,6 +106,7 @@ ${APP_STYLES}
           <button class="room-send" id="room-send">Send ⏎</button>
         </div>
         <div class="cbar" id="room-cbar"></div>
+        <div class="preflight" id="room-preflight"></div>
         <div class="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now · ⇧⏎ newline</div>
       </div>
     </div>
@@ -181,6 +182,7 @@ ${APP_STYLES}
   <div class="modal">
     <div class="mh">New run — the brief is compiled from repo memory before anything starts</div>
     <textarea id="intent" placeholder="What should change, and how you'll know it worked"></textarea>
+    <div class="preflight" id="modal-preflight"></div>
     <div class="mrow">
       <select id="agent"><option>claude</option><option>codex</option><option>stub</option></select>
       <select id="rtype"><option>chore</option><option>bugfix</option><option>feature</option><option>refactor</option><option>migration</option><option>investigation</option></select>
