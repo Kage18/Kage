@@ -8,26 +8,22 @@
 // A blocked agent is a live conversation waiting on a reply: it has its own session, and
 // `--resume` restores that session's full context. So answering it continues the same
 // agent, with its own reasoning intact.
-import { existsSync } from "node:fs";
 import type { Adapter } from "./adapters/types.js";
 import {
   type TaskRecord,
   appendRunLedger,
   isProcessAlive,
-  patchRun,
+  reapRun,
   readRun,
-  runTranscriptPath,
-  runWorkDir,
-  transitionRun,
 } from "./contract.js";
-import { appendSteer } from "./dispatch.js";
+import { appendSteer, dispatchDetached } from "./dispatch.js";
 import { sendControl } from "./control.js";
-import { worktreePath } from "./worktree.js";
 
 /**
  * How far the message actually got. Never collapsed into "sent":
  * `delivered` — written into a live agent's stdin (a supervisor answered);
- * `resumed`   — the agent had exited; its own session was continued with the message;
+ * `resumed`   — no supervisor survived to take it live, so a new one was reattached to
+ *               the agent's own session, which will collect its eventual claim;
  * `stored`    — written to the run's steer log; nothing live has seen it;
  * `refused`   — nothing was done, and the message says why.
  */
@@ -39,10 +35,8 @@ export interface SteerResult {
   task: TaskRecord;
 }
 
-function workspaceFor(projectDir: string, task: TaskRecord): string {
-  const worktree = worktreePath(projectDir, task.id);
-  return existsSync(worktree) ? worktree : runWorkDir(projectDir, task.id);
-}
+/** States a reattached supervisor can legally re-enter `running` from. */
+const REENTRANT_STATES = new Set(["blocked", "stopped", "failed"]);
 
 /**
  * Steering is always recorded, and its delivery state is always reported honestly —
@@ -54,6 +48,12 @@ export async function steerRun(
   runId: string,
   message: string,
   adapterFor: (name: string) => Adapter,
+  /**
+   * Spawn the supervisor that will collect this run's eventual claim. Defaults to the
+   * real detached spawn (`kage supervise <runId>`, same shape a fresh dispatch uses);
+   * tests override it to reattach in-process against a scripted adapter instead.
+   */
+  reattach: (projectDir: string, task: TaskRecord) => { pid: number | undefined } = dispatchDetached,
 ): Promise<SteerResult> {
   const task = readRun(projectDir, runId);
   appendSteer(projectDir, runId, message);
@@ -98,30 +98,28 @@ export async function steerRun(
     };
   }
 
-  const adapter = adapterFor(task.agent);
-  const resumed = task.state === "blocked" || task.state === "stopped" || task.state === "failed"
-    ? transitionRun(projectDir, runId, "running", "user", `answered: ${message.slice(0, 80)}`)
-    : task;
+  // Fail fast on an unknown agent name, same as the old direct-resume path did — the
+  // reattached supervisor resolves its own adapter after this function has returned, so
+  // this is the only chance to report a bad agent name synchronously.
+  adapterFor(task.agent);
+
+  // No supervisor survived to take the tell live, but the agent's own session did.
+  // Resuming it fire-and-forget (the old behavior here) is exactly what orphaned real
+  // runs: the message was delivered, the agent finished a turn, and nobody was left to
+  // collect its claim (observed three times live). Reattaching a real supervisor — the
+  // same spawn shape a fresh dispatch uses — means the SAME process that takes this
+  // steer is the one that collects its eventual claim.
+  //
+  // A raw in-flight state ("dropped" display) with a dead pid has no legal transition
+  // straight to `running`; persist its death into `failed` first, the same thing
+  // sweepDeadRuns does for any other dropped run, so re-entry has a legal move to make.
+  const reentrant = REENTRANT_STATES.has(task.state) ? task : (reapRun(projectDir, runId) ?? task);
   appendRunLedger(projectDir, { kind: "steer_resumed", run_id: runId, message });
-
-  const outcome = await adapter.run({
-    runId,
-    workDir: workspaceFor(projectDir, resumed),
-    // The agent already has the brief in its restored context; it needs the answer.
-    briefBody: message,
-    transcriptPath: runTranscriptPath(projectDir, runId),
-    resumeSessionId: task.agent_session_id,
-    onStart: (pid) => patchRun(projectDir, runId, { agent_pid: pid }),
-  });
-
-  patchRun(projectDir, runId, {
-    ...(outcome.session_id ? { agent_session_id: outcome.session_id } : {}),
-    ...(outcome.waiting ? { waiting_on: outcome.waiting } : { waiting_on: undefined }),
-  });
+  reattach(projectDir, reentrant);
 
   return {
     delivery: "resumed",
     task: readRun(projectDir, runId),
-    message: `Answered ${runId} in place — the same agent continued with its context intact.`,
+    message: `${runId}'s supervisor is gone, so a new one is reattaching to the same agent session — your message will be answered once it picks up.`,
   };
 }

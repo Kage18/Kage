@@ -20,6 +20,7 @@ import {
 import type { Adapter } from "./adapters/types.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
+import { readSteers } from "./dispatch.js";
 import {
   recordSpend,
   buildClaim,
@@ -127,6 +128,17 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   const adapter = adapterOverride ?? adapterByName(task.agent);
   const state: SupervisorState = { finalMessage: "", stopped: false };
 
+  // RESUME: an existing session plus a pending steer means this call is a REATTACH —
+  // steer.ts's fallback spawns exactly this when no live socket could take a tell, so a
+  // fire-and-forget resume no longer orphans its claim (the same supervisor that takes
+  // the steer now collects it). The agent already has the brief in its restored
+  // context; it needs the answer, not the brief again. Only the newest stored steer is
+  // redelivered — the log has no per-message delivered flag, so an older one already
+  // answered live in a prior session is not distinguished from one that never landed.
+  const pendingSteers = readSteers(projectDir, runId);
+  const isResume = Boolean(task.agent_session_id) && pendingSteers.length > 0;
+  const firstMessage = isResume ? pendingSteers[pendingSteers.length - 1] : brief;
+
   // The agent, with stdin held open for its whole life — only an adapter that offers
   // spawnLive supports this (today: claude). Earlier this branch spawned a
   // `node -e process.exit(0)` placeholder for every other agent — real, awaited work
@@ -139,12 +151,16 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   // Non-live adapters now run for real, through the exact same Adapter.run() the
   // in-process path already trusted.
   const child: ChildProcess | null = adapter.spawnLive
-    ? adapter.spawnLive({ workDir: workspace, sessionId: task.agent_session_id })
+    ? adapter.spawnLive({
+        workDir: workspace,
+        ...(isResume ? { resumeSessionId: task.agent_session_id } : { sessionId: task.agent_session_id }),
+      })
     : null;
 
   if (child) {
-    // The brief IS the first user message on the open stdin.
-    child.stdin?.write(userMessageFrame(brief));
+    // The brief IS the first user message on the open stdin — or, on a reattach, the
+    // pending steer the agent is actually waiting on.
+    child.stdin?.write(userMessageFrame(firstMessage));
     patchRun(projectDir, runId, { agent_pid: child.pid });
   } else {
     // No live child to key liveness off; the supervisor process itself is what's
@@ -156,6 +172,15 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   if (readRun(projectDir, runId).state === "briefed") transitionRun(projectDir, runId, "dispatched", "kernel");
   if (readRun(projectDir, runId).state === "dispatched") {
     transitionRun(projectDir, runId, "running", "kernel", workspaceKind === "sandbox" ? "no git worktree — running in a sandbox" : undefined);
+  }
+  // A reattach starts from blocked/stopped/failed, never briefed/dispatched — bring it
+  // into running the same way a fresh dispatch does, so no surface is left reporting a
+  // state the agent has already moved past.
+  if (isResume) {
+    const resumedFrom = readRun(projectDir, runId).state;
+    if (resumedFrom === "blocked" || resumedFrom === "stopped" || resumedFrom === "failed") {
+      transitionRun(projectDir, runId, "running", "kernel", "resumed — a supervisor reattached to answer it");
+    }
   }
   const record: SupervisorRecord = {
     run_id: runId,
@@ -323,9 +348,9 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
       const outcome = await adapter.run({
         runId,
         workDir: workspace,
-        briefBody: brief,
+        briefBody: firstMessage,
         transcriptPath,
-        sessionId: task.agent_session_id ?? undefined,
+        ...(isResume ? { resumeSessionId: task.agent_session_id } : { sessionId: task.agent_session_id ?? undefined }),
         onStart: (pid) => {
           if (pid) patchRun(projectDir, runId, { agent_pid: pid });
       recordSpend(projectDir, runId, outcome.usage);
