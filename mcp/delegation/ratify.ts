@@ -8,8 +8,10 @@ import { capture, packetsDir, refreshProject } from "../kernel.js";
 import { okfConceptToPacket, packetToOkfConcept } from "../okf.js";
 import {
   type ClaimRecord,
+  type RunState,
   type TaskRecord,
   appendRunLedger,
+  reapRun,
   readClaim,
   readRun,
   runTag,
@@ -173,13 +175,34 @@ export interface RejectResult {
   message: string;
 }
 
+const REJECTABLE_STATES = new Set<RunState>(["ready", "failed", "stopped"]);
+
+// None of ready/failed/stopped/dropped has a live agent process, so there is nothing a
+// reject would interrupt. blocked does — an agent is genuinely waiting on an answer — so
+// that one alone needs "stop it first". The rest get a message that fits their state
+// instead of the same canned line.
+function rejectRefusal(runId: string, state: RunState): string {
+  if (state === "blocked") return `Run ${runId} is blocked — an agent is waiting on you. Stop it, then reject.`;
+  if (state === "running" || state === "dispatched" || state === "verifying") {
+    return `Run ${runId} is ${state} — a live agent is still working. Stop it, then reject.`;
+  }
+  return `Run ${runId} is ${state} — nothing to reject yet.`;
+}
+
 // Rejection is not a delete — it is the one moment a team reliably learns something
 // ("we tried that; here's why not"). The reason becomes a negative_result packet,
 // grounded on the paths the attempt touched, so the next brief carries it.
 export function rejectRun(projectDir: string, runId: string, reason: string): RejectResult {
-  const task = readRun(projectDir, runId);
-  if (task.state !== "ready" && task.state !== "failed") {
-    return { ok: false, captured: false, message: `Run ${runId} is ${task.state} — stop it before rejecting.` };
+  let task = readRun(projectDir, runId);
+  if (task.display_state === "dropped") {
+    // The recorded state (running/dispatched/verifying) says "in flight", but the process
+    // is gone — persist that reality first so the transition below judges the run by what
+    // it actually is (failed), not by a stale in-flight state that would otherwise refuse it.
+    reapRun(projectDir, runId);
+    task = readRun(projectDir, runId);
+  }
+  if (!REJECTABLE_STATES.has(task.state)) {
+    return { ok: false, captured: false, message: rejectRefusal(runId, task.state) };
   }
   const claim = readClaim(projectDir, runId);
   const paths = (claim?.checks ?? []).length ? [] : [];
