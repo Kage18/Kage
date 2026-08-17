@@ -69,10 +69,9 @@ export interface EnsureAppResult {
  */
 export async function ensureAppDaemon(
   projectDir: string,
-  portOrOptions: number | EnsureAppOptions = DEFAULT_APP_PORT,
+  portOrOptions: number | EnsureAppOptions = {},
 ): Promise<EnsureAppResult> {
   const options: EnsureAppOptions = typeof portOrOptions === "number" ? { port: portOrOptions } : portOrOptions;
-  const port = options.port ?? DEFAULT_APP_PORT;
   let status = readDaemonStatus(projectDir);
   let healthy = Boolean(status) && pidAlive(status!.pid) && (await servesApp(status!.host, status!.rest_port));
   let started = false;
@@ -87,7 +86,13 @@ export async function ensureAppDaemon(
       }
       await new Promise((pause) => setTimeout(pause, 500));
     }
-    const args = [cliEntry(), "daemon", "start", "--project", projectDir, "--port", String(port)];
+    // No explicit port means the caller does not care which one — request an
+    // ephemeral port (0) so the fresh daemon never fights the CURRENT daemon for
+    // DEFAULT_APP_PORT (that collision is exactly what made project switching
+    // time out: the target daemon died on EADDRINUSE before it could ever answer).
+    // An explicitly requested nonzero port stays as asked; if it is busy the spawned
+    // daemon dies and this call times out loudly rather than silently moving it.
+    const args = [cliEntry(), "daemon", "start", "--project", projectDir, "--port", String(options.port ?? 0)];
     if (options.spawnFn) {
       options.spawnFn(process.execPath, args);
     } else {
