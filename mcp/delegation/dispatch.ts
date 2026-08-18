@@ -29,6 +29,7 @@ import {
   writeClaim,
 } from "./contract.js";
 import { dirtyPaths } from "./git.js";
+import { attachRunToGoal } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
@@ -47,6 +48,15 @@ export interface DispatchOptions {
    * manager may drop memories with a reason and lower confidence, never the reverse.
    */
   judgment?: Omit<JudgmentInput, "offeredMemoryIds" | "kernelConfidence">;
+  /**
+   * Attach this run to a goal at CREATION — before the brief is written, long before the
+   * agent runs — not after the run finishes. goalForRun(runId) must resolve for the
+   * run's entire life, or the orchestrator wake-loop's event bridge (room-supervisor.ts's
+   * notifyManagerOfRunEvent) bails at its first guard and never wakes the manager. An
+   * unknown id is a warning on the result, never a reason to fail a dispatch that already
+   * created a real run.
+   */
+  goalId?: string;
 }
 
 // A run branches from HEAD. Uncommitted work is therefore invisible to the agent and
@@ -66,6 +76,8 @@ export interface DispatchResult {
   claim?: ClaimRecord;
   workspace: string;
   workspace_kind: "worktree" | "sandbox";
+  /** Set when options.goalId did not resolve to a real goal — the run still dispatched. */
+  goalWarning?: string;
 }
 
 export interface SteerRecord {
@@ -215,14 +227,29 @@ export async function dispatchRun(projectDir: string, options: DispatchOptions, 
     // so a memory the manager dropped is not claimed as briefed).
     briefMemoryIds: plan.memories.map((memory) => memory.id),
   });
+  // Attach to the goal BEFORE the brief is written and long before the agent runs —
+  // dispatchRun executes the whole run (agent work plus verification), so attaching
+  // post-hoc left goalForRun(runId) returning null for the run's entire life.
+  let goalWarning: string | undefined;
+  if (options.goalId) {
+    try {
+      attachRunToGoal(projectDir, options.goalId, task.id);
+    } catch (error) {
+      // The run is already real — an unknown goal id is a warning, not a reason to fail
+      // a dispatch that already happened.
+      goalWarning = `Could not attach this run to goal ${options.goalId}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   if (judgment) writeJudgment(projectDir, { ...judgment, run_id: task.id });
   writeBrief(projectDir, task.id, renderBrief(task, plan));
   const briefed = transitionRun(projectDir, task.id, "briefed", "kernel");
 
   if (options.briefOnly) {
-    return { task: briefed, plan, workspace: "", workspace_kind: "sandbox" };
+    return { task: briefed, plan, workspace: "", workspace_kind: "sandbox", ...(goalWarning ? { goalWarning } : {}) };
   }
-  return await executeRun(projectDir, task.id, plan, adapter, { progress: options.progress });
+  const result = await executeRun(projectDir, task.id, plan, adapter, { progress: options.progress });
+  return goalWarning ? { ...result, goalWarning } : result;
 }
 
 // Execution is separate from dispatch so a held brief can be released later, and so a

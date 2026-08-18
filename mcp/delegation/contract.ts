@@ -93,6 +93,13 @@ export interface TaskRecord {
   /** Last known child pid, so a dead process can never keep claiming to be running. */
   agent_pid?: number;
   /**
+   * The detached supervisor's own pid (mcp/delegation/supervisor.ts). Verification runs
+   * INSIDE the supervisor process after the hired agent's child has already exited, so
+   * agent_pid alone going dead is expected mid-verification, not evidence of a dropped
+   * run — liveState checks this too.
+   */
+  supervisor_pid?: number;
+  /**
    * The memory packets the brief carried (post-judgment). One half of the flywheel:
    * a packet's view can say which runs it was briefed into. Absent on runs dispatched
    * before this field existed — the surface then says nothing, never guesses.
@@ -470,8 +477,16 @@ export function liveState(task: TaskRecord): { state: RunState; stale: boolean }
   // verifying counts as in-flight: the checks run inside the same supervisor process,
   // so a verifying record with no live pid is exactly as dead as a running one. Rows
   // sat at "verifying · no activity yet" for sixteen hours because this list missed it.
+  //
+  // During verifying, the hired agent's child has already exited BY DESIGN — the
+  // supervisor performs the checks itself after the agent is gone — so agent_pid alone
+  // is dead for the entire verification phase even on a perfectly healthy run. Alive
+  // means either the agent or its supervisor is still around; only when neither exists
+  // is the run actually stale.
   const inFlight = task.state === "running" || task.state === "dispatched" || task.state === "verifying";
-  if (inFlight && !isProcessAlive(task.agent_pid)) return { state: task.state, stale: true };
+  if (inFlight && !isProcessAlive(task.agent_pid) && !isProcessAlive(task.supervisor_pid)) {
+    return { state: task.state, stale: true };
+  }
   return { state: task.state, stale: false };
 }
 
