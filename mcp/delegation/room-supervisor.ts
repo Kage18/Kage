@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { createServer, connect, type Socket } from "node:net";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { isProcessAlive } from "./contract.js";
+import { isProcessAlive, readRun } from "./contract.js";
 import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
@@ -422,6 +422,44 @@ export interface NotifyManagerDeps {
   markGoalEventsDeliveredFn?: (projectDir: string, goalId: string, ids: string[]) => void;
 }
 
+const WAVE_TERMINAL_STATES = new Set(["merged", "rejected", "failed"]);
+
+/**
+ * When runId is the last run of its wave to reach a terminal state, and the goal plans a
+ * further wave after it, this is the fact the manager keeps getting wrong by inference:
+ * that the wave is DONE and what comes next. Returns the explicit note to append to the
+ * event frame, or null when the wave isn't fully settled yet, runId isn't in any wave, or
+ * the completed wave is the goal's last one (nothing further to announce).
+ */
+function waveCompletionNote(projectDir: string, goal: GoalRecord, runId: string): string | null {
+  const waves = goal.plan.waves;
+  const waveIndex = waves.findIndex((wave) => wave.run_ids.includes(runId));
+  if (waveIndex === -1) return null;
+  const wave = waves[waveIndex];
+  if (!wave.run_ids.length || wave.run_ids.length < wave.runs.length) return null; // still filling
+  const states: string[] = [];
+  for (const id of wave.run_ids) {
+    let state: string;
+    try {
+      state = readRun(projectDir, id).state;
+    } catch {
+      return null; // a vanished run means this wave can never be called settled
+    }
+    if (!WAVE_TERMINAL_STATES.has(state)) return null; // some run in the wave is still in flight
+    states.push(state);
+  }
+  const nextWave = waves[waveIndex + 1];
+  if (!nextWave || !nextWave.runs.length) return null; // no further wave planned
+
+  const tally = new Map<string, number>();
+  for (const state of states) tally.set(state, (tally.get(state) ?? 0) + 1);
+  const tallyText = [...tally.entries()].map(([state, count]) => `${count} ${state}`).join(", ");
+  const nextSpecs = nextWave.runs
+    .map((spec) => `"${spec.intent}" (${spec.type}: ${spec.files_scope.join(", ") || "no files_scope"})`)
+    .join("; ");
+  return `wave ${waveIndex + 1} of ${waves.length} complete: ${tallyText}. Wave ${waveIndex + 2} is next: ${nextSpecs}`;
+}
+
 const RUN_EVENT_RATE_LIMIT_MS = 30_000;
 const lastRunEventByKey = new Map<string, { state: string; at: number }>();
 
@@ -472,7 +510,8 @@ export async function notifyManagerOfRunEvent(
   const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
   if (!(await isLive(projectDir, session))) return false;
 
-  const message = `[kage event] run ${runId} (${goal.intent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}`;
+  const note = WAVE_TERMINAL_STATES.has(event.state) ? waveCompletionNote(projectDir, goal, runId) : null;
+  const message = `[kage event] run ${runId} (${goal.intent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}${note ? ` — ${note}` : ""}`;
   const send = deps.sendFrameFn ?? sendFrameToHeldSession;
   const delivered = await send(projectDir, message, session);
   if (delivered) (deps.markGoalEventsDeliveredFn ?? markGoalEventsDelivered)(projectDir, goal.id, [record.id]);
@@ -481,23 +520,38 @@ export async function notifyManagerOfRunEvent(
 
 const GOAL_EVENT_DRAIN_CAP = 5;
 
-/** Group by run, latest state wins; cap how many distinct runs make it into one frame. */
-function coalesceGoalEvents(events: GoalEventRecord[]): {
+/** Group by run, latest state wins; cap how many distinct runs make it into one frame.
+ * Also collects the wave-completion note (if any) for each shown run that just settled —
+ * same fact notifyManagerOfRunEvent surfaces on the single-event path, reused here rather
+ * than left to the manager to infer from a batch of individual run lines. */
+function coalesceGoalEvents(
+  events: GoalEventRecord[],
+  projectDir: string,
+  goal: GoalRecord,
+): {
   lines: string[];
   ids: string[];
   supersededCount: number;
   omittedCount: number;
+  notes: string[];
 } {
   const latestByRun = new Map<string, GoalEventRecord>();
   for (const evt of events) latestByRun.set(evt.run_id, evt);
   const runs = [...latestByRun.values()];
   const shown = runs.slice(0, GOAL_EVENT_DRAIN_CAP);
   const lines = shown.map((evt) => `run ${evt.run_id} is now ${evt.state}${evt.detail ? `: ${evt.detail}` : ""}`);
+  const notes = new Set<string>();
+  for (const evt of shown) {
+    if (!WAVE_TERMINAL_STATES.has(evt.state)) continue;
+    const note = waveCompletionNote(projectDir, goal, evt.run_id);
+    if (note) notes.add(note);
+  }
   return {
     lines,
     ids: events.map((evt) => evt.id),
     supersededCount: events.length - runs.length,
     omittedCount: runs.length - shown.length,
+    notes: [...notes],
   };
 }
 
@@ -542,12 +596,13 @@ export async function drainPendingGoalEvents(
   const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
   if (!(await isLive(projectDir, session))) return false;
 
-  const { lines, ids, supersededCount, omittedCount } = coalesceGoalEvents(pending);
+  const { lines, ids, supersededCount, omittedCount, notes } = coalesceGoalEvents(pending, projectDir, goal);
   const suffixParts: string[] = [];
   if (supersededCount > 0) suffixParts.push(`${supersededCount} superseded update${supersededCount === 1 ? "" : "s"} coalesced`);
   if (omittedCount > 0) suffixParts.push(`${omittedCount} more run${omittedCount === 1 ? "" : "s"} not shown`);
   const suffix = suffixParts.length ? ` (${suffixParts.join("; ")})` : "";
-  const message = `[kage event] ${goal.intent}: ${lines.join("; ")}${suffix}`;
+  const noteSuffix = notes.length ? ` ${notes.join(" ")}` : "";
+  const message = `[kage event] ${goal.intent}: ${lines.join("; ")}${suffix}${noteSuffix}`;
 
   const send = deps.sendFrameFn ?? sendFrameToHeldSession;
   const delivered = await send(projectDir, message, session);

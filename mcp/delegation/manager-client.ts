@@ -20,6 +20,9 @@ export const MANAGER_ALLOWED_TOOLS = [
   "kage_reject_run",
   "kage_report",
   "kage_judgment",
+  "kage_goal_create",
+  "kage_goal_status",
+  "kage_goal_finish",
 ].map((name) => `mcp__kage__${name}`);
 
 export interface ManagerTurn {
