@@ -72,11 +72,36 @@ function runDiffCheck(projectDir: string, runId: string, diff: DiffStats): Check
   };
 }
 
+// Extensions that mark a slash-joined token as an actual source file, as opposed to an
+// identifier pair like "state.room/state.pty" that merely happens to contain dots.
+const KNOWN_FILE_EXTENSIONS = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "md", "mdx",
+  "sh", "yml", "yaml", "toml", "txt", "html", "css", "scss",
+  "py", "go", "rs", "rb", "lock",
+]);
+
+// Top-level directories this repo actually has. A token that starts with one of these is
+// a repo path even without a recognizable extension (e.g. "mcp/delegation").
+const KNOWN_TOP_LEVEL_PREFIXES = ["mcp/", "docs/", "shell/", "evals/", "alias/"];
+
 // Path-shaped tokens the claim names. A claim that cites a file which does not exist in
-// the work it produced is describing something imaginary.
+// the work it produced is describing something imaginary — but ordinary prose is full of
+// slash-joined tokens that are not paths at all (identifier pairs, Kage's own runtime
+// artifacts under .agent_memory/), so a token only counts as a citation when it looks
+// like a real source path: a known file extension on its final segment, or a known repo
+// top-level prefix. .agent_memory/ is explicitly excluded — it holds Kage's own runtime
+// state, never something an agent cites as a source it touched.
 export function citedPaths(text: string): string[] {
   const found = new Set<string>();
-  for (const match of text.matchAll(/\b[\w.-]+(?:\/[\w.-]+)+\.[A-Za-z]{1,6}\b/g)) found.add(match[0]);
+  for (const match of text.matchAll(/(?<![\w.])[.\w-]+(?:\/[\w.-]+)+/g)) {
+    const token = match[0].replace(/[.,;:!?)]+$/, "");
+    if (!token || token.startsWith(".agent_memory/")) continue;
+    const lastSegment = token.slice(token.lastIndexOf("/") + 1);
+    const extMatch = /\.([A-Za-z0-9]{1,8})$/.exec(lastSegment);
+    const hasKnownExtension = extMatch ? KNOWN_FILE_EXTENSIONS.has(extMatch[1].toLowerCase()) : false;
+    const hasKnownPrefix = KNOWN_TOP_LEVEL_PREFIXES.some((prefix) => token.startsWith(prefix));
+    if (hasKnownExtension || hasKnownPrefix) found.add(token);
+  }
   return [...found];
 }
 

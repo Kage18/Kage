@@ -2008,3 +2008,31 @@ test("drainPendingGoalEvents: multiple runs coalesce into exactly one frame; not
   assert.equal(await drainPendingGoalEvents(project, DEFAULT_SESSION, afterDoneDeps), false, "a finished goal is never woken");
   assert.equal(sentAfterDone.length, 0);
 });
+
+// --- citedPaths false-positive fixes (mcp/delegation/verify.ts) -----------------
+
+test("citedPaths ignores identifier pairs and .agent_memory runtime artifacts, but still catches real paths", () => {
+  // An identifier pair like "state.room/state.pty" is not a file citation — it has no
+  // recognizable extension and no known repo top-level prefix.
+  assert.deepEqual(citedPaths("watch state.room/state.pty for drift"), []);
+
+  // .agent_memory/ holds Kage's own runtime artifacts, never something an agent cites as
+  // a source it touched — excluded even though "room-mcp.json" looks like a real file.
+  assert.deepEqual(citedPaths("wrote to .agent_memory/runs/room-mcp.json"), []);
+
+  // A real repo path under a known top-level prefix is still recognized even without
+  // relying on the extension alone.
+  assert.deepEqual(citedPaths("see mcp/delegation/verify.ts for the fix"), ["mcp/delegation/verify.ts"]);
+
+  // Mixed prose: the false positives are dropped, the genuine citation survives.
+  assert.deepEqual(
+    citedPaths("state.room/state.pty stayed in sync; fixed in mcp/delegation/room-supervisor.ts").sort(),
+    ["mcp/delegation/room-supervisor.ts"],
+  );
+});
+
+test("citedPaths still fails a claim naming a real repo path that does not exist in the worktree", () => {
+  const paths = citedPaths("added mcp/delegation/does-not-exist.ts");
+  assert.deepEqual(paths, ["mcp/delegation/does-not-exist.ts"]);
+  assert.equal(existsSync(join(import.meta.dirname, "delegation", "does-not-exist.ts")), false);
+});
