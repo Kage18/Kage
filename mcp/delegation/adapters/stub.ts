@@ -28,6 +28,15 @@ export interface StubOptions {
      * reattached resume where the first line IS the answer, not a fresh brief.
      */
     firstResult?: "blocked" | "claim";
+    /**
+     * Opt-in, 0 by default (no behavior change — usageFrom treats a zero/absent
+     * total_cost_usd and empty usage as "nothing reported" and returns null, same as
+     * every real result line this stub emitted before this field existed). When set,
+     * every `result` line also carries `total_cost_usd` and a matching `usage.input_tokens`
+     * so a test can drive supervisor.ts's live usage/budget-enforcement path without a
+     * real coding-agent CLI.
+     */
+    usd?: number;
   };
 }
 
@@ -46,14 +55,23 @@ const edit = JSON.parse(process.env.KAGE_STUB_EDIT);
 const target = path.join(process.cwd(), edit.path);
 fs.mkdirSync(path.dirname(target), { recursive: true });
 const firstResult = process.env.KAGE_STUB_LIVE_FIRST || "blocked";
+const usd = Number(process.env.KAGE_STUB_LIVE_USD || 0);
+function resultLine(text) {
+  const event = { type: "result", result: text };
+  if (usd > 0) {
+    event.total_cost_usd = usd;
+    event.usage = { input_tokens: Math.round(usd * 1_000_000), output_tokens: 0 };
+  }
+  return JSON.stringify(event) + "\\n";
+}
 let phase = 0;
 readline.createInterface({ input: process.stdin }).on("line", () => {
   phase += 1;
   if (phase === 1 && firstResult === "blocked") {
-    process.stdout.write(JSON.stringify({ type: "result", result: process.env.KAGE_STUB_BLOCKED }) + "\\n");
+    process.stdout.write(resultLine(process.env.KAGE_STUB_BLOCKED));
   } else {
     fs.writeFileSync(target, edit.content, "utf8");
-    process.stdout.write(JSON.stringify({ type: "result", result: process.env.KAGE_STUB_CLAIM }) + "\\n");
+    process.stdout.write(resultLine(process.env.KAGE_STUB_CLAIM));
   }
 });
 `;
@@ -112,12 +130,9 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
   };
 
   if (options.live) {
-    const firstResult = options.live.firstResult ?? "blocked";
-    const blocked = [
-      "```kage-blocked",
-      JSON.stringify({ need: "a decision", question: options.live.question }),
-      "```",
-    ].join("\n");
+    const live = options.live;
+    const firstResult = live.firstResult ?? "blocked";
+    const blocked = ["```kage-blocked", JSON.stringify({ need: "a decision", question: live.question }), "```"].join("\n");
     const claim = [
       "```kage-claim",
       JSON.stringify({
@@ -137,6 +152,7 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
           KAGE_STUB_CLAIM: claim,
           KAGE_STUB_EDIT: JSON.stringify(edit),
           KAGE_STUB_LIVE_FIRST: firstResult,
+          KAGE_STUB_LIVE_USD: String(live.usd ?? 0),
         },
       });
   }
