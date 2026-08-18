@@ -74,7 +74,12 @@ export function curationComparison(projectDir: string, runs?: TaskRecord[]): Cur
     if (task.state === "merged") bucket.merged += 1;
     if (task.state === "rejected") bucket.rejected += 1;
     const claim = readClaim(projectDir, task.id);
-    if (claim && claim.checks.length && claim.checks.every((check) => check.result === "pass")) bucket.verified_first += 1;
+    // Same rule as computeTrackRecord above: a fold over claim.checks alone cannot tell
+    // "nothing executed" from "verified" — ask claimVerdict, which can.
+    if (claim) {
+      const verdict = claimVerdict(claim);
+      if (verdict.passed && verdict.executed) bucket.verified_first += 1;
+    }
   }
   return out;
 }
@@ -142,7 +147,9 @@ export function renderTrustLine(projectDir: string): string {
     const claim = readClaim(projectDir, task.id);
     if (!claim || !claim.checks.length) continue;
     claimsTotal += 1;
-    if (claim.checks.every((check) => check.result === "pass")) claimsVerified += 1;
+    // Same rule again: "every check passed" is not "verified" when nothing executed.
+    const verdict = claimVerdict(claim);
+    if (verdict.passed && verdict.executed) claimsVerified += 1;
   }
   const perType = types
     .sort((a, b) => b[1].dispatched - a[1].dispatched)
