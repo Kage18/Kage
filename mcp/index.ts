@@ -84,6 +84,7 @@ import {
   type SetupAgent,
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
+import { capCollection } from "./response-cap.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { steerRun } from "./delegation/steer.js";
@@ -177,6 +178,16 @@ function filePathHints(query: string): string[] {
 
 function wantsDependencyPath(query: string): boolean {
   return /\b(connect|connected|dependency|depend|depends|path|impact|flow|trace)\b/i.test(query);
+}
+
+// Urgency order for StaleMemoryFinding.suggested_action, most actionable first: a
+// status conflict (mark_stale) means the packet actively contradicts reality; a reported-wrong
+// packet (supersede) is next; a drifted citation (update) is milder; a plain re-verify
+// (verify) is the least urgent. When kage_refresh caps stale_packets, this decides which
+// entries survive the cut instead of an arbitrary (e.g. insertion-order) slice.
+const STALE_URGENCY_ORDER: Record<string, number> = { mark_stale: 0, supersede: 1, update: 2, verify: 3 };
+function rankStalePacketsByUrgency<T extends { suggested_action: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => (STALE_URGENCY_ORDER[a.suggested_action] ?? 4) - (STALE_URGENCY_ORDER[b.suggested_action] ?? 4));
 }
 
 function riskContextBlock(result: ReturnType<typeof kageRisk>): string {
@@ -647,13 +658,15 @@ export function listTools() {
     {
       name: "kage_refresh",
       description:
-        "Rebuild repo indexes, code graph, memory graph, metrics, and stale-memory metadata. Agents should run this after meaningful file/content changes before PR checks; push-only or same-tree commits do not need another refresh. On non-default git branches metadata-only packet rewrites are skipped (quiet refresh) to avoid merge conflicts; pass force to persist them anyway.",
+        "Rebuild repo indexes, code graph, memory graph, metrics, and stale-memory metadata. Agents should run this after meaningful file/content changes before PR checks; push-only or same-tree commits do not need another refresh. On non-default git branches metadata-only packet rewrites are skipped (quiet refresh) to avoid merge conflicts; pass force to persist them anyway. On a repo with many stale packets or validation warnings, stale_packets and validation.warnings are capped to the 10 most actionable entries by default (ranked by urgency), with the true total and a truncation note; pass limit or verbose for more.",
       annotations: { title: "Rebuild Kage indexes and graphs", readOnlyHint: false, idempotentHint: true },
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string", description: "Absolute path to the repository root." },
           force: { type: "boolean", description: "Persist packet metadata rewrites even on a non-default branch" },
+          limit: { type: "number", description: "Max stale_packets / validation.warnings entries to return (default 10 each)." },
+          verbose: { type: "boolean", description: "Return every stale packet and validation warning, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -1889,8 +1902,35 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_refresh") {
     const result = refreshProject(String(args?.project_dir ?? ""), { full: Boolean(args?.full), force: Boolean(args?.force) });
+    // stale_packets and validation.warnings are one entry per packet/finding across the
+    // whole repo — individually lean, but uncapped they grow past what an MCP client will
+    // even accept (measured: 149,739 chars / 177 stale packets on this repo). Cap both,
+    // rank stale_packets by urgency (status-conflict > reported-wrong > drifted > just-verify),
+    // and say what was withheld rather than silently dropping it. `limit`/`verbose` opt back in.
+    const verbose = Boolean(args?.verbose);
+    const explicitLimit = Number(args?.limit);
+    const hasExplicitLimit = Number.isFinite(explicitLimit) && explicitLimit > 0;
+    const DEFAULT_STALE_LIMIT = 10;
+    const DEFAULT_WARNING_LIMIT = 10;
+    const staleLimit = verbose ? result.stale_packets.length : hasExplicitLimit ? explicitLimit : DEFAULT_STALE_LIMIT;
+    const warningLimit = verbose ? result.validation.warnings.length : hasExplicitLimit ? explicitLimit : DEFAULT_WARNING_LIMIT;
+    const staleCapped = capCollection(rankStalePacketsByUrgency(result.stale_packets), staleLimit, "stale packets");
+    const warningsCapped = capCollection(result.validation.warnings, warningLimit, "validation warnings");
+    const payload = {
+      ...result,
+      stale_packets: staleCapped.items,
+      stale_packets_total: staleCapped.total,
+      stale_packets_truncated: staleCapped.truncated,
+      validation: {
+        ...result.validation,
+        warnings: warningsCapped.items,
+        warnings_total: warningsCapped.total,
+        warnings_truncated: warningsCapped.truncated,
+      },
+      response_notes: [staleCapped.note, warningsCapped.note].filter((note): note is string => Boolean(note)),
+    };
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
       isError: !result.ok,
     };
   }
