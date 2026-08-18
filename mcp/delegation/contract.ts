@@ -377,6 +377,31 @@ export function runTag(runId: string): string {
   return `${RUN_TAG_PREFIX}${runId}`;
 }
 
+const RUN_TITLE_MAX_LENGTH = 96;
+
+/**
+ * Short display title derived from a run's raw intent. Intents are meant to be detailed
+ * ("what should change, and how you'll know it worked") and can run to thousands of
+ * characters, so every display surface renders this instead of task.intent directly —
+ * pure derivation, never changes what is sent to the kernel or stored on the record.
+ */
+export function runTitle(run: TaskRecord): string {
+  const raw = (run.intent ?? "").trim();
+  if (!raw) return run.id;
+  const firstLine = raw.split(/\r?\n/)[0];
+  const sentenceMatch = firstLine.match(/^[^.!?]*[.!?]/);
+  const picked = sentenceMatch ? sentenceMatch[0] : firstLine;
+  const collapsed = picked.replace(/\s+/g, " ").trim().replace(/[.,;:!?]+$/, "").trim();
+  const title = collapsed || run.id;
+  if (title.length <= RUN_TITLE_MAX_LENGTH) return title;
+  const ellipsis = "…";
+  const budget = RUN_TITLE_MAX_LENGTH - ellipsis.length;
+  let truncated = title.slice(0, budget);
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > 0) truncated = truncated.slice(0, lastSpace);
+  return `${truncated.trimEnd()}${ellipsis}`;
+}
+
 export function createRun(projectDir: string, input: CreateRunInput): RunView {
   const intent = input.intent.trim();
   if (!intent) throw new Error("Run intent must be a non-empty string.");

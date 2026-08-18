@@ -436,7 +436,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .btn.sm { font-size:11.5px; padding:4px 11px; }
   .glyph { font-family:var(--mono); font-size:15px; text-align:center; padding-top:1px; }
   .qt { font-size:14.5px; font-weight:550; line-height:1.45; letter-spacing:-.006em;
-    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+    overflow-wrap:anywhere; }
   .qatoms { display:flex; gap:12px; margin-top:6px; flex-wrap:wrap; align-items:baseline; }
   .atom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
   .atom.jade { color:var(--jade); } .atom.amber { color:var(--amber); } .atom.hot { color:var(--crimson); }
@@ -507,7 +508,9 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .dclose { position:absolute; top:14px; right:16px; font-size:13px; color:var(--text3);
     padding:4px 9px; border-radius:var(--r-control); }
   .dclose:hover { color:var(--text); background:var(--surface2); }
-  .dhead h2 { margin:0 0 9px; padding-right:36px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35; }
+  .dhead h2 { margin:0 0 9px; padding-right:36px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35;
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+  .dhead .foldrow { margin:0 0 12px; }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:var(--r-panel);
     border:1px solid var(--line); color:var(--text2); background:var(--surface2);
