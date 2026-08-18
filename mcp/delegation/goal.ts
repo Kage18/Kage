@@ -145,13 +145,19 @@ export function createGoal(projectDir: string, input: CreateGoalInput): GoalReco
   return goal;
 }
 
-export function readGoal(projectDir: string, goalId: string): GoalRecord {
+/** Disk-truth read, no reconciliation — used by the state-machine functions themselves
+ * (transitionGoal, patchGoal) so reconciling never recurses back into a transition that
+ * is already in flight. Only the public readGoal/listGoals reconcile. */
+function loadGoalRaw(projectDir: string, goalId: string): GoalRecord {
   const path = goalPath(projectDir, goalId);
   if (!existsSync(path)) throw new Error(`No goal found: ${goalId}`);
   return JSON.parse(readFileSync(path, "utf8")) as GoalRecord;
 }
 
-export function listGoals(projectDir: string): GoalRecord[] {
+/** Disk-truth listing, no reconciliation — used by goalForRun so a run transition's
+ * onRunTransition hook (below) keeps its original, narrow cost: settling the ONE goal
+ * that owns the transitioning run, not reconciling every goal in the directory. */
+function listGoalsRaw(projectDir: string): GoalRecord[] {
   const dir = goalsDir(projectDir);
   if (!existsSync(dir)) return [];
   const goals: GoalRecord[] = [];
@@ -167,15 +173,23 @@ export function listGoals(projectDir: string): GoalRecord[] {
   return goals.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
+export function readGoal(projectDir: string, goalId: string): GoalRecord {
+  return reconcileGoalState(projectDir, loadGoalRaw(projectDir, goalId));
+}
+
+export function listGoals(projectDir: string): GoalRecord[] {
+  return listGoalsRaw(projectDir).map((goal) => reconcileGoalState(projectDir, goal));
+}
+
 /** Merge fields into a goal record without touching its state machine. */
 export function patchGoal(projectDir: string, goalId: string, patch: Partial<GoalRecord>): GoalRecord {
-  const goal = { ...readGoal(projectDir, goalId), ...patch, updated_at: nowIso() };
+  const goal = { ...loadGoalRaw(projectDir, goalId), ...patch, updated_at: nowIso() };
   atomicWriteJson(goalPath(projectDir, goalId), goal);
   return goal;
 }
 
 export function transitionGoal(projectDir: string, goalId: string, to: GoalState, note?: string): GoalRecord {
-  const goal = readGoal(projectDir, goalId);
+  const goal = loadGoalRaw(projectDir, goalId);
   const legal = GOAL_LEGAL_TRANSITIONS[goal.state] ?? [];
   if (!legal.includes(to)) {
     throw new Error(`Illegal transition for ${goalId}: ${goal.state} → ${to} (legal: ${legal.join(", ") || "none — terminal state"})`);
@@ -213,7 +227,7 @@ function firstOpenWaveIndex(waves: readonly MutableWave[]): number {
  * dispatched into ad hoc).
  */
 export function attachRunToGoal(projectDir: string, goalId: string, runId: string, waveIndex?: number): GoalRecord {
-  const goal = readGoal(projectDir, goalId);
+  const goal = loadGoalRaw(projectDir, goalId);
   const waves: MutableWave[] = goal.plan.waves.length
     ? goal.plan.waves.map((wave) => ({ runs: wave.runs, run_ids: [...wave.run_ids] }))
     : [{ runs: [], run_ids: [] }];
@@ -231,13 +245,31 @@ export function attachRunToGoal(projectDir: string, goalId: string, runId: strin
 
 /** Reverse lookup: which goal (if any) owns this run. Linear over goals, which stay few. */
 export function goalForRun(projectDir: string, runId: string): GoalRecord | null {
-  for (const goal of listGoals(projectDir)) {
+  for (const goal of listGoalsRaw(projectDir)) {
     if (goal.plan.waves.some((wave) => wave.run_ids.includes(runId))) return goal;
   }
   return null;
 }
 
 const RUN_TERMINAL_STATES = new Set<RunState>(["merged", "rejected", "failed"]);
+
+/** True when every run this goal owns has settled into a terminal state AND no wave
+ * still has an unfilled run spec. The one place that rule is computed — both
+ * syncGoalCompletion (the live path) and reconcileGoalState (the read-time path) ask
+ * this same question so they can never disagree about what "done" means. */
+function goalRunsAllSettled(projectDir: string, goal: GoalRecord): boolean {
+  const runIds = goal.plan.waves.flatMap((wave) => wave.run_ids);
+  if (!runIds.length) return false;
+  const allSettled = runIds.every((id) => {
+    try {
+      return RUN_TERMINAL_STATES.has(readRun(projectDir, id).state);
+    } catch {
+      return false;
+    }
+  });
+  const noOpenSpecs = goal.plan.waves.every((wave) => wave.run_ids.length >= wave.runs.length);
+  return allSettled && noOpenSpecs;
+}
 
 /**
  * Derives executing -> done the moment every run this goal owns has settled into a
@@ -250,23 +282,42 @@ const RUN_TERMINAL_STATES = new Set<RunState>(["merged", "rejected", "failed"]);
 export function syncGoalCompletion(projectDir: string, runId: string): GoalRecord | null {
   const goal = goalForRun(projectDir, runId);
   if (!goal || goal.state !== "executing") return null;
-  const runIds = goal.plan.waves.flatMap((wave) => wave.run_ids);
-  if (!runIds.length) return null;
-  const allSettled = runIds.every((id) => {
-    try {
-      return RUN_TERMINAL_STATES.has(readRun(projectDir, id).state);
-    } catch {
-      return false;
-    }
-  });
-  const noOpenSpecs = goal.plan.waves.every((wave) => wave.run_ids.length >= wave.runs.length);
-  if (!allSettled || !noOpenSpecs) return null;
+  if (!goalRunsAllSettled(projectDir, goal)) return null;
   return transitionGoal(projectDir, goal.id, "done", "every run reached a terminal state");
 }
 
 onRunTransition((projectDir, runId, to) => {
   if (to === "merged" || to === "rejected" || to === "failed") syncGoalCompletion(projectDir, runId);
 });
+
+/**
+ * The read-time counterpart to the onRunTransition hook above — "derive display;
+ * persist death", same law contract.ts already applies to runs (liveState/displayState
+ * derive truth at read time rather than trusting whatever was last written). The hook
+ * only fires on a LIVE run transition; a goal whose runs all reached a terminal state
+ * before the hook existed, or via any path that mutates a run without going through
+ * transitionRun, is never revisited by it and sits stuck in 'planning'/'executing'
+ * forever. Called from readGoal/listGoals so every read repairs that drift.
+ *
+ * Never called on (and never produces) a terminal state transition out of done/
+ * abandoned — those are final, checked by the early return below. Idempotent: a goal
+ * already at the state its runs imply makes no further transitionGoal call, so a
+ * second read never rewrites the record.
+ */
+function reconcileGoalState(projectDir: string, goal: GoalRecord): GoalRecord {
+  if (goal.state !== "planning" && goal.state !== "executing") return goal;
+  const runIds = goal.plan.waves.flatMap((wave) => wave.run_ids);
+  if (!runIds.length) return goal;
+  let current = goal;
+  // Any attached run at all means the goal is at least under way.
+  if (current.state === "planning") {
+    current = transitionGoal(projectDir, current.id, "executing");
+  }
+  if (current.state === "executing" && goalRunsAllSettled(projectDir, current)) {
+    current = transitionGoal(projectDir, current.id, "done", "every run reached a terminal state");
+  }
+  return current;
+}
 
 // ---------------------------------------------------------------------------
 // Pre-dispatch gates: files_scope disjointness and budgets. Both are checked BEFORE a
