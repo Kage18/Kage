@@ -18,6 +18,7 @@ var state = {
   memory: null, memType: null,
   workLayout: "list", dover: false, showAllDone: false, workOrder: [],
   diffView: "unified", collapsedDiff: {}, expandedGroups: {},
+  steerQueueMode: false, runTerminalActive: false, runTermRunId: null,
 };
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
@@ -69,9 +70,24 @@ function glyphFor(run) {
   if (s === "stopped") return ["⏸", "amber"];
   return ["▸", "dim"];
 }
+function isPlanApproval(run) {
+  return Boolean(run.waiting_on && run.waiting_on.needs === "plan approval");
+}
+// Deliver a message to a blocked/live run's own tell route — the ONE path every
+// answer field, the Approve button, and the detail composer's "send now" all use, so
+// the delivery vocabulary the kernel reports is never re-worded per caller.
+function tellRun(runId, message) {
+  return api("/runs/" + runId + "/tell", { method: "POST", body: { message: message } }).then(function (out) {
+    if (!out.ok) showError(out.error || "the message was not delivered");
+    else flash("delivery: " + out.delivery);
+    refresh();
+    return out;
+  });
+}
 function decisionText(run) {
   var s = run.display_state;
   if (s === "ready") return "Merge: " + run.intent;
+  if (s === "blocked" && isPlanApproval(run)) return "Plan review: " + run.intent;
   if (s === "blocked" && run.waiting_on) return "“" + (run.waiting_on.question || run.waiting_on.detail || run.waiting_on.needs || "waiting on you") + "”";
   if (s === "blocked") return "Waiting on you: " + run.intent;
   if (s === "stopped") return "Stopped — resume or reject: " + run.intent;
@@ -149,20 +165,21 @@ function workRow(run) {
   // own vocabulary, never assumed.
   if (run.display_state === "blocked") {
     var answer = h("div", "qanswer");
+    if (isPlanApproval(run)) {
+      var approveRow = h("button", "btn primary sm", "Approve");
+      approveRow.onclick = function (ev) { ev.stopPropagation(); tellRun(run.id, "approved — proceed as planned"); };
+      answer.appendChild(approveRow);
+    }
     var field = document.createElement("input");
     field.type = "text";
-    field.placeholder = "Answer the agent…";
+    field.placeholder = isPlanApproval(run) ? "Or answer with a revision…" : "Answer the agent…";
     field.onclick = function (ev) { ev.stopPropagation(); };
     field.onkeydown = function (ev) {
       ev.stopPropagation();
       if (ev.key !== "Enter" || !field.value.trim()) return;
       var msg = field.value.trim();
       field.disabled = true;
-      api("/runs/" + run.id + "/tell", { method: "POST", body: { message: msg } }).then(function (out) {
-        if (!out.ok) showError(out.error || "the answer was not delivered");
-        else flash("delivery: " + out.delivery);
-        refresh();
-      });
+      tellRun(run.id, msg);
     };
     answer.appendChild(field);
     mid.appendChild(answer);
@@ -248,6 +265,10 @@ function renderWorkList() {
 // over (board). openRun is the external jump (rail, palette, notifications).
 function selectRun(id) {
   var changed = state.selected !== id;
+  // A take-over pins the detail pane to ITS run's terminal until you Hand Back —
+  // selecting a different run leaves that pane behind, so close it first rather than
+  // showing the wrong run's terminal under a newly-selected row.
+  if (changed && state.runTerminalActive && state.runTermRunId !== id) closeRunTerminal();
   state.selected = id;
   if (changed) { state.tab = "follow"; state.detail = null; state.collapsedDiff = {}; state.expandedGroups = {}; }
   if (state.workLayout === "board") state.dover = true;
@@ -1147,7 +1168,107 @@ window.addEventListener("resize", function () {
     fitAddon.fit();
     sendResize();
   }
+  if (state.runTerminalActive && runFitAddon) {
+    runFitAddon.fit();
+    sendRunResize();
+  }
 });
+
+// --- take over: a SEPARATE real pty from the room's, one per taken-over run, so a
+// run terminal and the room terminal never share a screen or a session key. Mirrors
+// the room's own terminal machinery (same repaint ladder, same reasons) — see above.
+var runTerm = null;
+var runFitAddon = null;
+
+function sendRunResize() {
+  if (!runTerm || !state.runTermRunId) return;
+  api("/runs/" + state.runTermRunId + "/pty/resize", { method: "POST", body: { cols: runTerm.cols, rows: runTerm.rows } });
+}
+function repaintRunTerminal() {
+  if (!runTerm) return;
+  [60, 250, 600].forEach(function (delay) {
+    setTimeout(function () {
+      if (!runTerm) return;
+      if (runFitAddon) runFitAddon.fit();
+      sendRunResize();
+      runTerm.refresh(0, runTerm.rows - 1);
+    }, delay);
+  });
+}
+function ensureRunTerminal() {
+  if (runTerm) return;
+  if (!window.Terminal || !window.FitAddon) {
+    document.getElementById("run-term").textContent = "Terminal assets failed to load — check /vendor/xterm.js.";
+    return;
+  }
+  runTerm = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    theme: { background: "#0e1110", foreground: "#cfe0d4", cursor: "#43c98a" },
+    convertEol: true,
+  });
+  runFitAddon = new FitAddon.FitAddon();
+  runTerm.loadAddon(runFitAddon);
+  runTerm.open(document.getElementById("run-term"));
+  runFitAddon.fit();
+  runTerm.onData(function (data) {
+    if (!state.runTermRunId) return;
+    api("/runs/" + state.runTermRunId + "/pty/write", { method: "POST", body: { data: data } });
+  });
+  // Priming (fetching the snapshot) is the caller's job, not creation's — openRunTerminal
+  // always primes explicitly, whether this is the terminal's first creation or a reuse
+  // for a different run.
+}
+function primeRunTerminal() {
+  var asked = state.runTermRunId;
+  if (!asked) return;
+  api("/runs/" + asked + "/pty/snapshot").then(function (out) {
+    if (asked !== state.runTermRunId) return;
+    if (out && out.scrollback && runTerm) runTerm.write(out.scrollback);
+    repaintRunTerminal();
+  });
+}
+function openRunTerminal(runId) {
+  // A second take-over reuses the SAME xterm instance for a different run — reset its
+  // screen first, or the new session's bytes would paint on top of the old run's.
+  if (runTerm && state.runTermRunId !== runId) runTerm.reset();
+  state.runTerminalActive = true;
+  state.runTermRunId = runId;
+  document.getElementById("run-term-run").textContent = runId;
+  document.getElementById("run-detail").style.display = "none";
+  document.getElementById("run-term-pane").style.display = "flex";
+  // Same reason as the room's terminal: build/prime only after the pane is laid out,
+  // via a macrotask (not rAF, which never fires for a hidden/background tab).
+  setTimeout(function () {
+    ensureRunTerminal();
+    primeRunTerminal();
+    repaintRunTerminal();
+    if (runTerm) runTerm.focus();
+  }, 0);
+}
+function closeRunTerminal() {
+  state.runTerminalActive = false;
+  state.runTermRunId = null;
+  document.getElementById("run-term-pane").style.display = "none";
+  document.getElementById("run-detail").style.display = "flex";
+  renderDetail();
+}
+function takeOverRun(runId) {
+  api("/runs/" + runId + "/takeover", { method: "POST" }).then(function (out) {
+    if (!out.ok) { showError(out.error || "take over failed"); return; }
+    openRunTerminal(runId);
+    refresh();
+  });
+}
+function handBackRun(runId) {
+  api("/runs/" + runId + "/handback", { method: "POST" }).then(function (out) {
+    if (!out.ok) showError(out.error || "hand back failed");
+    closeRunTerminal();
+    refresh();
+  });
+}
+document.getElementById("run-term-handback").onclick = function () { handBackRun(state.runTermRunId); };
 
 // The receipt, composed from the claim's STRUCTURED fields.
 //
@@ -1316,7 +1437,7 @@ function renderDetail() {
   }
   head.appendChild(chips);
   var tabs = h("div", "tabs");
-  [["follow", "Follow"], ["receipt", "Receipt"], ["diff", "Diff"], ["brief", "Brief"], ["raw", "Raw"]].forEach(function (t) {
+  [["follow", "Follow"], ["queue", "Queue"], ["receipt", "Receipt"], ["diff", "Diff"], ["brief", "Brief"], ["raw", "Raw"]].forEach(function (t) {
     var b = h("button", "tab" + (state.tab === t[0] ? " on" : ""), t[1]);
     b.onclick = function () { state.tab = t[0]; loadTabText(run.id); renderDetail(); };
     tabs.appendChild(b);
@@ -1343,6 +1464,8 @@ function renderDetail() {
   } else if (state.tab === "raw") {
     if (d.rawText === undefined) body.appendChild(h("div", "empty", "loading transcript…"));
     else body.appendChild(h("div", "rawpane", d.rawText));
+  } else if (state.tab === "queue") {
+    renderQueue(body, run.id, d.steers);
   } else {
     if (run.activity) {
       var act = h("div", "activityline");
@@ -1350,7 +1473,15 @@ function renderDetail() {
       act.appendChild(h("span", "", run.activity.last_label + " · " + run.activity.actions + " actions"));
       body.appendChild(act);
     }
-    if (run.waiting_on) {
+    if (run.waiting_on && isPlanApproval(run)) {
+      var plancard = h("div", "plancard");
+      plancard.appendChild(h("div", "seclabel-sm", "Plan review — approve, or answer below with a revision"));
+      plancard.appendChild(h("div", "rawpane", run.waiting_on.detail || ""));
+      var approve = h("button", "btn primary", "Approve");
+      approve.onclick = function () { tellRun(run.id, "approved — proceed as planned"); };
+      plancard.appendChild(approve);
+      body.appendChild(plancard);
+    } else if (run.waiting_on) {
       var q = h("div", "qbanner");
       q.appendChild(h("span", "amber", "?"));
       q.appendChild(h("span", "", run.waiting_on.question || run.waiting_on.detail || "waiting on you"));
@@ -1372,18 +1503,29 @@ function renderDetail() {
   var input = h("input");
   input.id = "steer-input";
   input.placeholder = "Message the agent…";
+  // Immediate stays the default (Conductor shipped queue-by-default, then reverted):
+  // plain ⏎ delivers now unless the toggle is on; ⌘⏎ always queues, regardless.
   input.onkeydown = function (ev) {
     if (ev.key !== "Enter" || !input.value.trim()) return;
     var message = input.value.trim();
+    var queueOnly = ev.metaKey || ev.ctrlKey || state.steerQueueMode;
     input.value = "";
-    api("/runs/" + run.id + "/tell", { method: "POST", body: { message: message } }).then(function (out) {
-      if (!out.ok) showError(out.error || "the message was not delivered");
-      else flash("delivery: " + out.delivery);
-      refresh();
-    });
+    if (queueOnly) {
+      api("/runs/" + run.id + "/steers", { method: "POST", body: { op: "add", message: message } }).then(function (out) {
+        if (!out.ok) showError(out.error || "the message was not queued");
+        else { flash("queued"); if (state.detail) state.detail.steers = out.steers; }
+        refresh();
+      });
+    } else {
+      tellRun(run.id, message);
+    }
   };
   cwrap.appendChild(input);
-  cwrap.appendChild(h("span", "hint", "⏎ send · delivery reported honestly"));
+  var queueToggle = h("button", "btn sm" + (state.steerQueueMode ? " on" : ""), state.steerQueueMode ? "Queuing" : "Deliver now");
+  queueToggle.title = "Toggle whether ⏎ delivers immediately or queues for later — ⌘⏎ always queues";
+  queueToggle.onclick = function () { state.steerQueueMode = !state.steerQueueMode; renderDetail(); };
+  cwrap.appendChild(queueToggle);
+  cwrap.appendChild(h("span", "hint", "⏎ send · ⌘⏎ queue for later · delivery reported honestly"));
   composer.appendChild(cwrap);
   el.appendChild(composer);
 
@@ -1400,6 +1542,17 @@ function renderDetail() {
     if (pendingLabel) stop.disabled = true;
     stop.onclick = function () { actOnRun(run.id, "stop", null, "Stopping…", "stopped"); };
     bar.appendChild(stop);
+    var interrupt = h("button", "btn", pendingLabel === "Interrupting…" ? pendingLabel : "Interrupt — session stays alive");
+    interrupt.title = "Unlike Stop, the agent's process and session keep running — it can still be answered.";
+    if (pendingLabel) interrupt.disabled = true;
+    interrupt.onclick = function () { actOnRun(run.id, "interrupt", null, "Interrupting…", "interrupted"); };
+    bar.appendChild(interrupt);
+  }
+  if (["running", "blocked", "stopped", "failed"].indexOf(run.display_state) >= 0 && !state.runTerminalActive) {
+    var takeOverBtn = h("button", "btn", "Take Over");
+    takeOverBtn.title = "Open a real terminal on this run's own agent session";
+    takeOverBtn.onclick = function () { takeOverRun(run.id); };
+    bar.appendChild(takeOverBtn);
   }
   if (["merged", "rejected"].indexOf(run.display_state) < 0) {
     var reject = h("button", "btn danger", "Reject…");
@@ -1793,6 +1946,7 @@ function renderDiff(body, diffText) {
 function loadTabText(runId) {
   if (!state.detail) return;
   var tab = state.tab;
+  if (tab === "queue") { loadQueue(runId); return; }
   if (tab !== "diff" && tab !== "raw" && tab !== "follow") return;
   var route = tab === "diff" ? "diff" : "raw";
   var key = tab === "diff" ? "diffText" : "rawText";
@@ -1802,6 +1956,71 @@ function loadTabText(runId) {
       state.detail[key] = text;
       renderDetail();
     }
+  });
+}
+
+// --- the steer queue: delivered records are immutable history, queued ones can be
+// edited/deleted/reordered in place — Conductor parity, via the kernel's own mutations.
+function loadQueue(runId) {
+  if (!state.detail || state.detail.steers !== undefined) return;
+  api("/runs/" + runId + "/steers").then(function (out) {
+    if (state.detail && state.selected === runId) {
+      state.detail.steers = out.ok ? out.steers : [];
+      renderDetail();
+    }
+  });
+}
+function queueOp(runId, body) {
+  api("/runs/" + runId + "/steers", { method: "POST", body: body }).then(function (out) {
+    if (!out.ok) { showError(out.error || "the queue change failed"); return; }
+    if (state.detail && state.selected === runId) { state.detail.steers = out.steers; renderDetail(); }
+  });
+}
+function renderQueue(body, runId, steers) {
+  if (steers === undefined) { body.appendChild(h("div", "empty", "loading queue…")); return; }
+  if (!steers.length) { body.appendChild(h("div", "empty", "No steers yet — anything sent or queued from the composer appears here.")); return; }
+  var queuedIds = steers.filter(function (s) { return s.status === "queued"; }).map(function (s) { return s.id; });
+  steers.forEach(function (record) {
+    var delivered = record.status === "delivered";
+    var row = h("div", "qrow" + (delivered ? " delivered" : ""));
+    var head = h("div", "qrow-head");
+    head.appendChild(h("span", "atom" + (delivered ? "" : " amber"), record.status));
+    head.appendChild(h("span", "", ago(delivered ? record.delivered_at : record.at)));
+    row.appendChild(head);
+    if (delivered) {
+      row.appendChild(h("div", "qrow-text", record.message));
+    } else {
+      var field = document.createElement("input");
+      field.value = record.message;
+      field.onkeydown = function (ev) {
+        if (ev.key !== "Enter" || !field.value.trim()) return;
+        queueOp(runId, { op: "edit", id: record.id, message: field.value.trim() });
+      };
+      row.appendChild(field);
+      var ctrls = h("div", "qrow-ctrls");
+      var at = queuedIds.indexOf(record.id);
+      var up = h("button", "btn sm", "↑ earlier");
+      up.disabled = at <= 0;
+      up.onclick = function () {
+        var order = queuedIds.slice();
+        var swap = order[at - 1]; order[at - 1] = order[at]; order[at] = swap;
+        queueOp(runId, { op: "reorder", order: order });
+      };
+      ctrls.appendChild(up);
+      var down = h("button", "btn sm", "↓ later");
+      down.disabled = at < 0 || at >= queuedIds.length - 1;
+      down.onclick = function () {
+        var order = queuedIds.slice();
+        var swap = order[at + 1]; order[at + 1] = order[at]; order[at] = swap;
+        queueOp(runId, { op: "reorder", order: order });
+      };
+      ctrls.appendChild(down);
+      var del = h("button", "btn sm danger", "Delete");
+      del.onclick = function () { queueOp(runId, { op: "delete", id: record.id }); };
+      ctrls.appendChild(del);
+      row.appendChild(ctrls);
+    }
+    body.appendChild(row);
   });
 }
 
@@ -2366,11 +2585,19 @@ function connect() {
   source.addEventListener("pty", function (ev) {
     var payload;
     try { payload = JSON.parse(ev.data); } catch (err) { return; }
-    if (!term) return;
-    // Same rule as the room stream: bytes belong to the thread they came from.
-    if ((payload.session || "main") !== state.session) return;
-    if (payload.kind === "data") term.write(payload.bytes);
-    else if (payload.kind === "exit") term.write("\\r\\n\\x1b[33m[session ended]\\x1b[0m\\r\\n");
+    var session = payload.session || "main";
+    // Same rule everywhere: bytes belong to the screen they came from. The room's
+    // terminal and a run's take-over terminal are two separate xterm instances, keyed
+    // by two disjoint session prefixes ("main"/thread key vs. "run:<runId>"), so a
+    // byte can only ever paint into the one screen it actually belongs to.
+    if (term && session === state.session) {
+      if (payload.kind === "data") term.write(payload.bytes);
+      else if (payload.kind === "exit") term.write("\\r\\n\\x1b[33m[session ended]\\x1b[0m\\r\\n");
+    }
+    if (runTerm && state.runTermRunId && session === "run:" + state.runTermRunId) {
+      if (payload.kind === "data") runTerm.write(payload.bytes);
+      else if (payload.kind === "exit") runTerm.write("\\r\\n\\x1b[33m[session ended]\\x1b[0m\\r\\n");
+    }
   });
   source.onerror = function () {
     state.connected = false;

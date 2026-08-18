@@ -133,7 +133,10 @@ ${APP_STYLES}
     <div class="workmain">
       <div class="runs" id="work-split">
         <div class="list"><div class="card hand" id="handover" style="display:none"></div><div id="run-list"></div></div>
-        <div class="detail" id="run-detail"></div>
+        <div class="detail">
+          <div id="run-detail"></div>
+          <div id="run-term-pane"><div class="term-head"><span id="run-term-run"></span><button class="btn sm" id="run-term-handback">Hand Back</button></div><div id="run-term"></div></div>
+        </div>
       </div>
       <div class="board-scroll" id="work-board"><div class="board" id="board-cols"></div></div>
     </div>

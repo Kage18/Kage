@@ -464,6 +464,26 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .dot { width:7px; height:7px; border-radius:50%; margin-top:5px; }
 
   .detail { overflow:hidden; display:flex; flex-direction:column; background:var(--bg); min-width:0; }
+  /* run-detail and run-term-pane are siblings, shown one at a time: a take-over needs
+     its own xterm container that survives renderDetail()'s rebuild, same reason the
+     room's terminal pane lives outside the chat column instead of inside it. */
+  #run-detail { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
+  #run-term-pane { display:none; flex-direction:column; flex:1; min-height:0; min-width:0; background:var(--code-bg); }
+  .term-head { display:flex; align-items:center; justify-content:space-between; padding:10px 16px;
+    border-bottom:1px solid var(--line2); flex:none; }
+  .term-head span { font-family:var(--mono); font-size:11px; color:var(--text3); }
+  #run-term { flex:1; min-width:0; width:100%; padding:10px 16px; }
+  .plancard { margin-bottom:14px; }
+  .plancard .rawpane { margin:8px 0 12px; }
+  .qrow { padding:10px 14px; border:1px solid var(--line); border-radius:var(--r-card);
+    margin-bottom:8px; background:var(--surface); }
+  .qrow.delivered { opacity:.7; }
+  .qrow-head { display:flex; justify-content:space-between; font-family:var(--mono); font-size:10.5px;
+    color:var(--text3); margin-bottom:6px; }
+  .qrow input { width:100%; box-sizing:border-box; font:inherit; font-size:13px; padding:8px 12px;
+    border-radius:var(--r-control); border:1px solid var(--line); background:var(--inset); color:var(--text); }
+  .qrow-text { font-size:13px; color:var(--text2); }
+  .qrow-ctrls { display:flex; gap:6px; margin-top:8px; }
   .dhead { position:relative; padding:18px 26px 0; background:var(--surface); border-bottom:1px solid var(--line); flex:none; }
   .dclose { position:absolute; top:14px; right:16px; font-size:13px; color:var(--text3);
     padding:4px 9px; border-radius:var(--r-control); }

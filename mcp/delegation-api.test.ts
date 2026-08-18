@@ -53,7 +53,13 @@ const TOKEN = "test-token-0123456789abcdef0123456789abcdef";
  */
 async function startApi(
   projectDir: string,
-  options: { askManagerFn?: typeof askManager; askRoomFn?: unknown; ensurePtyAttachedFn?: unknown } = {},
+  options: {
+    askManagerFn?: typeof askManager;
+    askRoomFn?: unknown;
+    ensurePtyAttachedFn?: unknown;
+    takeOverRunFn?: unknown;
+    handBackFn?: unknown;
+  } = {},
 ): Promise<{ server: Server; port: number; feed: DelegationFeed }> {
   const feed = createDelegationFeed(projectDir, { heartbeatMs: 60_000 });
   const room = createRoomState();
@@ -79,6 +85,8 @@ async function startApi(
           askManagerFn: options.askManagerFn,
           askRoomFn: options.askRoomFn as never,
           ensurePtyAttachedFn: options.ensurePtyAttachedFn as never,
+          takeOverRunFn: options.takeOverRunFn as never,
+          handBackFn: options.handBackFn as never,
         },
         req,
         res,
@@ -300,6 +308,109 @@ test("GET/POST /runs/:id/steers exposes the queue and maps ops to the kernel mut
 
     const missing = await apiFetch(port, "/runs/does-not-exist/steers");
     assert.equal(missing.status, 404);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("POST /runs/:id/steers op:add appends a pure queue entry — no delivery attempted", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const run = createRun(project, { intent: "queue-only target", type: "chore", agent: "stub" });
+    const added = await (await apiFetch(port, `/runs/${run.id}/steers`, {
+      method: "POST",
+      body: JSON.stringify({ op: "add", message: "queue this for later" }),
+    })).json() as { ok: boolean; steers: Array<{ message: string; status: string }> };
+    assert.equal(added.ok, true);
+    assert.equal(added.steers.length, 1);
+    assert.equal(added.steers[0].message, "queue this for later");
+    assert.equal(added.steers[0].status, "queued", "op:add never attempts delivery, so it can never be delivered");
+
+    const blank = await apiFetch(port, `/runs/${run.id}/steers`, { method: "POST", body: JSON.stringify({ op: "add", message: "   " }) });
+    assert.equal(blank.status, 400);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("take-over: the seam's attachment is wired to the pty routes, a second take-over is idempotent, and handback clears it", async () => {
+  const project = tempProject();
+  const written: string[] = [];
+  const resizes: Array<[number, number]> = [];
+  const fakeTakeOver = async (_projectDir: string, runId: string) => ({
+    ok: true as const,
+    runId,
+    pid: 4242,
+    attachment: {
+      write: (data: string) => written.push(data),
+      resize: (cols: number, rows: number) => resizes.push([cols, rows]),
+      snapshot: () => "banner\n",
+      onData: () => {},
+      onExit: () => {},
+      detach: () => {},
+    },
+  });
+  const fakeHandBack = async (projectDir: string, runId: string) => ({ ok: true as const, task: readRun(projectDir, runId) });
+  const { server, port, feed } = await startApi(project, { takeOverRunFn: fakeTakeOver, handBackFn: fakeHandBack });
+  try {
+    const run = createRun(project, { intent: "take over target", type: "chore", agent: "stub" });
+
+    const missing = await apiFetch(port, "/runs/does-not-exist/takeover", { method: "POST" });
+    assert.equal(missing.status, 404);
+
+    const taken = await (await apiFetch(port, `/runs/${run.id}/takeover`, { method: "POST" })).json() as { ok: boolean; pid: number };
+    assert.equal(taken.ok, true);
+    assert.equal(taken.pid, 4242, "the seam's pid is what the route reports — never a real claude spawned");
+
+    const snap = await (await apiFetch(port, `/runs/${run.id}/pty/snapshot`)).json() as { ok: boolean; alive: boolean; scrollback: string };
+    assert.equal(snap.alive, true);
+    assert.equal(snap.scrollback, "banner\n");
+
+    const wrote = await apiFetch(port, `/runs/${run.id}/pty/write`, { method: "POST", body: JSON.stringify({ data: "ls\n" }) });
+    assert.equal(wrote.status, 202);
+    assert.deepEqual(written, ["ls\n"]);
+
+    const resized = await apiFetch(port, `/runs/${run.id}/pty/resize`, { method: "POST", body: JSON.stringify({ cols: 100, rows: 30 }) });
+    assert.equal(resized.status, 202);
+    assert.deepEqual(resizes, [[100, 30]]);
+
+    // A second take-over while one is already active is idempotent, not a re-spawn.
+    const again = await (await apiFetch(port, `/runs/${run.id}/takeover`, { method: "POST" })).json() as { ok: boolean; already?: boolean };
+    assert.equal(again.ok, true);
+    assert.equal(again.already, true);
+
+    const handedBack = await (await apiFetch(port, `/runs/${run.id}/handback`, { method: "POST" })).json() as { ok: boolean };
+    assert.equal(handedBack.ok, true);
+
+    // Once handed back, the pty routes are honestly 503 — nothing is live to write to.
+    const deadWrite = await apiFetch(port, `/runs/${run.id}/pty/write`, { method: "POST", body: JSON.stringify({ data: "x" }) });
+    assert.equal(deadWrite.status, 503);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("take-over reports a real refusal as its own 409 reason, and handback with nothing active is an honest 409", async () => {
+  const project = tempProject();
+  const fakeTakeOver = async () => ({ ok: false as const, reason: "no agent session recorded — there is no session to take over." });
+  const { server, port, feed } = await startApi(project, { takeOverRunFn: fakeTakeOver });
+  try {
+    const run = createRun(project, { intent: "no session", type: "chore", agent: "stub" });
+    const refused = await apiFetch(port, `/runs/${run.id}/takeover`, { method: "POST" });
+    assert.equal(refused.status, 409);
+    const refusedBody = await refused.json() as { ok: boolean; error: string };
+    assert.match(refusedBody.error, /no agent session/);
+
+    // No takeover ever happened, so the real handBack (untouched by any seam) must
+    // refuse honestly too — never spawning a reattach for a session that was never seized.
+    const handback = await apiFetch(port, `/runs/${run.id}/handback`, { method: "POST" });
+    assert.equal(handback.status, 409);
+    const handbackBody = await handback.json() as { ok: boolean; error: string };
+    assert.match(handbackBody.error, /no active terminal take-over/);
   } finally {
     feed.close();
     server.close();
