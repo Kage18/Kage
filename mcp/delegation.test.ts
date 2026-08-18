@@ -44,7 +44,9 @@ import { buildReport, renderReport, roomState } from "./delegation/report.js";
 import { computeTrackRecord, confidenceFor, curationComparison, renderCurationLine } from "./delegation/trackrecord.js";
 import { buildJudgment, readJudgment, renderJudgment } from "./delegation/manager.js";
 import { buildRoomLaunch } from "./delegation/manager-prompt.js";
+import { git, retryTransient, looksLikeGitRepo, type GitResult } from "./delegation/git.js";
 import { stageAndMeasure } from "./delegation/git.js";
+import { createWorktree, resolveWorkspaceKind } from "./delegation/worktree.js";
 import { packetsDir } from "./kernel.js";
 import {
   abandonGoal,
@@ -1683,4 +1685,84 @@ test("notifyManagerOfRunEvent: nothing is sent when the held session isn't live,
   attachRunToGoal(project, goal2.id, run2.id);
   assert.equal(await notifyManagerOfRunEvent(project, run2.id, { state: "ready" }, undefined, deadSessionDeps), false);
   assert.equal(sent.length, 0, "no live session means never touch stdin");
+});
+
+// --- BUG 1: transient git failures must never silently empty-sandbox a real repo ----
+// A concurrent `git worktree add`/`commit` in a parallel wave can hold .git's index or
+// a ref lock for a moment. isGitRepo/hasCommits used to treat that exactly like "not a
+// repo", so a healthy project could get classified as commit-less and its agent handed
+// an empty directory. See git.ts's retryTransient and worktree.ts's resolveWorkspaceKind.
+
+test("retryTransient retries only lock-contention failures, and gives up after the cap", () => {
+  let calls = 0;
+  const flaky: GitResult[] = [
+    { ok: false, stdout: "", stderr: "fatal: Unable to create '.git/index.lock': File exists." },
+    { ok: false, stdout: "", stderr: "fatal: cannot lock ref 'refs/heads/x': Unable to create" },
+    { ok: true, stdout: "deadbeef", stderr: "" },
+  ];
+  const result = retryTransient(() => flaky[calls++]);
+  assert.equal(result.ok, true, "the third attempt succeeds and its result is returned");
+  assert.equal(calls, 3, "it retried through both transient failures");
+
+  // A genuine "no" (not lock contention) must never be retried — it is a real answer.
+  calls = 0;
+  const genuineNo = () => {
+    calls++;
+    return { ok: false, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git" };
+  };
+  const noResult = retryTransient(genuineNo);
+  assert.equal(noResult.ok, false);
+  assert.equal(calls, 1, "a real 'no' is returned on the first try, never retried");
+
+  // Retrying stops at the attempt cap even if every attempt looks transient.
+  calls = 0;
+  const alwaysLocked = () => {
+    calls++;
+    return { ok: false, stdout: "", stderr: "index.lock" };
+  };
+  const gaveUp = retryTransient(alwaysLocked, 3, 1);
+  assert.equal(gaveUp.ok, false);
+  assert.equal(calls, 3, "capped at the configured attempt count");
+});
+
+test("resolveWorkspaceKind: worktree for a real repo, sandbox for no-repo or no-commits, throw for a broken .git", () => {
+  // A real repo with commits — the normal case.
+  const withCommits = tempGitProject();
+  assert.equal(resolveWorkspaceKind(withCommits), "worktree");
+
+  // No `.git` at all — a genuinely non-git project degrades to a sandbox, not a throw.
+  const noGit = tempProject();
+  assert.equal(resolveWorkspaceKind(noGit), "sandbox");
+
+  // A real repo with zero commits — also a legitimate sandbox, not a throw.
+  const noCommits = tempProject();
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: noCommits, stdio: "ignore" });
+  assert.equal(resolveWorkspaceKind(noCommits), "sandbox");
+
+  // A `.git` entry is present on disk, but it is broken (a gitdir pointer file aimed at
+  // nowhere) — git commands fail even after retries, but this is NOT "no repo here".
+  // Degrading to a sandbox here is exactly the silent-empty-sandbox bug; it must throw.
+  const brokenGit = tempProject();
+  writeFileSync(join(brokenGit, ".git"), "gitdir: /nonexistent/kage-test-path/.git\n", "utf8");
+  assert.ok(looksLikeGitRepo(brokenGit), "the .git entry itself does exist on disk");
+  assert.throws(() => resolveWorkspaceKind(brokenGit), /git/i);
+});
+
+test("createWorktree retries a locked `git worktree add` through an injected git seam and still succeeds", () => {
+  const project = tempGitProject();
+  let calls = 0;
+  const flakyGit = (cwd: string, args: string[]): GitResult => {
+    if (args[0] === "worktree" && args[1] === "add") {
+      calls++;
+      if (calls < 3) {
+        return { ok: false, stdout: "", stderr: "fatal: Unable to create '.git/worktrees/x/locked': File exists." };
+      }
+    }
+    // Delegate everything else (and the eventual successful add) to the real git binary.
+    return git(cwd, args);
+  };
+
+  const handle = createWorktree(project, "retry-lock-run", "kage/retry-lock-run", { runGit: flakyGit });
+  assert.equal(calls, 3, "the first two locked attempts were retried, the third succeeded");
+  assert.equal(existsSync(handle.path), true, "the worktree exists despite the earlier lock failures");
 });
