@@ -3,7 +3,7 @@
 // the user can act on in two minutes.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Adapter } from "./adapters/types.js";
 import { type BriefPlan, compileBrief, renderBrief } from "./brief.js";
@@ -68,31 +68,98 @@ export interface DispatchResult {
   workspace_kind: "worktree" | "sandbox";
 }
 
+export interface SteerRecord {
+  id: string;
+  message: string;
+  at: string;
+  status: "queued" | "delivered";
+  delivered_at?: string;
+}
+
 function steerPath(projectDir: string, runId: string): string {
   return join(runDir(projectDir, runId), "steer.jsonl");
 }
 
-export function appendSteer(projectDir: string, runId: string, message: string): void {
-  const path = steerPath(projectDir, runId);
-  mkdirSync(runDir(projectDir, runId), { recursive: true });
-  appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), message })}\n`, "utf8");
-  appendRunLedger(projectDir, { kind: "steer", run_id: runId, message });
+function makeSteerId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 8);
 }
 
-export function readSteers(projectDir: string, runId: string): string[] {
+/** Atomic temp+rename rewrite of the whole log — same crash-safety as task.json. */
+export function writeSteerRecords(projectDir: string, runId: string, records: SteerRecord[]): void {
+  const path = steerPath(projectDir, runId);
+  mkdirSync(runDir(projectDir, runId), { recursive: true });
+  const body = records.map((record) => JSON.stringify(record)).join("\n");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, body ? `${body}\n` : "", "utf8");
+  renameSync(tmp, path);
+}
+
+/** Every steer this run ever received, oldest first. Pre-tracking lines ({at, message},
+ * no id/status) are treated as delivered history so they never look re-deliverable. */
+export function readSteerRecords(projectDir: string, runId: string): SteerRecord[] {
   const path = steerPath(projectDir, runId);
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return (JSON.parse(line) as { message?: string }).message ?? "";
-      } catch {
-        return "";
-      }
-    })
-    .filter(Boolean);
+  const records: SteerRecord[] = [];
+  let legacyIndex = 0;
+  for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const message = typeof parsed.message === "string" ? parsed.message : "";
+    if (!message) continue;
+    if (typeof parsed.id === "string" && typeof parsed.status === "string") {
+      records.push({
+        id: parsed.id,
+        message,
+        at: typeof parsed.at === "string" ? parsed.at : new Date(0).toISOString(),
+        status: parsed.status === "delivered" ? "delivered" : "queued",
+        ...(typeof parsed.delivered_at === "string" ? { delivered_at: parsed.delivered_at } : {}),
+      });
+    } else {
+      legacyIndex += 1;
+      records.push({
+        id: `legacy-${legacyIndex}`,
+        message,
+        at: typeof parsed.at === "string" ? parsed.at : new Date(0).toISOString(),
+        status: "delivered",
+      });
+    }
+  }
+  return records;
+}
+
+/** Compat: plain message text, for brief re-rendering (renderBrief's "## Steering" section). */
+export function readSteers(projectDir: string, runId: string): string[] {
+  return readSteerRecords(projectDir, runId).map((record) => record.message);
+}
+
+/** Record a new steer as queued. Delivery is marked separately, once it actually lands. */
+export function appendSteerRecord(projectDir: string, runId: string, message: string): SteerRecord {
+  const record: SteerRecord = { id: makeSteerId(), message, at: new Date().toISOString(), status: "queued" };
+  const records = readSteerRecords(projectDir, runId);
+  records.push(record);
+  writeSteerRecords(projectDir, runId, records);
+  appendRunLedger(projectDir, { kind: "steer", run_id: runId, message });
+  return record;
+}
+
+/** Compat wrapper for callers that only ever wrote plain messages. */
+export function appendSteer(projectDir: string, runId: string, message: string): void {
+  appendSteerRecord(projectDir, runId, message);
+}
+
+/** Flip one queued steer to delivered. A no-op (returns null) if it is missing or already delivered. */
+export function deliverQueuedSteer(projectDir: string, runId: string, steerId: string): SteerRecord | null {
+  const records = readSteerRecords(projectDir, runId);
+  const index = records.findIndex((record) => record.id === steerId);
+  if (index === -1 || records[index].status === "delivered") return null;
+  const delivered: SteerRecord = { ...records[index], status: "delivered", delivered_at: new Date().toISOString() };
+  records[index] = delivered;
+  writeSteerRecords(projectDir, runId, records);
+  return delivered;
 }
 
 // Worktrees need a git repo with a branch point. Without one (a scratch directory, a
@@ -192,6 +259,12 @@ export async function executeRun(
   patchRun(projectDir, runId, { agent_session_id: outcome.session_id ?? sessionId });
 
   const fence = parseReportFence(outcome.final_message);
+  if (fence?.kind === "plan") {
+    patchRun(projectDir, runId, { waiting_on: { needs: "plan approval", detail: fence.plan ?? "" } });
+    task = transitionRun(projectDir, runId, "blocked", "kernel", fence.question ?? "awaiting plan approval");
+    line?.stop("⏸ blocked: awaiting plan approval");
+    return { task, plan, workspace: workspace.dir, workspace_kind: workspace.kind };
+  }
   // Two independent signals that an agent wants a human: its own protocol fence, and
   // the stream's blocked summary (which fires even when it asks in plain prose).
   if (fence?.kind === "blocked" || outcome.waiting) {

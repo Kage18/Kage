@@ -159,24 +159,32 @@ When you cannot proceed without a decision or missing access:
 {"need": "<what you need>", "question": "<the single question that unblocks you>"}
 \`\`\`
 
+Before a large or risky change, propose your plan and wait for approval rather than just
+starting — an explicit approval or revision is what resumes you:
+
+\`\`\`kage-plan
+{"plan": "<what you intend to do, and why>", "question": "<optional: what you want a reviewer to weigh in on>"}
+\`\`\`
+
 Never claim results of commands you did not run. Verification is executed independently;
 a false claim will be caught. If a check fails or you hit a blocker, report it — do not
 improvise around it.`;
 
 export interface ReportFence {
-  kind: "claim" | "blocked";
+  kind: "claim" | "blocked" | "plan";
   statement?: string;
   unsure: string[];
   learned: string[];
   need?: string;
   question?: string;
+  plan?: string;
 }
 
-// Deterministic fence extraction: the LAST kage-claim/kage-blocked fence in the text
-// wins (agents sometimes quote the protocol before following it). Malformed JSON or a
-// missing required field returns null — callers degrade, never throw.
+// Deterministic fence extraction: the LAST kage-claim/kage-blocked/kage-plan fence in
+// the text wins (agents sometimes quote the protocol before following it). Malformed
+// JSON or a missing required field returns null — callers degrade, never throw.
 export function parseReportFence(text: string): ReportFence | null {
-  const matches = [...text.matchAll(/```kage-(claim|blocked)\s*\n([\s\S]*?)```/g)];
+  const matches = [...text.matchAll(/```kage-(claim|blocked|plan)\s*\n([\s\S]*?)```/g)];
   const last = matches[matches.length - 1];
   if (!last) return null;
   let body: Record<string, unknown>;
@@ -195,6 +203,12 @@ export function parseReportFence(text: string): ReportFence | null {
       unsure: asStringArray(body.unsure),
       learned: asStringArray(body.learned),
     };
+  }
+  if (last[1] === "plan") {
+    const plan = typeof body.plan === "string" ? body.plan.trim() : "";
+    if (!plan) return null;
+    const question = typeof body.question === "string" ? body.question.trim() : "";
+    return { kind: "plan", plan, question: question || undefined, unsure: [], learned: [] };
   }
   const need = typeof body.need === "string" ? body.need.trim() : "";
   const question = typeof body.question === "string" ? body.question.trim() : "";

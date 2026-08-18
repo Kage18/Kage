@@ -28,11 +28,11 @@ import {
   type RunType,
   type RunView,
 } from "./contract.js";
-import { dispatchDetached } from "./dispatch.js";
+import { dispatchDetached, readSteerRecords } from "./dispatch.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { normalizeRunType, preflightForecast } from "./preflight.js";
-import { steerRun } from "./steer.js";
-import { sendControl } from "./control.js";
+import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type SteerQueueResult } from "./steer.js";
+import { sendControl, isRunLive } from "./control.js";
 import { mergeRun, rejectRun } from "./ratify.js";
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
@@ -953,9 +953,20 @@ export async function handleDelegationRoute(
     return true;
   }
 
-  const runMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|merge|reject|raw|diff))?$/);
+  const runMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers))?$/);
   if (!runMatch) return false;
   const [, runId, action] = runMatch;
+
+  if (action === "steers" && method === "GET") {
+    try {
+      readRun(projectDir, runId);
+    } catch (error) {
+      json(res, 404, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    json(res, 200, { ok: true, steers: readSteerRecords(projectDir, runId) });
+    return true;
+  }
 
   if (action === "raw" && method === "GET") {
     // The genuine escape hatch: the transcript exactly as the adapter wrote it.
@@ -1017,6 +1028,49 @@ export async function handleDelegationRoute(
         detail: reply?.detail ?? "no live supervisor — nothing to stop",
         run: readRun(projectDir, runId),
       });
+      return true;
+    }
+    if (action === "interrupt") {
+      readRun(projectDir, runId); // 404s for an unknown run before the honest-503 check below.
+      // Unlike stop, a true interrupt leaves the process and session alive.
+      if (!(await isRunLive(projectDir, runId))) {
+        json(res, 503, { ok: false, error: "no live supervisor" });
+        return true;
+      }
+      const reply = await sendControl(projectDir, runId, { op: "interrupt" });
+      feed.notify(runId);
+      json(res, 200, { ok: true, delivered: reply?.delivered === true, detail: reply?.detail ?? "interrupt sent", run: readRun(projectDir, runId) });
+      return true;
+    }
+    if (action === "steers") {
+      const body = await readJsonBody(req);
+      const op = typeof body.op === "string" ? body.op : "";
+      readRun(projectDir, runId); // 404s for an unknown run before the mutation runs.
+      let result: SteerQueueResult;
+      if (op === "edit") {
+        const id = typeof body.id === "string" ? body.id : "";
+        const message = typeof body.message === "string" ? body.message : "";
+        if (!id || !message.trim()) {
+          json(res, 400, { ok: false, error: "id and message are required" });
+          return true;
+        }
+        result = editQueuedSteer(projectDir, runId, id, message);
+      } else if (op === "delete") {
+        const id = typeof body.id === "string" ? body.id : "";
+        if (!id) {
+          json(res, 400, { ok: false, error: "id is required" });
+          return true;
+        }
+        result = deleteQueuedSteer(projectDir, runId, id);
+      } else if (op === "reorder") {
+        const order = Array.isArray(body.order) ? body.order.filter((entry): entry is string => typeof entry === "string") : [];
+        result = reorderQueuedSteers(projectDir, runId, order);
+      } else {
+        json(res, 400, { ok: false, error: `unknown op: ${op || "(none)"}` });
+        return true;
+      }
+      feed.notify(runId);
+      json(res, result.ok ? 200 : 409, { ok: result.ok, error: result.ok ? undefined : result.reason, steers: result.records });
       return true;
     }
     if (action === "merge") {

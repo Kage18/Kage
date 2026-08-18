@@ -20,7 +20,7 @@ import {
 import type { Adapter } from "./adapters/types.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { strictVerify } from "./config.js";
-import { readSteers } from "./dispatch.js";
+import { deliverQueuedSteer, readSteerRecords } from "./dispatch.js";
 import {
   recordSpend,
   buildClaim,
@@ -68,7 +68,7 @@ export function supervisorRecordPath(projectDir: string, runId: string): string 
 }
 
 export type ControlOp =
-  | { op: "tell"; message: string }
+  | { op: "tell"; message: string; steerId?: string }
   | { op: "interrupt" }
   | { op: "stop" }
   | { op: "status" };
@@ -128,16 +128,15 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   const adapter = adapterOverride ?? adapterByName(task.agent);
   const state: SupervisorState = { finalMessage: "", stopped: false };
 
-  // RESUME: an existing session plus a pending steer means this call is a REATTACH —
+  // RESUME: an existing session plus a queued steer means this call is a REATTACH —
   // steer.ts's fallback spawns exactly this when no live socket could take a tell, so a
-  // fire-and-forget resume no longer orphans its claim (the same supervisor that takes
-  // the steer now collects it). The agent already has the brief in its restored
-  // context; it needs the answer, not the brief again. Only the newest stored steer is
-  // redelivered — the log has no per-message delivered flag, so an older one already
-  // answered live in a prior session is not distinguished from one that never landed.
-  const pendingSteers = readSteers(projectDir, runId);
+  // fire-and-forget resume no longer orphans its claim. ALL still-queued steers are
+  // redelivered here, oldest first (not just the newest), and marked delivered at the
+  // moment they are injected — a delivered one already answered live is never replayed.
+  const pendingSteers = readSteerRecords(projectDir, runId).filter((record) => record.status === "queued");
   const isResume = Boolean(task.agent_session_id) && pendingSteers.length > 0;
-  const firstMessage = isResume ? pendingSteers[pendingSteers.length - 1] : brief;
+  const firstMessage = isResume ? pendingSteers.map((record) => record.message).join("\n\n") : brief;
+  if (isResume) for (const record of pendingSteers) deliverQueuedSteer(projectDir, runId, record.id);
 
   // The agent, with stdin held open for its whole life — only an adapter that offers
   // spawnLive supports this (today: claude). Earlier this branch spawned a
@@ -248,6 +247,10 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     // `tell`: a message the agent receives at its next tool-result boundary. Report the
     // WRITE result — a false return means the buffer is full and it is not delivered.
     const wrote = child?.stdin?.write(userMessageFrame(op.message)) ?? false;
+    // The held-socket path: this supervisor is the process that actually performs the
+    // write, so it is the one that flips the steer record to delivered — at the exact
+    // moment the message lands in the live agent's stdin, not before.
+    if (wrote && op.steerId) deliverQueuedSteer(projectDir, runId, op.steerId);
     // Blocked is a WAITING state, not an exit: the child stayed alive holding stdin
     // open specifically so this write could land in the SAME session, rather than a
     // later `kage retry` starting a fresh one that discards the agent's context. This
@@ -308,7 +311,16 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
             // claim, killing the very session `kage tell` needed to answer).
             if (parsed.type === "result" && !state.stopped) {
               const fence = parseReportFence(state.finalMessage);
-              if (fence?.kind === "blocked" || (!fence && state.waiting)) {
+              if (fence?.kind === "plan") {
+                // A plan is a proposal, not a claim: it holds stdin open exactly like a
+                // block, but names WHY it is waiting — approval, not an open question —
+                // so a reviewer sees "plan approval" rather than a generic block.
+                if (readRun(projectDir, runId).state === "running") {
+                  patchRun(projectDir, runId, { waiting_on: { needs: "plan approval", detail: fence.plan ?? "" } });
+                  transitionRun(projectDir, runId, "blocked", "kernel", fence.question ?? "awaiting plan approval");
+                }
+                log({ kind: "turn_complete", label: `agent proposed a plan, waiting for approval: ${fence.plan}` });
+              } else if (fence?.kind === "blocked" || (!fence && state.waiting)) {
                 const note = fence?.question ?? fence?.need ?? state.waiting?.detail ?? "blocked without a stated question";
                 if (readRun(projectDir, runId).state === "running") transitionRun(projectDir, runId, "blocked", "kernel", note);
                 log({ kind: "turn_complete", label: `agent is blocked, waiting for a tell: ${note}` });
@@ -393,6 +405,15 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   }
 
   const fence = parseReportFence(state.finalMessage);
+  if (fence?.kind === "plan") {
+    // Same re-entrancy guard as the blocked branch below: the live-child loop may
+    // already have made this transition before the child actually exited.
+    if (readRun(projectDir, runId).state !== "blocked") {
+      patchRun(projectDir, runId, { waiting_on: { needs: "plan approval", detail: fence.plan ?? "" } });
+      transitionRun(projectDir, runId, "blocked", "kernel", fence.question ?? "awaiting plan approval");
+    }
+    return;
+  }
   if (fence?.kind === "blocked" || state.waiting) {
     // The live-child branch above already transitions to `blocked` the moment the fence
     // appears, without ending the run — so by the time execution reaches here (the child
