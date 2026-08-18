@@ -17,7 +17,7 @@ var state = {
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
   workLayout: "list", dover: false, showAllDone: false, workOrder: [],
-  diffView: "unified", collapsedDiff: {}, expandedGroups: {},
+  diffView: "unified", collapsedDiff: {}, expandedGroups: {}, detailIntentOpen: false,
   steerQueueMode: false, runTerminalActive: false, runTermRunId: null,
 };
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
@@ -73,6 +73,28 @@ function glyphFor(run) {
 function isPlanApproval(run) {
   return Boolean(run.waiting_on && run.waiting_on.needs === "plan approval");
 }
+// Short display title derived from a run's raw intent — mirrors runTitle in
+// mcp/delegation/contract.ts exactly (first sentence or first line, trailing
+// punctuation trimmed, whitespace collapsed, capped on a word boundary). Intents are
+// meant to be detailed and can run to thousands of characters; every surface that
+// names a run must render this, never run.intent directly.
+var RUN_TITLE_MAX_LENGTH = 96;
+function runTitle(run) {
+  var raw = (run.intent || "").trim();
+  if (!raw) return run.id;
+  var firstLine = raw.split(/\\r?\\n/)[0];
+  var sentenceMatch = firstLine.match(/^[^.!?]*[.!?]/);
+  var picked = sentenceMatch ? sentenceMatch[0] : firstLine;
+  var collapsed = picked.replace(/\\s+/g, " ").trim().replace(/[.,;:!?]+$/, "").trim();
+  var title = collapsed || run.id;
+  if (title.length <= RUN_TITLE_MAX_LENGTH) return title;
+  var ellipsis = "…";
+  var budget = RUN_TITLE_MAX_LENGTH - ellipsis.length;
+  var truncated = title.slice(0, budget);
+  var lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > 0) truncated = truncated.slice(0, lastSpace);
+  return truncated.trim() + ellipsis;
+}
 // Deliver a message to a blocked/live run's own tell route — the ONE path every
 // answer field, the Approve button, and the detail composer's "send now" all use, so
 // the delivery vocabulary the kernel reports is never re-worded per caller.
@@ -86,12 +108,12 @@ function tellRun(runId, message) {
 }
 function decisionText(run) {
   var s = run.display_state;
-  if (s === "ready") return "Merge: " + run.intent;
-  if (s === "blocked" && isPlanApproval(run)) return "Plan review: " + run.intent;
+  if (s === "ready") return "Merge: " + runTitle(run);
+  if (s === "blocked" && isPlanApproval(run)) return "Plan review: " + runTitle(run);
   if (s === "blocked" && run.waiting_on) return "“" + (run.waiting_on.question || run.waiting_on.detail || run.waiting_on.needs || "waiting on you") + "”";
-  if (s === "blocked") return "Waiting on you: " + run.intent;
-  if (s === "stopped") return "Stopped — resume or reject: " + run.intent;
-  return "Lost, resumable: " + run.intent;
+  if (s === "blocked") return "Waiting on you: " + runTitle(run);
+  if (s === "stopped") return "Stopped — resume or reject: " + runTitle(run);
+  return "Lost, resumable: " + runTitle(run);
 }
 
 // --- the work surface: one view, two arrangements, one power set.
@@ -142,7 +164,7 @@ function workRow(run) {
   var g = glyphFor(run);
   row.appendChild(h("span", "glyph " + g[1], g[0]));
   var mid = h("div");
-  mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : run.intent));
+  mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : runTitle(run)));
   var atoms = h("div", "qatoms");
   atoms.appendChild(h("span", "atom", run.agent));
   if (run.display_state === "ready") atoms.appendChild(h("span", "atom jade", "awaiting merge"));
@@ -277,7 +299,7 @@ function selectRun(id) {
   // showing the wrong run's terminal under a newly-selected row.
   if (changed && state.runTerminalActive && state.runTermRunId !== id) closeRunTerminal();
   state.selected = id;
-  if (changed) { state.tab = "follow"; state.detail = null; state.collapsedDiff = {}; state.expandedGroups = {}; }
+  if (changed) { state.tab = "follow"; state.detail = null; state.collapsedDiff = {}; state.expandedGroups = {}; state.detailIntentOpen = false; }
   if (state.workLayout === "board") state.dover = true;
   renderWork();
   api("/runs/" + id).then(function (detail) {
@@ -399,7 +421,7 @@ function goalCard(goal) {
       var tone = goalWaveTone(runId);
       var found = state.runs.filter(function (r) { return r.id === runId; })[0];
       var chip = h("span", "gwchip " + tone[1], tone[0]);
-      chip.title = found ? found.intent : runId;
+      chip.title = found ? runTitle(found) : runId;
       if (found) chip.onclick = function () { selectRun(runId); };
       row.appendChild(chip);
     });
@@ -521,7 +543,7 @@ function renderLiveRail() {
     if (working) row.appendChild(h("span", "dot"));
     row.appendChild(h("span", "la", working ? (run.display_state === "verifying" ? "verifying" : "working") :
       (run.display_state === "ready" ? "ready" : "asks you")));
-    row.appendChild(h("span", "li", run.intent));
+    row.appendChild(h("span", "li", runTitle(run)));
     // The live activity line is the whole point — say what it is doing, not just that
     // it is doing something.
     if (run.activity && run.activity.last_label) row.appendChild(h("span", "lg", readableLabel(run.activity.last_label)));
@@ -614,7 +636,7 @@ function turnRunCard(run) {
   var cost = costLabel(run);
   if (cost) chips.appendChild(h("span", "chip", cost));
   mid.appendChild(chips);
-  mid.appendChild(h("div", "turn-runcard-intent", run.intent));
+  mid.appendChild(h("div", "turn-runcard-intent", runTitle(run)));
   if (run.claim_summary) mid.appendChild(h("div", "atom", run.claim_summary));
   card.appendChild(mid);
   card.onclick = function () { openRun(run.id); };
@@ -677,7 +699,7 @@ function renderRoom() {
     if (linked) {
       var opener = h("div", "opened");
       opener.appendChild(h("span", "arrow", "→"));
-      opener.appendChild(document.createTextNode("watch it work: " + linked.intent));
+      opener.appendChild(document.createTextNode("watch it work: " + runTitle(linked)));
       opener.onclick = function () { openRun(linked.id); };
       wrap.appendChild(opener);
     }
@@ -892,7 +914,7 @@ function renderPacketFlywheel(el, out) {
   function runRow(label, run) {
     var row = h("div", "flyrow");
     row.appendChild(h("span", "fk", label));
-    row.appendChild(h("span", "fv", run.intent));
+    row.appendChild(h("span", "fv", runTitle(run)));
     var g = glyphFor(run);
     row.appendChild(h("span", "fs " + g[1], run.display_state));
     row.onclick = function () {
@@ -1530,7 +1552,16 @@ function renderDetail() {
     close.onclick = function () { state.dover = false; renderWork(); };
     head.appendChild(close);
   }
-  head.appendChild(h("h2", "", run.intent));
+  head.appendChild(h("h2", "", runTitle(run)));
+  // The title above is a derived short form — the full intent (often the length of a
+  // paragraph, by design: the New-run modal asks "what should change, and how you'll
+  // know it worked") stays one click away instead of blowing up the header.
+  var intentFold = h("button", "foldrow");
+  intentFold.appendChild(h("span", "tw", state.detailIntentOpen ? "▾" : "▸"));
+  intentFold.appendChild(h("span", "", "Full intent"));
+  intentFold.onclick = function () { state.detailIntentOpen = !state.detailIntentOpen; renderDetail(); };
+  head.appendChild(intentFold);
+  if (state.detailIntentOpen) head.appendChild(h("div", "rawpane", run.intent));
   var chips = h("div", "chips");
   chips.appendChild(h("span", "chip state-" + run.display_state, run.display_state));
   chips.appendChild(h("span", "chip", shortBranch(run.branch)));
@@ -1772,7 +1803,7 @@ function renderBoard() {
       card.tabIndex = 0;
       card.appendChild(h("span", "av " + run.agent, run.agent.slice(0, 2)));
       var mid = h("div");
-      mid.appendChild(h("div", "at", run.intent));
+      mid.appendChild(h("div", "at", runTitle(run)));
       mid.appendChild(h("div", "abr", shortBranch(run.branch)));
       var arow = h("div", "arow");
       if (run.display_state === "ready") arow.appendChild(h("span", "atom jade", "awaiting merge"));
@@ -2321,7 +2352,7 @@ function maybeNotify() {
     if (was && was !== "needs_you" && run.ownership === "needs_you" && granted) {
       if (!(document.hasFocus() && document.visibilityState === "visible")) {
         arrived = true;
-        var note = new Notification("Kage — needs you", { body: run.intent, tag: run.id });
+        var note = new Notification("Kage — needs you", { body: runTitle(run), tag: run.id });
         note.onclick = function () { window.focus(); openRun(run.id); };
       }
     }
@@ -2383,7 +2414,7 @@ function renderNotifications() {
       : run.stale ? "Lost — resumable" : "Needs you";
     mid.appendChild(h("div", "t", headline));
     var detail = run.waiting_on && (run.waiting_on.question || run.waiting_on.detail)
-      ? (run.waiting_on.question || run.waiting_on.detail) : run.intent;
+      ? (run.waiting_on.question || run.waiting_on.detail) : runTitle(run);
     mid.appendChild(h("div", "s", detail));
     row.appendChild(mid);
     row.appendChild(h("span", "when", ago(run.updated_at)));
@@ -2591,14 +2622,16 @@ function paletteCommands(query) {
   });
   state.runs.forEach(function (r) {
     cmds.push({
-      grp: r.display_state, name: r.intent,
+      grp: r.display_state, name: runTitle(r), search: r.intent || "",
       hint: r.ownership === "needs_you" ? "needs you" : "",
       run: function () { openRun(r.id); },
     });
   });
   var q = query.trim().toLowerCase();
   if (!q) return cmds.slice(0, 12);
-  return cmds.filter(function (c) { return (c.name + " " + c.grp).toLowerCase().indexOf(q) >= 0; }).slice(0, 12);
+  return cmds.filter(function (c) {
+    return (c.name + " " + c.grp + " " + (c.search || "")).toLowerCase().indexOf(q) >= 0;
+  }).slice(0, 12);
 }
 function renderPalette() {
   var input = document.getElementById("palette-input");

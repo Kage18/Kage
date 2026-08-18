@@ -12,7 +12,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute, type DelegationFeed } from "./delegation/api.js";
 import type { askManager } from "./delegation/manager-client.js";
 import { guardRequest } from "./delegation/guard.js";
-import { RUN_STATES, createRun, patchRun, readRun, runTranscriptPath, transitionRun } from "./delegation/contract.js";
+import {
+  RUN_SCHEMA_VERSION,
+  RUN_STATES,
+  createRun,
+  patchRun,
+  readRun,
+  runTitle,
+  runTranscriptPath,
+  transitionRun,
+  type TaskRecord,
+} from "./delegation/contract.js";
 import { delegationAppHtml } from "./delegation/app-html.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { mergeRun, rejectRun } from "./delegation/ratify.js";
@@ -1531,4 +1541,67 @@ test("stop on a blocked run with a LIVE supervisor is unaffected — it stops th
     feed.close();
     server.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// runTitle: a run's raw intent is meant to be detailed (the New-run modal asks "what
+// should change, and how you'll know it worked") and can run to thousands of
+// characters, so every surface that names a run must show a short derived title
+// instead. Appended at the end of the file per this run's brief, to avoid colliding
+// with concurrent edits elsewhere in this file.
+
+function fakeTask(intent: string, id = "fake-run-id"): TaskRecord {
+  return {
+    schema_version: RUN_SCHEMA_VERSION,
+    id,
+    intent,
+    type: "chore",
+    state: "draft",
+    agent: "stub",
+    worktree: null,
+    branch: `kage/${id}`,
+    budgets: { usd: 2, minutes: 30, diff_lines: 400 },
+    spend: { usd_est: 0, minutes: 0 },
+    confidence: { band: "low", basis: "test fixture" },
+    curated_by: "kernel",
+    state_history: [],
+    created_at: "2026-08-18T00:00:00.000Z",
+    updated_at: "2026-08-18T00:00:00.000Z",
+  };
+}
+
+test("runTitle caps a long intent at 96 chars, ends with an ellipsis, and breaks on a word boundary", () => {
+  const longIntent = "lorem ".repeat(500).trim();
+  assert.ok(longIntent.length > 2900, "the fixture intent must actually be long");
+  const title = runTitle(fakeTask(longIntent));
+  assert.ok(title.length <= 96, `expected <= 96 chars, got ${title.length}`);
+  assert.ok(title.endsWith("…"), "must end with the single-character ellipsis");
+  const withoutEllipsis = title.slice(0, -1);
+  assert.ok(!withoutEllipsis.endsWith(" "), "no trailing space before the ellipsis");
+  assert.match(withoutEllipsis, /^(lorem )*lorem$/, "must break on a word boundary, never mid-word");
+});
+
+test("runTitle returns a short single-line intent unchanged, with no ellipsis", () => {
+  const intent = "Fix the login page CSS overflow bug";
+  assert.equal(runTitle(fakeTask(intent)), intent);
+});
+
+test("runTitle falls back to the run id when the intent is blank", () => {
+  assert.equal(runTitle(fakeTask("   ", "blank-intent-run-id")), "blank-intent-run-id");
+});
+
+test("the composed client script routes every run title through runTitle, never raw run.intent, in row/header render paths", () => {
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  // The syntactically-valid-JS gate this task must not regress — re-asserted here
+  // alongside the routing checks below.
+  assert.doesNotThrow(() => new Function(script), "the emitted script must still parse");
+  assert.ok(script.includes("function runTitle(run)"), "the client-side runTitle helper must be defined");
+  assert.ok(!script.includes('"qt", needsYou ? decisionText(run) : run.intent'),
+    "the work-row title must not fall back to the raw, uncapped intent");
+  assert.ok(!script.includes('"h2", "", run.intent'), "the detail header must not render the raw intent");
+  assert.ok(script.includes('"qt", needsYou ? decisionText(run) : runTitle(run)'),
+    "the work-row title must route through runTitle");
+  assert.ok(script.includes('"h2", "", runTitle(run)'), "the detail header must route through runTitle");
+  assert.ok(script.includes("Full intent"), "a disclosure must keep the full intent reachable");
 });
