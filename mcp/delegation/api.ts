@@ -270,18 +270,23 @@ export interface DelegationApiContext {
   askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; redactions?: string[] }>;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
-  /**
-   * Live take-over attachments, one per run currently seized in a terminal. Unlike the
-   * room's pty (a socket-served view held by a DETACHED process), a take-over's pty runs
-   * directly in this process — see run-pty.ts — so this map IS the daemon's only record
-   * of it, not a cache of something else's state.
-   */
-  runPtys?: Map<string, RunPtyAttachment>;
   /** Test seam: replace real take-over pty spawning entirely — never a real claude. */
   takeOverRunFn?: typeof takeOverRun;
   /** Test seam: replace the real kill-and-reattach hand-back entirely. */
   handBackFn?: typeof handBack;
 }
+
+/**
+ * Live take-over attachments, one per run currently seized in a terminal. Module scope,
+ * NOT a field on DelegationApiContext: a ctx object is caller-constructed (the daemon
+ * builds one long-lived object; a test harness may build a fresh one per request), and
+ * an attachment set by one POST /takeover must still be there for the NEXT request's
+ * GET /pty/snapshot regardless of which shape the caller chose. Unlike the room's pty
+ * (a socket-served view held by a DETACHED process), a take-over's pty runs directly in
+ * THIS process — see run-pty.ts — so this map is the only record of it that exists
+ * anywhere, and it must survive at the process's own lifetime, not a request's.
+ */
+const runPtyAttachments = new Map<string, RunPtyAttachment>();
 
 /** The serialization chain and pending counter belong to ONE thread, never shared. */
 export function roomStateFor(ctx: DelegationApiContext, session?: string): RoomState {
@@ -970,7 +975,7 @@ export async function handleDelegationRoute(
   const runPtyMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)\/pty\/(write|resize|snapshot)$/);
   if (runPtyMatch) {
     const [, ptyRunId, sub] = runPtyMatch;
-    const attachment = ctx.runPtys?.get(ptyRunId) ?? null;
+    const attachment = runPtyAttachments.get(ptyRunId) ?? null;
     if (sub === "snapshot" && method === "GET") {
       json(res, 200, { ok: true, alive: Boolean(attachment), scrollback: attachment ? attachment.snapshot() : "" });
       return true;
@@ -1153,7 +1158,7 @@ export async function handleDelegationRoute(
     }
     if (action === "takeover") {
       readRun(projectDir, runId); // 404s for an unknown run before the mutation runs.
-      const existing = ctx.runPtys?.get(runId);
+      const existing = runPtyAttachments.get(runId);
       if (existing) {
         json(res, 200, { ok: true, already: true, run: readRun(projectDir, runId) });
         return true;
@@ -1164,13 +1169,12 @@ export async function handleDelegationRoute(
         json(res, 409, { ok: false, error: result.reason });
         return true;
       }
-      if (!ctx.runPtys) ctx.runPtys = new Map();
-      ctx.runPtys.set(runId, result.attachment);
+      runPtyAttachments.set(runId, result.attachment);
       // Bytes stream over the SAME pty channel the room uses, keyed by session so a run
       // terminal and a room terminal never paint into each other's screen.
       result.attachment.onData((bytes) => feed.notifyPty({ kind: "data", bytes, session: `run:${runId}` }));
       result.attachment.onExit(() => {
-        ctx.runPtys?.delete(runId);
+        runPtyAttachments.delete(runId);
         feed.notifyPty({ kind: "exit", session: `run:${runId}` });
         feed.notify(runId);
       });
@@ -1182,7 +1186,7 @@ export async function handleDelegationRoute(
       readRun(projectDir, runId); // 404s for an unknown run before the mutation runs.
       const doHandBack = ctx.handBackFn ?? handBack;
       const result = await doHandBack(projectDir, runId);
-      ctx.runPtys?.delete(runId);
+      runPtyAttachments.delete(runId);
       feed.notify(runId);
       json(res, result.ok ? 200 : 409, { ok: result.ok, error: result.ok ? undefined : result.reason, run: result.ok ? result.task : readRun(projectDir, runId) });
       return true;
