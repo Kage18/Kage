@@ -28,7 +28,7 @@ import { interruptFrame, superviseRun, userMessageFrame } from "./delegation/sup
 import { isRunLive, sendControl } from "./delegation/control.js";
 import { eventsSincePage, renderStatusBoard } from "./delegation/report.js";
 import { sessionIdFrom, waitingSignal } from "./delegation/adapters/cli-agent.js";
-import { claudeLiveArgs } from "./delegation/adapters/index.js";
+import { AGENT_ALLOWED_TOOLS, claudeLiveArgs, claudeOneShotArgs } from "./delegation/adapters/index.js";
 import { loadRunRows } from "./delegation/tui/app.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
@@ -2247,4 +2247,40 @@ test("STATIC CHECKS: static_checks: false in config disables them even with a br
 
   const result = runStaticChecks(dir, "static-check-e", dir, []);
   assert.deepEqual(result.checks, [], "disabled via config — never runs, never fails a run for it");
+});
+
+test("hired agents get an explicit Bash allowlist on both spawn paths, or they work blind", () => {
+  // acceptEdits auto-approves file edits only; in headless -p mode there is no
+  // interactive dialog to answer a Bash permission prompt, so without --allowedTools
+  // every command an agent runs is denied outright and it can only reason about
+  // correctness instead of observing it (the bug this test guards against).
+  const oneShot = claudeOneShotArgs("do the thing", {});
+  const live = claudeLiveArgs({});
+
+  const oneShotIndex = oneShot.indexOf("--allowedTools");
+  assert.ok(oneShotIndex >= 0, "one-shot args must pass --allowedTools");
+  assert.match(oneShot[oneShotIndex + 1], /\bBash\b/, "one-shot allowlist must include Bash");
+
+  const liveIndex = live.indexOf("--allowedTools");
+  assert.ok(liveIndex >= 0, "claudeLiveArgs must pass --allowedTools");
+  assert.match(live[liveIndex + 1], /\bBash\b/, "live allowlist must include Bash");
+
+  // The actual regression guard: both spawn paths must grant the SAME tools, so they
+  // can never drift apart the way this bug did (fixed on the manager path, forgotten
+  // on the hired-agent path).
+  assert.equal(oneShot[oneShotIndex + 1], live[liveIndex + 1], "one-shot and live allowlists must be identical");
+  assert.equal(oneShot[oneShotIndex + 1], AGENT_ALLOWED_TOOLS.join(","));
+
+  assert.ok(!oneShot.includes("--dangerously-skip-permissions"), "one-shot must not bypass permissions entirely");
+  assert.ok(!live.includes("--dangerously-skip-permissions"), "live must not bypass permissions entirely");
+});
+
+test("renderBrief tells hired agents to actually run tests and build before claiming", () => {
+  const project = tempProject();
+  const plan = compileBrief(project, "do something", "chore");
+  const task = createRun(project, { intent: "do something", type: "chore", agent: "stub" });
+  const rendered = renderBrief(task, plan);
+
+  assert.match(rendered, /run the repo's tests and build/i, "must plainly tell the agent it can and should run tests/build");
+  assert.match(rendered, /## You will be held to these checks/, "belongs in the reporting-protocol / checks area");
 });

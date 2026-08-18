@@ -7,6 +7,22 @@ import type { Adapter } from "./types.js";
 
 const AGENT_RUN_TIMEOUT_MS = 45 * 60_000;
 
+/**
+ * Tools a hired agent may use without a permission prompt. In headless `-p` mode
+ * there is no interactive dialog to answer, so anything not on this list is denied
+ * outright — `--permission-mode acceptEdits` only auto-approves file edits, it does
+ * NOT cover Bash (the same gap already fixed once on the manager path; see
+ * MANAGER_ALLOWED_TOOLS in manager-client.ts and the comment on room-supervisor.ts).
+ *   - Read, Glob, Grep: find and inspect existing code before touching it.
+ *   - Write, Edit: make the change (belt-and-braces with acceptEdits, which covers
+ *     the same ground but only inside the interactive flow).
+ *   - Bash: run the repo's own tests and build. Without it the agent can only
+ *     REASON about whether its change works — with it, it can OBSERVE the result,
+ *     which is the entire difference between a claim that was checked and one that
+ *     was guessed.
+ */
+export const AGENT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"];
+
 export const claudeAdapter = (): Adapter => ({
   ...cliAgentAdapter({
     name: "claude",
@@ -17,16 +33,7 @@ export const claudeAdapter = (): Adapter => ({
     // The session id is pre-assigned (or resumed) so a blocked agent can be ANSWERED
     // rather than restarted: `--resume` restores its full context, where a fresh
     // dispatch would throw away everything it had figured out.
-    args: (brief, input) => [
-      ...(input.resumeSessionId ? ["--resume", input.resumeSessionId] : input.sessionId ? ["--session-id", input.sessionId] : []),
-      "-p",
-      brief,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--permission-mode",
-      "acceptEdits",
-    ],
+    args: (brief, input) => claudeOneShotArgs(brief, input),
     finalMessage: lastTextFromStreamJson,
     timeoutMs: AGENT_RUN_TIMEOUT_MS,
   }),
@@ -37,6 +44,25 @@ export const claudeAdapter = (): Adapter => ({
   spawnLive: ({ workDir, sessionId, resumeSessionId }) =>
     spawn("claude", claudeLiveArgs({ sessionId, resumeSessionId }), { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] }),
 });
+
+/**
+ * Argv for the one-shot (`run()`) spawn, split out so the flags are unit-testable
+ * without spawning the real CLI — same reasoning as `claudeLiveArgs` below.
+ */
+export function claudeOneShotArgs(brief: string, input: { sessionId?: string; resumeSessionId?: string }): string[] {
+  return [
+    ...(input.resumeSessionId ? ["--resume", input.resumeSessionId] : input.sessionId ? ["--session-id", input.sessionId] : []),
+    "-p",
+    brief,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "acceptEdits",
+    "--allowedTools",
+    AGENT_ALLOWED_TOOLS.join(","),
+  ];
+}
 
 /**
  * Argv for the live (stdin-held) spawn, split out from `spawnLive` so the
@@ -55,6 +81,8 @@ export function claudeLiveArgs(input: { sessionId?: string; resumeSessionId?: st
     "--verbose",
     "--permission-mode",
     "acceptEdits",
+    "--allowedTools",
+    AGENT_ALLOWED_TOOLS.join(","),
   ];
 }
 
