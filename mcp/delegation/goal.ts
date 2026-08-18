@@ -391,7 +391,11 @@ export type GoalGate = { ok: true } | { ok: false; message: string };
 export function checkGoalAcceptsNewRun(projectDir: string, goalId: string): GoalGate {
   let goal: GoalRecord;
   try {
-    goal = readGoal(projectDir, goalId);
+    // Non-reconciling read on purpose: this gate runs pre-dispatch, before the run it is
+    // deciding about even exists, and never inspects goal.state (only plan.waves and
+    // budgets below) — so there is no reason to risk reconcileGoalState persisting a
+    // planning->done transition as a side effect of a check that doesn't care either way.
+    goal = loadGoalRaw(projectDir, goalId);
   } catch {
     return { ok: true };
   }
