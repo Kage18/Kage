@@ -2036,3 +2036,30 @@ test("citedPaths still fails a claim naming a real repo path that does not exist
   assert.deepEqual(paths, ["mcp/delegation/does-not-exist.ts"]);
   assert.equal(existsSync(join(__dirname, "..", "delegation", "does-not-exist.ts")), false);
 });
+// ---------------------------------------------------------------------------
+// New tests below this line only — appended at the end deliberately. This file has
+// had append-collision merge conflicts; keep additions in this trailing block instead
+// of interleaving with tests above.
+
+test("renderBrief tells hired agents repo harness tools are the operator's job, not theirs", () => {
+  const project = tempProject();
+  const plan = compileBrief(project, "do something", "chore");
+  const task = createRun(project, { intent: "do something", type: "chore", agent: "stub" });
+  const rendered = renderBrief(task, plan);
+
+  assert.match(rendered, /kage_refresh/);
+  assert.match(rendered, /kage_learn/);
+  assert.match(rendered, /kage_pr_check/);
+  assert.match(rendered, /operator/i, "must say plainly these tools are the operator's job");
+  assert.match(rendered, /learned\[\]/, "must point agents at the claim fence's learned[] field");
+  assert.match(rendered, /never block|never.*ask permission|without asking permission/i, "must forbid blocking on or asking permission to run harness tools");
+
+  // Placed near the reporting-protocol section, not buried elsewhere.
+  const harnessNoteIndex = rendered.indexOf("kage_refresh");
+  const reportingProtocolIndex = rendered.indexOf("## Reporting protocol");
+  assert.ok(harnessNoteIndex >= 0 && reportingProtocolIndex >= 0);
+  assert.ok(
+    reportingProtocolIndex - harnessNoteIndex < 800,
+    "the harness-tools note should sit close to the reporting-protocol section"
+  );
+});

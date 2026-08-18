@@ -103,3 +103,15 @@ For normal coding tasks:
 
 For quick factual questions, `kage_context` alone is enough. For status or demo requests, call `kage_metrics`.
 <!-- END_KAGE_MEMORY_POLICY_V1 -->
+
+## Scope: Operator Only, Not Hired Agents
+
+Everything in the policy block above — `kage_context`, `kage_learn`, `kage_refresh`,
+`kage_pr_check`, and the rest — is the operator's (this session's) job. Agents hired
+through `kage_dispatch` (`mcp/delegation/`) never call repo harness tools themselves:
+their brief (rendered by `renderBrief` in `mcp/delegation/brief.ts`) tells them plainly
+that `kage_refresh`, `kage_learn`, and `kage_pr_check` are off-limits, and that their
+learnings reach memory through the `learned[]` field of their claim fence —
+merge-ratification is what promotes those into repo memory. A hired agent should never
+block or ask permission to run harness tools; if a dispatched agent's transcript shows it
+hesitating on this, that is a brief bug, not agent misbehavior.
