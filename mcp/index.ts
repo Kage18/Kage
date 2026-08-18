@@ -94,6 +94,7 @@ import { mergeRun, rejectRun } from "./delegation/ratify.js";
 import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
 import { diffBudget } from "./delegation/config.js";
 import { readJudgment, renderJudgment } from "./delegation/manager.js";
+import { attachRunToGoal } from "./delegation/goal.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
 
@@ -1210,6 +1211,7 @@ const DELEGATION_TOOLS = [
         clarification_question: { type: "string", description: "The question you asked before spending tokens." },
         clarification_answer: { type: "string", description: "What the user answered." },
         judgment_note: { type: "string", description: "Anything else about how you shaped this brief." },
+        goal_id: { type: "string", description: "Attach this run to an orchestrated goal so its state changes wake you." },
       },
       required: ["project_dir", "intent"],
     },
@@ -1362,10 +1364,21 @@ async function runDelegationTool(
           }
         : undefined;
     const result = await dispatchRun(projectDir, { intent: String(args?.intent ?? ""), type, judgment: judged }, adapterByName(agent));
+    const goalId = typeof args?.goal_id === "string" ? args.goal_id.trim() : "";
+    let goalWarning = "";
+    if (goalId) {
+      try {
+        attachRunToGoal(projectDir, goalId, result.task.id);
+      } catch (error) {
+        // The run is already real and dispatched — an unknown goal id is a warning, not
+        // a reason to fail a dispatch that already happened.
+        goalWarning = `\n\nCould not attach this run to goal ${goalId}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
     const judgment = readJudgment(projectDir, result.task.id);
     const judgmentBlock = judgment ? `\n\n${renderJudgment(judgment).join("\n")}` : "";
-    return text(`${renderBriefCard(result.task, result.plan)}${judgmentBlock}\n\n${claimCard}`);
+    return text(`${renderBriefCard(result.task, result.plan)}${judgmentBlock}\n\n${claimCard}${goalWarning}`);
   }
   if (name === "kage_judgment") {
     return text(renderJudgment(readJudgment(projectDir, runId)).join("\n"));
