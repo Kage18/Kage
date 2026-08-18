@@ -226,6 +226,23 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     log({ kind: "control_socket_error", error: String(error) });
   }
 
+  /**
+   * Node's `Writable.write()` return value reports BACKPRESSURE (the internal buffer is
+   * full, queue it), not delivery — a scripted child that doesn't drain its stdin
+   * promptly can make a perfectly queued frame look like a failed write. The honest
+   * signal is whether the stream could accept the write at all: no live child, or a
+   * stdin already ended/destroyed. A real write error surfaces asynchronously via the
+   * write callback (logged, not blocking the reply) rather than the return value.
+   */
+  function writeFrame(frame: string): boolean {
+    const stdin = child?.stdin;
+    if (!stdin || !stdin.writable) return false;
+    stdin.write(frame, (error) => {
+      if (error) log({ kind: "control_socket_error", error: String(error) });
+    });
+    return true;
+  }
+
   function handleControl(op: ControlOp): ControlReply {
     if (op.op === "status") {
       return { ok: true, state: state.waiting ? "waiting" : "working", detail: state.waiting?.needs };
@@ -241,27 +258,26 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     }
     if (op.op === "interrupt") {
       // A true interrupt: the in-flight tool is rejected and the process stays alive.
-      const wrote = child?.stdin?.write(interruptFrame()) ?? false;
-      return { ok: wrote, delivered: wrote, detail: wrote ? "interrupt sent" : "could not write to the agent" };
+      const delivered = writeFrame(interruptFrame());
+      return { ok: delivered, delivered, detail: delivered ? "interrupt sent" : "no live agent stdin" };
     }
-    // `tell`: a message the agent receives at its next tool-result boundary. Report the
-    // WRITE result — a false return means the buffer is full and it is not delivered.
-    const wrote = child?.stdin?.write(userMessageFrame(op.message)) ?? false;
+    // `tell`: a message the agent receives at its next tool-result boundary.
+    const delivered = writeFrame(userMessageFrame(op.message));
     // The held-socket path: this supervisor is the process that actually performs the
     // write, so it is the one that flips the steer record to delivered — at the exact
     // moment the message lands in the live agent's stdin, not before.
-    if (wrote && op.steerId) deliverQueuedSteer(projectDir, runId, op.steerId);
+    if (delivered && op.steerId) deliverQueuedSteer(projectDir, runId, op.steerId);
     // Blocked is a WAITING state, not an exit: the child stayed alive holding stdin
     // open specifically so this write could land in the SAME session, rather than a
     // later `kage retry` starting a fresh one that discards the agent's context. This
     // is the only path that resumes a blocked run — queued/auto steers never do.
-    if (wrote && readRun(projectDir, runId).state === "blocked") {
+    if (delivered && readRun(projectDir, runId).state === "blocked") {
       transitionRun(projectDir, runId, "running", "user", `answered: ${op.message.slice(0, 80)}`);
       state.waiting = undefined;
       patchRun(projectDir, runId, { waiting_on: undefined });
       log({ kind: "resumed", label: "answered — the same session continues" });
     }
-    return { ok: wrote, delivered: wrote, detail: wrote ? "delivered to the live agent" : "agent stdin is not writable" };
+    return { ok: delivered, delivered, detail: delivered ? "delivered to the live agent" : "no live agent stdin" };
   }
 
   if (child) {
