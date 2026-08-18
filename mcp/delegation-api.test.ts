@@ -18,6 +18,8 @@ import { dispatchRun } from "./delegation/dispatch.js";
 import { mergeRun } from "./delegation/ratify.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
 import { writeDelegationConfig } from "./delegation/config.js";
+import { superviseRun } from "./delegation/supervisor.js";
+import { isRunLive, sendControl } from "./delegation/control.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-api-"));
@@ -199,6 +201,105 @@ test("tell reports its delivery honestly — a draft run with no live agent is n
     assert.equal(out.ok, true);
     assert.notEqual(out.delivery, "delivered", "no supervisor socket exists, so delivery must not be claimed");
     assert.ok(["stored", "refused", "resumed"].includes(out.delivery), `delivery was ${out.delivery}`);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("interrupt is an honest 503 with no live supervisor, and delivers to one that is — the session stays alive", async () => {
+  const project = tempGitProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const idle = createRun(project, { intent: "idle run", type: "chore", agent: "stub" });
+    const notLive = await apiFetch(port, `/runs/${idle.id}/interrupt`, { method: "POST" });
+    assert.equal(notLive.status, 503);
+    const notLiveBody = await notLive.json() as { ok: boolean; error: string };
+    assert.equal(notLiveBody.ok, false);
+    assert.match(notLiveBody.error, /no live supervisor/);
+
+    const missing = await apiFetch(port, "/runs/does-not-exist/interrupt", { method: "POST" });
+    assert.equal(missing.status, 404);
+
+    // A genuinely live supervisor, held open by a real control socket this route reaches —
+    // the same blocked-loop machinery delegation.test.ts exercises directly.
+    const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+    transitionRun(project, task.id, "briefed", "kernel");
+    const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+    const supervised = superviseRun(project, task.id, liveStub);
+    await waitFor(() => readRun(project, task.id).state === "blocked");
+    // The state flip and the control socket becoming reachable are two different signals
+    // — waiting on the socket itself (retried, not a one-shot check) is what the part-1
+    // regression tests do before sending anything through it, and closes the gap a fixed
+    // assumption about ordering does not.
+    await waitFor(() => isRunLive(project, task.id));
+
+    const live = await apiFetch(port, `/runs/${task.id}/interrupt`, { method: "POST" });
+    assert.equal(live.status, 200);
+    const liveBody = await live.json() as { ok: boolean; delivered: boolean };
+    assert.equal(liveBody.ok, true);
+    assert.equal(liveBody.delivered, true, "the interrupt frame actually reached the live socket");
+    // Unlike stop, an interrupt never ends the session — it is still blocked, answerable.
+    assert.equal(readRun(project, task.id).state, "blocked");
+
+    const reply = await sendControl(project, task.id, { op: "tell", message: "go with plan A" });
+    assert.equal(reply?.delivered, true);
+    await supervised;
+    assert.equal(readRun(project, task.id).state, "ready");
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("GET/POST /runs/:id/steers exposes the queue and maps ops to the kernel mutations", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const run = createRun(project, { intent: "queue target", type: "chore", agent: "stub" });
+
+    const empty = await (await apiFetch(port, `/runs/${run.id}/steers`)).json() as { ok: boolean; steers: unknown[] };
+    assert.equal(empty.ok, true);
+    assert.deepEqual(empty.steers, []);
+
+    // Seed two queued steers through the real tell path — no supervisor exists yet, so
+    // both are recorded but stay queued (refused delivery, never a lie about it).
+    await apiFetch(port, `/runs/${run.id}/tell`, { method: "POST", body: JSON.stringify({ message: "first" }) });
+    await apiFetch(port, `/runs/${run.id}/tell`, { method: "POST", body: JSON.stringify({ message: "second" }) });
+
+    const listed = await (await apiFetch(port, `/runs/${run.id}/steers`)).json() as {
+      steers: Array<{ id: string; message: string; status: string }>;
+    };
+    assert.equal(listed.steers.length, 2);
+    assert.ok(listed.steers.every((s) => s.status === "queued"));
+    const [first, second] = listed.steers;
+
+    const edited = await (await apiFetch(port, `/runs/${run.id}/steers`, {
+      method: "POST",
+      body: JSON.stringify({ op: "edit", id: first.id, message: "first, revised" }),
+    })).json() as { ok: boolean; steers: Array<{ id: string; message: string }> };
+    assert.equal(edited.ok, true);
+    assert.equal(edited.steers.find((s) => s.id === first.id)?.message, "first, revised");
+
+    const reordered = await (await apiFetch(port, `/runs/${run.id}/steers`, {
+      method: "POST",
+      body: JSON.stringify({ op: "reorder", order: [second.id, first.id] }),
+    })).json() as { ok: boolean; steers: Array<{ id: string }> };
+    assert.equal(reordered.ok, true);
+    assert.deepEqual(reordered.steers.map((s) => s.id), [second.id, first.id]);
+
+    const deleted = await (await apiFetch(port, `/runs/${run.id}/steers`, {
+      method: "POST",
+      body: JSON.stringify({ op: "delete", id: first.id }),
+    })).json() as { ok: boolean; steers: Array<{ id: string }> };
+    assert.equal(deleted.ok, true);
+    assert.deepEqual(deleted.steers.map((s) => s.id), [second.id]);
+
+    const badOp = await apiFetch(port, `/runs/${run.id}/steers`, { method: "POST", body: JSON.stringify({ op: "bogus" }) });
+    assert.equal(badOp.status, 400);
+
+    const missing = await apiFetch(port, "/runs/does-not-exist/steers");
+    assert.equal(missing.status, 404);
   } finally {
     feed.close();
     server.close();

@@ -16,7 +16,7 @@ import {
   reapRun,
   readRun,
 } from "./contract.js";
-import { appendSteer, dispatchDetached } from "./dispatch.js";
+import { appendSteerRecord, dispatchDetached, readSteerRecords, writeSteerRecords, type SteerRecord } from "./dispatch.js";
 import { sendControl } from "./control.js";
 
 /**
@@ -56,12 +56,14 @@ export async function steerRun(
   reattach: (projectDir: string, task: TaskRecord) => { pid: number | undefined } = dispatchDetached,
 ): Promise<SteerResult> {
   const task = readRun(projectDir, runId);
-  appendSteer(projectDir, runId, message);
+  const record = appendSteerRecord(projectDir, runId, message);
 
   // A live supervisor holds the agent's stdin, so the message can genuinely reach it —
   // it lands at the agent's next tool-result boundary. The socket answering IS the proof
   // the agent is alive; we report what the write actually returned, never an assumption.
-  const live = await sendControl(projectDir, runId, { op: "tell", message });
+  // steerId rides along so the supervisor — the process that actually performs the
+  // write — is the one that flips this record to delivered, at the moment it injects it.
+  const live = await sendControl(projectDir, runId, { op: "tell", message, steerId: record.id });
   if (live?.delivered) {
     appendRunLedger(projectDir, { kind: "steer_delivered", run_id: runId, message });
     return {
@@ -122,4 +124,61 @@ export async function steerRun(
     task: readRun(projectDir, runId),
     message: `${runId}'s supervisor is gone, so a new one is reattaching to the same agent session — your message will be answered once it picks up.`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The queue as a first-class object (Conductor parity): edit/delete/reorder what has
+// not been delivered yet. A delivered record is history — rewriting it would make the
+// transcript lie about what the agent was actually told — so every mutation here
+// refuses outright rather than silently no-oping.
+
+export interface SteerQueueResult {
+  ok: boolean;
+  reason?: string;
+  records: SteerRecord[];
+}
+
+export function editQueuedSteer(projectDir: string, runId: string, steerId: string, message: string): SteerQueueResult {
+  const records = readSteerRecords(projectDir, runId);
+  const index = records.findIndex((record) => record.id === steerId);
+  if (index === -1) return { ok: false, reason: `no steer with id ${steerId}`, records };
+  if (records[index].status === "delivered") return { ok: false, reason: "delivered steers are immutable history", records };
+  const trimmed = message.trim();
+  if (!trimmed) return { ok: false, reason: "message must be non-empty", records };
+  const next = [...records];
+  next[index] = { ...next[index], message: trimmed };
+  writeSteerRecords(projectDir, runId, next);
+  return { ok: true, records: next };
+}
+
+export function deleteQueuedSteer(projectDir: string, runId: string, steerId: string): SteerQueueResult {
+  const records = readSteerRecords(projectDir, runId);
+  const record = records.find((entry) => entry.id === steerId);
+  if (!record) return { ok: false, reason: `no steer with id ${steerId}`, records };
+  if (record.status === "delivered") return { ok: false, reason: "delivered steers are immutable history", records };
+  const next = records.filter((entry) => entry.id !== steerId);
+  writeSteerRecords(projectDir, runId, next);
+  return { ok: true, records: next };
+}
+
+/**
+ * Reorders only the still-queued tail. Delivered records keep their original (already
+ * chronological) order ahead of it — they are the run's real history, so a reorder can
+ * never move a queued message ahead of one the agent has already seen.
+ */
+export function reorderQueuedSteers(projectDir: string, runId: string, orderedIds: string[]): SteerQueueResult {
+  const records = readSteerRecords(projectDir, runId);
+  const delivered = records.filter((record) => record.status === "delivered");
+  const queued = records.filter((record) => record.status === "queued");
+  if (orderedIds.some((id) => delivered.some((record) => record.id === id))) {
+    return { ok: false, reason: "delivered steers are immutable history", records };
+  }
+  const queuedIds = new Set(queued.map((record) => record.id));
+  const orderedSet = new Set(orderedIds);
+  const sameSet = orderedIds.length === queued.length && queued.every((record) => orderedSet.has(record.id)) && orderedIds.every((id) => queuedIds.has(id));
+  if (!sameSet) return { ok: false, reason: "order must include exactly the currently queued steer ids", records };
+  const byId = new Map(queued.map((record) => [record.id, record]));
+  const next = [...delivered, ...orderedIds.map((id) => byId.get(id)!)];
+  writeSteerRecords(projectDir, runId, next);
+  return { ok: true, records: next };
 }

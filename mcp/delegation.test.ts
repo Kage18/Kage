@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Adapter } from "./delegation/adapters/types.js";
 import {
   sweepDeadRuns,
   recordSpend,
@@ -33,7 +34,8 @@ import { dispatchRun } from "./delegation/dispatch.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
 import { citedPaths, claimVerdict, renderClaimCard } from "./delegation/verify.js";
 import { resolveTestCommand, writeDelegationConfig } from "./delegation/config.js";
-import { dirtyTreeWarning, readSteers } from "./delegation/dispatch.js";
+import { appendSteerRecord, deliverQueuedSteer, dirtyTreeWarning, readSteerRecords, readSteers } from "./delegation/dispatch.js";
+import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers } from "./delegation/steer.js";
 import { formatElapsed, progressFromStreamEvent } from "./delegation/progress.js";
 import { compileBrief, renderBrief, renderBriefCard } from "./delegation/brief.js";
 import { mergeRun, rejectRun } from "./delegation/ratify.js";
@@ -125,6 +127,18 @@ test("claim and blocked fences parse deterministically; last fence wins; malform
   const blocked = parseReportFence('```kage-blocked\n{"need": "a decision", "question": "A or B?"}\n```');
   assert.equal(blocked?.kind, "blocked");
   assert.equal(blocked?.question, "A or B?");
+
+  const plan = parseReportFence(
+    'Before I touch anything:\n\n```kage-plan\n{"plan": "rewrite the retry helper to be idempotent", "question": "ok to proceed?"}\n```',
+  );
+  assert.equal(plan?.kind, "plan");
+  assert.equal(plan?.plan, "rewrite the retry helper to be idempotent");
+  assert.equal(plan?.question, "ok to proceed?");
+  // question is optional — a bare plan still parses.
+  assert.equal(parseReportFence('```kage-plan\n{"plan": "just this"}\n```')?.plan, "just this");
+  // A missing/empty plan degrades to null like the other fences.
+  assert.equal(parseReportFence('```kage-plan\n{"question": "no plan given"}\n```'), null);
+  assert.equal(parseReportFence('```kage-plan\n{"plan": "   "}\n```'), null);
 
   // Agents sometimes quote the protocol before following it — the LAST fence wins.
   const quotedThenReal = parseReportFence(
@@ -986,6 +1000,175 @@ test("steering a run with no recorded session says so instead of pretending", as
   assert.equal(result.delivery, "refused");
   assert.match(result.message, /no agent session recorded/);
   assert.match(result.message, /kage retry/);
+});
+
+// --- steer queue: per-message truth ---------------------------------------------
+
+test("a queued steer flips to delivered exactly when the live socket takes it", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+
+  const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+  const supervised = superviseRun(project, task.id, liveStub);
+
+  await waitFor(() => readRun(project, task.id).state === "blocked");
+
+  const result = await steerRun(project, task.id, "go with plan A", () => liveStub, () => ({ pid: undefined }));
+  assert.equal(result.delivery, "delivered");
+
+  const records = readSteerRecords(project, task.id);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, "delivered", "the record the supervisor actually wrote must flip, not stay queued");
+  assert.ok(records[0].delivered_at, "a delivered record carries when it landed");
+
+  await supervised;
+  assert.equal(readRun(project, task.id).state, "ready");
+});
+
+test("a stored steer (no live socket) stays queued — nothing marks it delivered on a lie", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const run = createRun(project, { intent: "still working", type: "chore", agent: "stub" });
+  transitionRun(project, run.id, "briefed", "kernel");
+  transitionRun(project, run.id, "dispatched", "kernel");
+  transitionRun(project, run.id, "running", "kernel");
+  patchRun(project, run.id, { agent_pid: process.pid });
+
+  const result = await steerRun(project, run.id, "change course", () => stubAdapter());
+  assert.equal(result.delivery, "stored");
+  const records = readSteerRecords(project, run.id);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, "queued", "a stored (not delivered) steer must remain queued, not be marked delivered");
+});
+
+test("queue mutations: edit/delete/reorder work on queued steers, and refuse outright on delivered ones", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "batching steers", type: "chore", agent: "stub" });
+
+  const a = appendSteerRecord(project, task.id, "first");
+  const b = appendSteerRecord(project, task.id, "second");
+  const c = appendSteerRecord(project, task.id, "third");
+
+  const edited = editQueuedSteer(project, task.id, b.id, "second, revised");
+  assert.equal(edited.ok, true);
+  assert.equal(edited.records.find((r) => r.id === b.id)?.message, "second, revised");
+
+  const reordered = reorderQueuedSteers(project, task.id, [c.id, a.id, b.id]);
+  assert.equal(reordered.ok, true);
+  assert.deepEqual(reordered.records.map((r) => r.id), [c.id, a.id, b.id]);
+
+  const deleted = deleteQueuedSteer(project, task.id, a.id);
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(deleted.records.map((r) => r.id), [c.id, b.id]);
+
+  // Bad input refuses with a reason instead of silently no-oping.
+  assert.equal(editQueuedSteer(project, task.id, "no-such-id", "x").ok, false);
+  assert.equal(editQueuedSteer(project, task.id, b.id, "   ").ok, false, "an empty message refuses too");
+
+  // Once delivered, a record is immutable history — every mutation on it refuses.
+  deliverQueuedSteer(project, task.id, c.id);
+  const editRefused = editQueuedSteer(project, task.id, c.id, "too late");
+  assert.equal(editRefused.ok, false);
+  assert.match(editRefused.reason ?? "", /immutable/);
+  const deleteRefused = deleteQueuedSteer(project, task.id, c.id);
+  assert.equal(deleteRefused.ok, false);
+  assert.match(deleteRefused.reason ?? "", /immutable/);
+  const reorderRefused = reorderQueuedSteers(project, task.id, [c.id, b.id]);
+  assert.equal(reorderRefused.ok, false);
+  assert.match(reorderRefused.reason ?? "", /immutable/);
+  // The still-queued sibling is untouched by the refused mutations.
+  assert.equal(readSteerRecords(project, task.id).find((r) => r.id === b.id)?.status, "queued");
+});
+
+const ECHO_LIVE_SCRIPT = [
+  'const readline = require("node:readline");',
+  'readline.createInterface({ input: process.stdin }).on("line", (line) => {',
+  '  const msg = JSON.parse(line);',
+  '  const claim = JSON.stringify({ statement: msg.message.content, unsure: [], learned: [] });',
+  '  const body = "```kage-claim\\n" + claim + "\\n```";',
+  '  process.stdout.write(JSON.stringify({ type: "result", result: body }) + "\\n");',
+  '});',
+].join("\n");
+
+test("REGRESSION: reattach delivers ALL queued steers oldest-first, not just the newest", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+  transitionRun(project, task.id, "dispatched", "kernel");
+  transitionRun(project, task.id, "running", "kernel");
+  transitionRun(project, task.id, "failed", "kernel", "its supervisor died mid-turn");
+  patchRun(project, task.id, { agent_session_id: "dead-session", agent_pid: 999_999 });
+
+  appendSteerRecord(project, task.id, "first steer");
+  appendSteerRecord(project, task.id, "second steer");
+
+  // A minimal live adapter that echoes exactly what it received on stdin back as its
+  // claim statement — the most direct way to prove WHAT was injected, not just that
+  // something was.
+  const echoAdapter: Adapter = {
+    name: "echo",
+    async run() {
+      return { exit_code: 0, final_message: "" };
+    },
+    spawnLive: () => spawn(process.execPath, ["-e", ECHO_LIVE_SCRIPT], { stdio: ["pipe", "pipe", "pipe"] }),
+  };
+
+  await superviseRun(project, task.id, echoAdapter);
+
+  const claim = JSON.parse(readFileSync(join(runDir(project, task.id), "claim.json"), "utf8")) as { statement: string };
+  assert.equal(claim.statement, "first steer\n\nsecond steer", "both queued steers ride the same reattach, oldest first");
+
+  const records = readSteerRecords(project, task.id);
+  assert.equal(records.every((r) => r.status === "delivered"), true, "every queued steer is marked delivered by the reattach");
+  assert.ok(records.every((r) => r.delivered_at), "each delivered record carries when it landed");
+  assert.equal(readRun(project, task.id).state, "ready");
+});
+
+// --- plan review: a typed fence, not a generic block ----------------------------
+
+const PLAN_LIVE_SCRIPT = [
+  'const readline = require("node:readline");',
+  'let phase = 0;',
+  'const planBody = "```kage-plan\\n" + JSON.stringify({ plan: "rewrite the auth module", question: "ok to proceed?" }) + "\\n```";',
+  'const claimBody = "```kage-claim\\n" + JSON.stringify({ statement: "auth module rewritten", unsure: [], learned: [] }) + "\\n```";',
+  'readline.createInterface({ input: process.stdin }).on("line", () => {',
+  '  phase += 1;',
+  '  const body = phase === 1 ? planBody : claimBody;',
+  '  process.stdout.write(JSON.stringify({ type: "result", result: body }) + "\\n");',
+  '});',
+].join("\n");
+
+test("REGRESSION: a kage-plan fence blocks for approval, and an explicit tell resumes it into a claim", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+  const task = createRun(project, { intent: "needs plan approval", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+
+  const planAdapter: Adapter = {
+    name: "plan-stub",
+    async run() {
+      return { exit_code: 0, final_message: "" };
+    },
+    spawnLive: () => spawn(process.execPath, ["-e", PLAN_LIVE_SCRIPT], { stdio: ["pipe", "pipe", "pipe"] }),
+  };
+
+  const supervised = superviseRun(project, task.id, planAdapter);
+
+  await waitFor(() => readRun(project, task.id).state === "blocked");
+  const blockedRun = readRun(project, task.id);
+  assert.deepEqual(blockedRun.waiting_on, { needs: "plan approval", detail: "rewrite the auth module" });
+
+  // Never auto-approved: only an explicit tell resumes it, through the same blocked
+  // machinery a plain block uses.
+  const reply = await sendControl(project, task.id, { op: "tell", message: "approved, go ahead" });
+  assert.equal(reply?.delivered, true);
+
+  await supervised;
+
+  const finished = readRun(project, task.id);
+  assert.equal(finished.state, "ready");
+  assert.equal(finished.waiting_on, undefined, "the approved plan's waiting_on is cleared on resume");
+  const claim = JSON.parse(readFileSync(join(runDir(project, task.id), "claim.json"), "utf8")) as { statement: string };
+  assert.equal(claim.statement, "auth module rewritten");
 });
 
 test("a run whose process died is reported as dropped, never as running", async () => {
