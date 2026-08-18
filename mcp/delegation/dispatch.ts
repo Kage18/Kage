@@ -33,6 +33,7 @@ import { attachRunToGoal } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
+import { runReachabilityCheck } from "./reachability.js";
 import { runStaticChecks } from "./static-checks.js";
 import { verifyRun } from "./verify.js";
 import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
@@ -323,7 +324,10 @@ export async function executeRun(
   // every claim regardless of what the agent's own checks covered, and merge into the
   // same list the receipt's VERIFIED n/n line counts — attributed to Kage, not the agent.
   const staticResult = runStaticChecks(projectDir, runId, workspace.dir, verification.diff.paths);
-  const checks = [...verification.checks, ...staticResult.checks];
+  // Advisory, never blocking (see reachability.ts's own header): does anything on a real
+  // entry point actually reach the code this run just landed?
+  const reachabilityResult = runReachabilityCheck(projectDir, runId, workspace.dir, verification.diff.paths);
+  const checks = [...verification.checks, ...staticResult.checks, ...reachabilityResult.checks];
   const passed = checks.every((check) => check.result === "pass");
   const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff: verification.diff });
   writeClaim(projectDir, runId, claim);
