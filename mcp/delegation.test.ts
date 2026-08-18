@@ -1776,6 +1776,7 @@ test("abandoning a goal clears it as any thread's active goal", () => {
 
   assert.equal(readActiveGoal(project, DEFAULT_SESSION), null, "no longer anyone's active goal");
   assert.equal(readActiveGoal(project, "thread-2"), null);
+});
 // --- BUG 1: transient git failures must never silently empty-sandbox a real repo ----
 // A concurrent `git worktree add`/`commit` in a parallel wave can hold .git's index or
 // a ref lock for a moment. isGitRepo/hasCommits used to treat that exactly like "not a
