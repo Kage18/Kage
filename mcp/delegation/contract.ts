@@ -41,12 +41,16 @@ const LEGAL_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   // A stopped run has no live process either — resume it, or reject it and keep why
   // as memory, same as a failed one.
   stopped: ["running", "failed", "rejected"],
-  ready: ["merged", "rejected"],
+  // `verifying` here is `kage reverify`: re-checking an already-ready run before merging
+  // is legitimate (the worktree may have been hand-edited since), not a wasted step.
+  ready: ["merged", "rejected", "verifying"],
   merged: [],
   rejected: [],
-  // A failed verification is not the end of the story: retry with steering, or reject
-  // and keep why it failed as memory. Only merged/rejected are truly terminal.
-  failed: ["running", "rejected"],
+  // A failed verification is not the end of the story: retry with steering (-> running),
+  // or reverify without re-running the agent at all when the defect was already fixed in
+  // the worktree (-> verifying, `kage reverify`) — or reject and keep why it failed as
+  // memory. Only merged/rejected are truly terminal.
+  failed: ["running", "verifying", "rejected"],
 };
 
 export type RunActor = "kernel" | "manager" | "user";
@@ -125,6 +129,12 @@ export interface CheckOutcome extends CheckSpec {
   result: CheckResultKind;
   exit_code?: number;
   evidence?: string;
+  /**
+   * Non-failing notes on this check — e.g. a path mentioned only in prose (not formally
+   * cited) that could not be resolved. Never affects `result`; shown on the receipt so a
+   * reviewer sees it without having to open the evidence log.
+   */
+  warnings?: string[];
 }
 
 export interface ClaimRecord {
@@ -140,6 +150,13 @@ export interface ClaimRecord {
   /** paths is optional only because claims written before it existed lack it. */
   diff: { files: number; lines: number; paths?: string[] };
   created_at: string;
+  /**
+   * Set only by `kage reverify` (mcp/delegation/ratify.ts's reverifyRun): when the check
+   * verdicts above were last re-run against the worktree, independent of `created_at`
+   * (the original run). A reader must never mistake a stale pass recorded at `created_at`
+   * for one that is actually fresh — this timestamp is the tell.
+   */
+  reverified_at?: string;
 }
 
 export const DEFAULT_RUN_BUDGETS: RunBudgets = { usd: 2, minutes: 30, diff_lines: 400 };

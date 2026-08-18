@@ -6,7 +6,9 @@ import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from
 import { join } from "node:path";
 import { capture, packetsDir, refreshProject } from "../kernel.js";
 import { okfConceptToPacket, packetToOkfConcept } from "../okf.js";
+import { runAllChecks } from "./checks.js";
 import {
+  type CheckSpec,
   type ClaimRecord,
   type RunState,
   type TaskRecord,
@@ -15,9 +17,12 @@ import {
   readClaim,
   readRun,
   runTag,
+  runWorkDir,
   transitionRun,
+  writeClaim,
 } from "./contract.js";
 import { commitIdentityArgs, currentBranch, dirtyPaths, git } from "./git.js";
+import type { CitationText } from "./verify.js";
 import { commitWorktree, removeWorktree, worktreePath } from "./worktree.js";
 
 // Rewrite a packet file's status in place, preserving the lossless OKF round-trip.
@@ -226,5 +231,90 @@ export function rejectRun(projectDir: string, runId: string, reason: string): Re
     message: captured.ok
       ? `Rejected ${runId}. Why it was rejected is now repo memory — future briefs will carry it. Branch ${task.branch} kept for inspection.`
       : `Rejected ${runId}. (Could not capture the reason as memory: ${captured.errors[0] ?? "unknown"})`,
+  };
+}
+
+export interface ReverifyResult {
+  ok: boolean;
+  passed: boolean;
+  state: RunState;
+  message: string;
+}
+
+const REVERIFIABLE_STATES = new Set<RunState>(["failed", "ready"]);
+
+// Ids static-checks.ts appends onto every claim's checks — kernel-executed, never a
+// declared CheckSpec. reverifyRun reconstructs the run's ORIGINAL declared checks from
+// the stored claim by dropping these; runAllChecks below re-derives them for real. Feeding
+// them back in as declared "command" checks would run tsc twice under two different ids.
+const STATIC_CHECK_IDS = new Set(["static-typecheck", "static-app-parse"]);
+
+/**
+ * Re-checks a run: same kernel-executed checks (verify.ts + static-checks.ts, via
+ * checks.ts's runAllChecks — the exact assembly executeRun and superviseRun use), against
+ * the run's CURRENT worktree contents. No agent turn, no brief recompile, and the claim's
+ * statement/unsure/learnings are left untouched — only the check verdicts and the run's
+ * state move.
+ *
+ * contract.ts's LEGAL_TRANSITIONS allowed failed -> running ("retry with steering") from
+ * the day it was written, but a run that failed on a technicality — a false-positive
+ * check, an environment hiccup already fixed by hand in the worktree — had no path back
+ * short of a full agent retry or a reject that throws away correct work. This is that
+ * lighter path: failed/ready -> verifying -> ready/failed, wired to `kage reverify`.
+ */
+export function reverifyRun(projectDir: string, runId: string): ReverifyResult {
+  let task = readRun(projectDir, runId);
+  if (task.display_state === "dropped") {
+    reapRun(projectDir, runId);
+    task = readRun(projectDir, runId);
+  }
+  if (!REVERIFIABLE_STATES.has(task.state)) {
+    return {
+      ok: false,
+      passed: false,
+      state: task.state,
+      message: `Run ${runId} is ${task.state} — reverify only makes sense from failed or ready (merged/rejected are terminal, nothing left to recheck).`,
+    };
+  }
+  const claim = readClaim(projectDir, runId);
+  if (!claim) {
+    return { ok: false, passed: false, state: task.state, message: `Run ${runId} has no claim to reverify.` };
+  }
+  const worktree = worktreePath(projectDir, runId);
+  const worktreeDir = existsSync(worktree) ? worktree : runWorkDir(projectDir, runId);
+  if (!existsSync(worktreeDir)) {
+    return { ok: false, passed: false, state: task.state, message: `Run ${runId}'s worktree is gone — nothing to reverify.` };
+  }
+
+  const declaredChecks: CheckSpec[] = claim.checks
+    .filter((check) => !STATIC_CHECK_IDS.has(check.id))
+    .map((check) => ({ id: check.id, kind: check.kind, cmd: check.cmd, expect: check.expect }));
+
+  transitionRun(projectDir, runId, "verifying", "kernel", "reverify requested");
+  // The claim's statement is still the formal citation; unsure/learnings are still prose
+  // — same split executeRun/superviseRun apply, just replayed against unchanged text.
+  const claimText: CitationText = { cited: claim.statement, prose: [...claim.unsure, ...claim.learnings].join("\n") };
+  const result = runAllChecks(projectDir, runId, worktreeDir, declaredChecks, claimText);
+
+  const reverifiedClaim: ClaimRecord = { ...claim, checks: result.checks, diff: result.diff, reverified_at: new Date().toISOString() };
+  writeClaim(projectDir, runId, reverifiedClaim);
+
+  const failing = result.checks.filter((check) => check.result !== "pass").map((check) => check.id).join(", ");
+  const newState: RunState = result.passed ? "ready" : "failed";
+  transitionRun(projectDir, runId, newState, "kernel", result.passed ? "reverified — now passing" : `reverified — still failing: ${failing}`);
+  appendRunLedger(projectDir, {
+    kind: "reverified",
+    run_id: runId,
+    passed: result.passed,
+    checks: result.checks.map((check) => ({ id: check.id, result: check.result })),
+  });
+
+  return {
+    ok: true,
+    passed: result.passed,
+    state: newState,
+    message: result.passed
+      ? `Reverified ${runId}: now passing — ready to merge.`
+      : `Reverified ${runId}: still failing (${failing}).`,
   };
 }
