@@ -125,7 +125,15 @@ import {
   type ObservationEvent,
   type SetupAgent,
 } from "./kernel.js";
-import { dirtyTreeWarning, dispatchRun, executeRun, runWorkspacePath } from "./delegation/dispatch.js";
+import {
+  INLINE_RUN_WARNING,
+  dirtyTreeWarning,
+  dispatchDetached,
+  dispatchRun,
+  executeRun,
+  followRun,
+  runWorkspacePath,
+} from "./delegation/dispatch.js";
 import { ensureAppDaemon } from "./delegation/app-daemon.js";
 import { rememberProject } from "./delegation/projects.js";
 import { steerRun } from "./delegation/steer.js";
@@ -2623,10 +2631,27 @@ async function main(): Promise<void> {
       return;
     }
     console.log("");
-    const result = await executeRun(project, held.task.id, held.plan, adapter, { progress: !args.includes("--quiet") });
+    // Detached, not inline: a SIGTERM to THIS process (a closed terminal, Ctrl-C, a
+    // command timeout) must not kill the agent mid-work — that is exactly what was
+    // reproduced live on 2026-08-18. dispatchDetached hands the run to its own
+    // supervisor process (the same one the app and daemon already use); this CLI only
+    // follows along, so losing it changes nothing about whether the run finishes.
+    const spawned = dispatchDetached(project, held.task);
+    let task = held.task;
+    if (spawned.pid) {
+      task = await followRun(project, held.task.id, { progress: !args.includes("--quiet") });
+    } else {
+      // Detaching failed outright (spawn errored before returning a pid) — fall back to
+      // the old inline path rather than hang forever waiting on a supervisor that was
+      // never spawned, and say plainly that this run is now tied to this shell.
+      console.log(`  ${INLINE_RUN_WARNING}\n`);
+      const result = await executeRun(project, held.task.id, held.plan, adapter, { progress: !args.includes("--quiet") });
+      task = result.task;
+    }
     console.log("");
-    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project) }));
-    else console.log(renderRunCard(result.task));
+    const claim = readClaim(project, task.id);
+    if (claim) console.log(renderClaimCard(claim, { budget: diffBudget(project) }));
+    else console.log(renderRunCard(task));
     return;
   }
 
@@ -2709,6 +2734,8 @@ async function main(): Promise<void> {
     if (task.state === "failed" || task.state === "blocked" || task.state === "stopped") {
       transitionRun(project, runId, "running", "user", "retry requested");
     }
+    // Unlike `kage dispatch`, retry still runs the agent inline in this process — say so.
+    console.log(`  ${INLINE_RUN_WARNING}\n`);
     const plan = compileBrief(project, task.intent, task.type);
     const result = await executeRun(project, runId, plan, adapterByName(task.agent), { progress: !args.includes("--quiet") });
     if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project) }));

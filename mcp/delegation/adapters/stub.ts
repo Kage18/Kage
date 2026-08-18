@@ -70,6 +70,12 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
       };
       log({ kind: "start", adapter: "stub", run_id: input.runId });
 
+      // Test-only hook: hold the run open long enough for a test to kill a process
+      // watching it and still observe the run in flight. Opt-in and 0 by default, so it
+      // changes nothing about the many tests that rely on the stub finishing instantly.
+      const delayMs = Number(process.env.KAGE_STUB_RUN_DELAY_MS ?? 0);
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+
       const target = join(input.workDir, edit.path);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, edit.content, "utf8");
