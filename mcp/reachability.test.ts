@@ -151,6 +151,114 @@ test("ESCAPE HATCH: an unexplained '// reachability:' marker does not exempt", (
   assert.ok(finding, "a marker with no written reason must not exempt — an unexplained exemption is how this rot returns");
 });
 
+// MODULE-SCOPE RULE — a module's own top-level statements execute the instant anything
+// reachable imports it (module side effects always run on import), so a call registered
+// at module scope — e.g. a hook-registration pattern like `onHook(() => { ... })` sitting
+// directly in the file, not inside any declared function — is genuinely reachable
+// whenever the module itself is. Before this rule, such a call's line had no owning scope
+// (lineOwner === null), so the BFS below never treated anything referenced from it as
+// reachable — hidden module-scope side effects were invisible to the whole check.
+test("MODULE-SCOPE: a symbol called only from inside a module-scope callback is reachable", () => {
+  const dir = tempProject();
+  write(dir, "mcp/cli.ts", 'import "./hooked.js";\n');
+  write(dir, "mcp/hookRegistry.ts", ["export function onHook(fn) {", "  fn();", "}", ""].join("\n"));
+  write(
+    dir,
+    "mcp/hooked.ts",
+    [
+      'import { onHook } from "./hookRegistry.js";',
+      "",
+      "function calledOnlyFromHook() {",
+      "  return helperOfHook();",
+      "}",
+      "",
+      "function helperOfHook() {",
+      "  return 1;",
+      "}",
+      "",
+      "onHook(() => {",
+      "  calledOnlyFromHook();",
+      "});",
+      "",
+    ].join("\n"),
+  );
+
+  const findings = findOrphans(dir, ["mcp/hooked.ts"]);
+  assert.equal(
+    findings.find((f) => f.symbol === "calledOnlyFromHook"),
+    undefined,
+    "calledOnlyFromHook is called from a module-scope callback, so it is reachable the moment hooked.ts is imported",
+  );
+  assert.equal(
+    findings.find((f) => f.symbol === "helperOfHook"),
+    undefined,
+    "the transitive case: a helper used only by the module-scope-reachable symbol is reachable too",
+  );
+});
+
+// Proves the module-scope rule does not go blind in the other direction: it must not
+// blanket-mark every export of a reachable module as reachable, only what is genuinely
+// referenced from a bare top-level statement (or transitively from there).
+test("MODULE-SCOPE: an export with no reference anywhere is still reported, even in a reachable module", () => {
+  const dir = tempProject();
+  write(dir, "mcp/cli.ts", 'import "./hooked2.js";\n');
+  write(
+    dir,
+    "mcp/hooked2.ts",
+    [
+      "export function neverCalledAnywhere() {",
+      "  return 1;",
+      "}",
+      "",
+      "function calledFromHook2() {",
+      "  return 1;",
+      "}",
+      "",
+      "registerHook2(() => {",
+      "  calledFromHook2();",
+      "});",
+      "",
+      "function registerHook2(fn) {",
+      "  fn();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const findings = findOrphans(dir, ["mcp/hooked2.ts"]);
+  assert.ok(
+    findings.some((f) => f.symbol === "neverCalledAnywhere"),
+    "an export with no reference anywhere in the module must still be reported — the rule is scoped to what a " +
+      "module-scope statement actually references, not every export the module happens to contain",
+  );
+  assert.equal(
+    findings.find((f) => f.symbol === "calledFromHook2"),
+    undefined,
+    "calledFromHook2 is called from the module-scope registerHook2 callback, so it is reachable",
+  );
+});
+
+// REGRESSION — measured directly against this repo's own tree: findOrphans used to report
+// all four of these as unreachable. maybeAutoMerge (ratify.ts) and syncGoalCompletion
+// (goal.ts) each sit inside a callback passed to onRunTransition(...) at module scope;
+// once the module-scope rule makes maybeAutoMerge reachable, autonomyGateForType
+// (trackrecord.ts, called from inside maybeAutoMerge's body) becomes reachable
+// transitively, and AUTO_MERGE_MIN_VERIFIED_RATE (referenced inside autonomyGateForType's
+// own body) becomes reachable transitively again — one root cause, a chain of four false
+// positives. Reverting the module-scope rule above (isModuleScopeStatement in
+// reachability.ts's analyze()) makes this test fail by reintroducing all four.
+test("MODULE-SCOPE: the real onRunTransition hook bodies are reachable, not orphans (regression)", () => {
+  const repoRoot = join(__dirname, "..", "..");
+  const findings = findOrphans(repoRoot, ["mcp/delegation/ratify.ts", "mcp/delegation/goal.ts", "mcp/delegation/trackrecord.ts"]);
+  const symbols = findings.map((f) => f.symbol);
+  for (const shouldNotFlag of ["maybeAutoMerge", "syncGoalCompletion", "autonomyGateForType", "AUTO_MERGE_MIN_VERIFIED_RATE"]) {
+    assert.ok(
+      !symbols.includes(shouldNotFlag),
+      `${shouldNotFlag} is reachable via the onRunTransition module-scope hook (directly or transitively) — it must not be reported as an orphan`,
+    );
+  }
+});
+
 test("both executeRun (foreground) and superviseRun (detached) run the reachability check", async () => {
   const project = tempGitProject();
 
