@@ -117,7 +117,7 @@ ${APP_STYLES}
         </div>
         <div class="cbar" id="room-cbar"></div>
         <div class="preflight" id="room-preflight"></div>
-        <div class="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now · ⇧⏎ newline</div>
+        <div class="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now · ⌥⏎ orchestrate as a goal · ⇧⏎ newline</div>
       </div>
     </div>
     <div id="room-term-pane"><div id="room-term"></div></div>
@@ -132,7 +132,7 @@ ${APP_STYLES}
     </div>
     <div class="workmain">
       <div class="runs" id="work-split">
-        <div class="list"><div class="card hand" id="handover" style="display:none"></div><div id="run-list"></div></div>
+        <div class="list"><div class="card hand" id="handover" style="display:none"></div><div id="goal-cards"></div><div id="run-list"></div></div>
         <div class="detail">
           <div id="run-detail"></div>
           <div id="run-term-pane"><div class="term-head"><span id="run-term-run"></span><button class="btn sm" id="run-term-handback">Hand Back</button></div><div id="run-term"></div></div>

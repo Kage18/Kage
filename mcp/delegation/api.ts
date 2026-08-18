@@ -29,7 +29,16 @@ import {
   type RunView,
 } from "./contract.js";
 import { appendSteerRecord, dispatchDetached, readSteerRecords } from "./dispatch.js";
-import { abandonGoal, attachRunToGoal, createGoal, listGoals, readGoal, type GoalAutonomy, type GoalRunSpec } from "./goal.js";
+import {
+  abandonGoal,
+  attachRunToGoal,
+  createGoal,
+  goalForRun,
+  listGoals,
+  readGoal,
+  type GoalAutonomy,
+  type GoalRunSpec,
+} from "./goal.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { normalizeRunType, preflightForecast } from "./preflight.js";
 import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type SteerQueueResult } from "./steer.js";
@@ -528,7 +537,8 @@ function runDiffText(projectDir: string, runId: string): string {
 
 function runDetail(projectDir: string, runId: string): Record<string, unknown> {
   const run = readRun(projectDir, runId);
-  const detail: Record<string, unknown> = { run: withActivity(projectDir, run) };
+  const owningGoal = goalForRun(projectDir, runId);
+  const detail: Record<string, unknown> = { run: { ...withActivity(projectDir, run), goal_id: owningGoal ? owningGoal.id : null } };
   const briefFile = join(runDir(projectDir, runId), "brief.md");
   if (existsSync(briefFile)) detail.brief = readFileSync(briefFile, "utf8");
   const claimFile = join(runDir(projectDir, runId), "claim.json");
@@ -996,7 +1006,16 @@ export async function handleDelegationRoute(
   }
 
   if (path === "/runs" && method === "GET") {
-    json(res, 200, { ok: true, runs: listRuns(projectDir).map((run) => withActivity(projectDir, run)) });
+    // One goals read for the whole list, not one goalForRun lookup per run — goals
+    // stay few, but this route is polled every 30s and must not turn into O(runs*goals).
+    const goalIndex = new Map<string, string>();
+    for (const g of listGoals(projectDir)) {
+      for (const wave of g.plan.waves) for (const runId of wave.run_ids) goalIndex.set(runId, g.id);
+    }
+    json(res, 200, {
+      ok: true,
+      runs: listRuns(projectDir).map((run) => ({ ...withActivity(projectDir, run), goal_id: goalIndex.get(run.id) ?? null })),
+    });
     return true;
   }
 

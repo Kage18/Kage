@@ -455,6 +455,25 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .hic { font-family:var(--mono); text-align:center; }
   .hatom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
 
+  /* goal cards — a plan of waves, sitting above the triaged list itself. */
+  .list .goal-card { margin:8px 10px 14px; padding:12px 14px; }
+  .ghead { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  .ghead .gt { font-size:13.5px; font-weight:600; flex:1; min-width:0; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .gwaveline { font-family:var(--mono); font-size:10.5px; color:var(--text3); margin-bottom:6px; }
+  .gwave { display:flex; gap:5px; margin-bottom:5px; flex-wrap:wrap; }
+  .gwchip { width:16px; height:16px; border-radius:50%; border:1px solid var(--line); font-size:9px;
+    line-height:14px; text-align:center; font-family:var(--mono); cursor:pointer; }
+  .gwchip.jade { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 45%, var(--line)); }
+  .gwchip.amber { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
+  .gwchip.crimson { color:var(--crimson); border-color:color-mix(in srgb, var(--crimson) 45%, var(--line)); }
+  .gwchip.dim { color:var(--text3); cursor:default; }
+  .gfoot { display:flex; align-items:center; gap:10px; margin-top:8px; }
+  .gfoot .atom { margin-right:auto; }
+  .goal-done { opacity:.65; }
+  @keyframes flashhi { 0% { background:color-mix(in srgb, var(--jade) 22%, var(--surface)); } 100% { background:var(--surface); } }
+  .flash-hi { animation:flashhi .9s ease; }
+
   /* ---- the triaged list + detail split ---- */
   .runs { display:grid; grid-template-columns:340px 1fr; flex:1; min-height:0; }
   .list { border-right:1px solid var(--line); overflow-y:auto; background:var(--inset); padding:8px 0 20px; }
@@ -497,6 +516,10 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .chip.blast-hot { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
   .chip.state-blocked { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 40%, var(--line)); }
   .chip.state-merged { color:var(--text3); }
+  .chip.state-executing { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line)); }
+  .chip.state-abandoned { color:var(--crimson); border-color:color-mix(in srgb, var(--crimson) 40%, var(--line)); }
+  .chip.goal-chip { cursor:pointer; }
+  .chip.goal-chip:hover { color:var(--text); }
   .tabs { display:flex; gap:4px; margin-top:12px; }
   .tab { font-size:12px; padding:8px 13px; color:var(--text3); border-bottom:2px solid transparent; }
   .tab:hover { color:var(--text2); }
