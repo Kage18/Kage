@@ -28,13 +28,13 @@ import {
   buildClaim,
   writeClaim,
 } from "./contract.js";
+import { runAllChecks } from "./checks.js";
 import { dirtyPaths } from "./git.js";
 import { attachRunToGoal } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
-import { runStaticChecks } from "./static-checks.js";
-import { verifyRun } from "./verify.js";
+import type { CitationText } from "./verify.js";
 import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
 export interface DispatchOptions {
@@ -309,28 +309,16 @@ export async function executeRun(
   task = transitionRun(projectDir, runId, "verifying", "kernel");
   const statement =
     fence?.statement ?? `work delivered — see diff (agent skipped the ${CLAIM_PROTOCOL_VERSION} fence)`;
-  const verification = verifyRun(
-    projectDir,
-    runId,
-    workspace.dir,
-    plan.checks,
-    `${statement}\n${(fence?.learned ?? []).join("\n")}`,
-    (event) => line?.update(event),
-  );
-
-  // Kernel-executed, never agent-declared: a narrowly declared (or missing) check must
-  // never be the only thing standing between a broken build and 'ready'. These run on
-  // every claim regardless of what the agent's own checks covered, and merge into the
-  // same list the receipt's VERIFIED n/n line counts — attributed to Kage, not the agent.
-  const staticResult = runStaticChecks(projectDir, runId, workspace.dir, verification.diff.paths);
-  const checks = [...verification.checks, ...staticResult.checks];
-  const passed = checks.every((check) => check.result === "pass");
-  const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff: verification.diff });
+  // Only the statement is a formal citation — unsure notes and learnings are prose: an
+  // unresolvable path there is a warning, never a failure (see verify.ts's CitationText).
+  const claimText: CitationText = { cited: statement, prose: [...(fence?.unsure ?? []), ...(fence?.learned ?? [])].join("\n") };
+  const { checks, diff, passed } = runAllChecks(projectDir, runId, workspace.dir, plan.checks, claimText, (event) => line?.update(event));
+  const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff });
   writeClaim(projectDir, runId, claim);
 
   // Learnings ride the branch as pending packets so they are reviewed with the code.
   if (workspace.kind === "worktree" && claim.learnings.length) {
-    draftLearnings(projectDir, task, claim, verification.diff.paths);
+    draftLearnings(projectDir, task, claim, diff.paths);
   }
   // Commit at CLAIM time, not merge time: until the work is a commit there is no branch
   // to push, no PR to open, and nothing for a teammate to review — which defeats the

@@ -133,7 +133,7 @@ import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, r
 import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
 import { renderClaimCard } from "./delegation/verify.js";
-import { mergeRun, rejectRun } from "./delegation/ratify.js";
+import { mergeRun, rejectRun, reverifyRun } from "./delegation/ratify.js";
 import { buildReport, markReportRead, renderReport, renderStatusBoard } from "./delegation/report.js";
 import { diffBudget, writeDelegationConfig } from "./delegation/config.js";
 import { openRoom } from "./delegation/room.js";
@@ -156,6 +156,7 @@ Delegate work (the orchestrator):
   kage dispatch "<intent>" [--agent claude]  one delegated run, briefed from repo memory
   kage runs [--project <dir>]                what every run is doing right now
   kage review --project <dir>                read a finished run's claim and diff
+  kage reverify <run-id> --project <dir>     re-check a failed/ready run's current worktree — no agent re-run
   kage merge <run-id> --project <dir>        land the code and ratify what it learned
 
 Memory:
@@ -288,6 +289,7 @@ Usage:
   kage review <run-id> [--project <dir>]
   kage merge <run-id> [--project <dir>]
   kage reject <run-id> "<reason>" [--project <dir>]
+  kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's current worktree, no agent re-run
   kage open <run-id> [--project <dir>]
   kage tell <run-id> "<message>" [--project <dir>]
   kage stop <run-id> [--project <dir>]
@@ -1702,17 +1704,27 @@ async function main(): Promise<void> {
 
   if (command === "reverify") {
     const packetId = takeArg(args, "--packet");
-    if (!packetId) usage();
-    const result = reverifyMemory(projectArg(args), packetId!);
-    if (args.includes("--json")) {
-      console.log(JSON.stringify(result, null, 2));
-    } else if (result.ok) {
-      console.log(`Reverified ${result.packet_id}`);
-      console.log(`  grounding refreshed for ${result.refreshed_paths.length} path(s)${result.was_stale ? " · stale flag cleared" : ""}`);
-      if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
-    } else {
-      console.log(`Reverify failed: ${result.errors.join("; ")}`);
+    // `--packet <id>` reverifies a MEMORY packet's grounding (kernel.ts); a bare run id
+    // reverifies a delegated RUN's check verdicts (mcp/delegation/ratify.ts) — same verb,
+    // two different things it can re-check, disambiguated by which argument is present.
+    if (packetId) {
+      const result = reverifyMemory(projectArg(args), packetId);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.ok) {
+        console.log(`Reverified ${result.packet_id}`);
+        console.log(`  grounding refreshed for ${result.refreshed_paths.length} path(s)${result.was_stale ? " · stale flag cleared" : ""}`);
+        if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
+      } else {
+        console.log(`Reverify failed: ${result.errors.join("; ")}`);
+      }
+      if (!result.ok) process.exit(2);
+      return;
     }
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = reverifyRun(projectArg(args), runId);
+    console.log(result.message);
     if (!result.ok) process.exit(2);
     return;
   }

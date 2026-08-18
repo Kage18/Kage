@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { diffBudget } from "./config.js";
 import { type CheckOutcome, type CheckSpec, type ClaimRecord, runEvidenceDir } from "./contract.js";
-import { type DiffStats, stageAndMeasure } from "./git.js";
+import { type DiffStats, git, stageAndMeasure } from "./git.js";
 import type { ProgressSink } from "./progress.js";
 
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -107,23 +107,93 @@ export function citedPaths(text: string): string[] {
   return [...found];
 }
 
-function runCitationCheck(projectDir: string, runId: string, worktreeDir: string, claimText: string): CheckOutcome {
-  const paths = citedPaths(claimText);
-  const missing = paths.filter((path) => !existsSync(join(worktreeDir, path)));
+/**
+ * A claim's text splits into two surfaces with different weight: `cited` is the formal
+ * claim (the statement — "what is now true"), `prose` is everything narrative (unsure
+ * notes, learnings) — an agent thinking out loud, not swearing to a file list. Only a
+ * path in `cited` can fail the citations check; an unresolvable path in `prose` is a
+ * warning, because this check exists to catch an agent citing files it never touched,
+ * not to police its English.
+ */
+export interface CitationText {
+  cited: string;
+  prose: string;
+}
+
+// All files the worktree actually has, git's own view (respects .gitignore, and — since
+// verifyRun always stages first via stageAndMeasure — includes files the agent created
+// but never committed). Used to resolve a cited path by unique suffix below.
+function trackedFiles(worktreeDir: string): string[] {
+  const result = git(worktreeDir, ["ls-files"]);
+  return result.ok ? result.stdout.split("\n").filter(Boolean) : [];
+}
+
+interface PathResolution {
+  ok: boolean;
+  resolvedTo?: string;
+  ambiguous?: boolean;
+}
+
+// A cited path that isn't a direct hit may still be real, just cited by its short name
+// ("adapters/index.ts" for "mcp/delegation/adapters/index.ts") — the extractor has no way
+// to know the repo's layout. Resolve it as a UNIQUE suffix of a real tracked file: exactly
+// one match resolves, zero is missing, two or more is ambiguous and left unresolved rather
+// than guessed.
+function resolveCitedPath(worktreeDir: string, token: string, files: string[]): PathResolution {
+  if (existsSync(join(worktreeDir, token))) return { ok: true, resolvedTo: token };
+  const matches = files.filter((file) => file === token || file.endsWith(`/${token}`));
+  if (matches.length === 1) return { ok: true, resolvedTo: matches[0] };
+  if (matches.length > 1) return { ok: false, ambiguous: true };
+  return { ok: false };
+}
+
+function describeResolution(path: string, resolution: PathResolution): string {
+  if (resolution.ok) {
+    return resolution.resolvedTo && resolution.resolvedTo !== path
+      ? `ok         ${path}  (resolved to ${resolution.resolvedTo})`
+      : `ok         ${path}`;
+  }
+  if (resolution.ambiguous) return `AMBIGUOUS  ${path}  (matches more than one file in the worktree — not resolved)`;
+  return `MISSING    ${path}`;
+}
+
+function runCitationCheck(projectDir: string, runId: string, worktreeDir: string, claimText: CitationText): CheckOutcome {
+  const files = trackedFiles(worktreeDir);
+  const cited = citedPaths(claimText.cited);
+  const citedSet = new Set(cited);
+  // A path already counted as a formal citation is not reported a second time as prose.
+  const prose = citedPaths(claimText.prose).filter((path) => !citedSet.has(path));
+
+  const citedResolved = cited.map((path) => ({ path, resolution: resolveCitedPath(worktreeDir, path, files) }));
+  const proseResolved = prose.map((path) => ({ path, resolution: resolveCitedPath(worktreeDir, path, files) }));
+  const missingCited = citedResolved.filter((entry) => !entry.resolution.ok);
+  const missingProse = proseResolved.filter((entry) => !entry.resolution.ok);
+
+  const evidenceSections: string[] = [];
+  if (citedResolved.length) {
+    evidenceSections.push(`cited (formal — a miss here fails the check):\n${citedResolved.map((entry) => describeResolution(entry.path, entry.resolution)).join("\n")}`);
+  }
+  if (proseResolved.length) {
+    evidenceSections.push(`mentioned in prose only (a miss here is a warning, never a failure):\n${proseResolved.map((entry) => describeResolution(entry.path, entry.resolution)).join("\n")}`);
+  }
   const evidence = writeEvidence(
     projectDir,
     runId,
     "citations",
-    paths.length
-      ? `checked ${paths.length} cited path(s):\n${paths.map((path) => `${missing.includes(path) ? "MISSING" : "ok     "}  ${path}`).join("\n")}\n`
-      : "the claim cited no repo paths\n",
+    `${evidenceSections.length ? evidenceSections.join("\n\n") : "the claim cited no repo paths"}\n`,
   );
+
+  const warnings = missingProse.map(
+    (entry) => `"${entry.path}" mentioned in prose but not found in the worktree${entry.resolution.ambiguous ? " (ambiguous suffix match)" : ""} — not counted as a failure`,
+  );
+
   return {
     id: "citations",
     kind: "citation",
-    expect: "every cited path exists in the worktree",
-    result: missing.length ? "fail" : "pass",
+    expect: "every formally cited path exists (directly, or as a unique suffix) in the worktree",
+    result: missingCited.length ? "fail" : "pass",
     evidence,
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 
@@ -138,7 +208,7 @@ export function verifyRun(
   runId: string,
   worktreeDir: string,
   checks: CheckSpec[],
-  claimText: string,
+  claimText: CitationText,
   onProgress?: ProgressSink,
 ): VerificationResult {
   // Stage first: untracked files an agent created are part of its work, and the diff
@@ -178,6 +248,11 @@ export function renderClaimCard(claim: ClaimRecord, options: { budget: number })
     `┌ CLAIM · ${claim.run_id} — ${verdict} (checks run by Kage, not the agent)`,
     `│ "${claim.statement}"`,
   ];
+  if (claim.reverified_at) {
+    // A reader must never mistake a stale pass recorded at claim.created_at for one that
+    // is actually fresh — say plainly that these verdicts were re-run, and when.
+    lines.push(`│ ↻ reverified  ${claim.reverified_at} (checks re-run against the current worktree — not the original run)`);
+  }
   for (const check of claim.checks) {
     const detail =
       check.result === "unverified_no_env"
@@ -186,6 +261,7 @@ export function renderClaimCard(claim: ClaimRecord, options: { budget: number })
           ? `${check.cmd} → exit ${check.exit_code}`
           : check.expect;
     lines.push(`│ ${symbolFor(check.result)} ${check.id.padEnd(11)} ${detail}${check.evidence ? `   ${check.evidence}` : ""}`);
+    for (const warning of check.warnings ?? []) lines.push(`│     ⚠ ${warning}`);
   }
   lines.push(`│ · diff        ${claim.diff.files} file(s), ${claim.diff.lines} line(s)`);
   if (!decision.executed) {

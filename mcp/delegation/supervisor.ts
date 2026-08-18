@@ -19,6 +19,7 @@ import {
   usageFrom, sessionIdFrom, waitingSignal } from "./adapters/cli-agent.js";
 import type { Adapter } from "./adapters/types.js";
 import { compileBrief, renderBrief } from "./brief.js";
+import { runAllChecks } from "./checks.js";
 import { strictVerify } from "./config.js";
 import { deliverQueuedSteer, readSteerRecords } from "./dispatch.js";
 import {
@@ -39,8 +40,7 @@ import {
 } from "./contract.js";
 import { progressFromStreamEvent } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
-import { runStaticChecks } from "./static-checks.js";
-import { verifyRun } from "./verify.js";
+import type { CitationText } from "./verify.js";
 import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
 export interface SupervisorRecord {
@@ -457,19 +457,15 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
 
   transitionRun(projectDir, runId, "verifying", "kernel");
   const statement = fence?.statement ?? `work delivered — see diff (agent skipped the ${CLAIM_PROTOCOL_VERSION} fence)`;
-  const verification = verifyRun(projectDir, runId, workspace, plan.checks, `${statement}\n${(fence?.learned ?? []).join("\n")}`);
-  // Kernel-executed, never agent-declared: a narrowly declared (or missing) check must
-  // never be the only thing standing between a broken build and 'ready'. These run on
-  // every claim regardless of what the agent's own checks covered, and merge into the
-  // same list the receipt's VERIFIED n/n line counts — attributed to Kage, not the agent.
-  const staticResult = runStaticChecks(projectDir, runId, workspace, verification.diff.paths);
-  const checks = [...verification.checks, ...staticResult.checks];
-  const passed = checks.every((check) => check.result === "pass");
-  const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff: verification.diff });
+  // Only the statement is a formal citation — unsure notes and learnings are prose: an
+  // unresolvable path there is a warning, never a failure (see verify.ts's CitationText).
+  const claimText: CitationText = { cited: statement, prose: [...(fence?.unsure ?? []), ...(fence?.learned ?? [])].join("\n") };
+  const { checks, diff, passed } = runAllChecks(projectDir, runId, workspace, plan.checks, claimText);
+  const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff });
   writeFileSync(join(dir, "claim.json"), `${JSON.stringify(claim, null, 2)}\n`, "utf8");
 
   if (workspaceKind === "worktree") {
-    if (claim.learnings.length) draftLearnings(projectDir, readRun(projectDir, runId), claim, verification.diff.paths);
+    if (claim.learnings.length) draftLearnings(projectDir, readRun(projectDir, runId), claim, diff.paths);
     commitWorktree(projectDir, runId, `kage: ${task.intent}\n\nRun: ${runId}\nClaim: ${claim.statement}`);
   }
 
