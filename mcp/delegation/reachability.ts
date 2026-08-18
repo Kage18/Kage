@@ -18,7 +18,7 @@
 // note on runReachabilityCheck below). It is good enough to catch the exact defect class
 // it was built for, not a substitute for a real language server.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { CheckOutcome } from "./contract.js";
 import { writeEvidence } from "./verify.js";
 
@@ -98,6 +98,11 @@ interface ParsedFile {
   scopes: Scope[];
   lineOwner: (string | null)[]; // 0-indexed, owning scope name (if any)
   isImportLine: boolean[]; // 0-indexed
+  // Repo-relative paths this file imports via a relative specifier (`./x.js`, `../y.js`),
+  // resolved to the `.ts` source they compile from. Used to compute which modules are
+  // reachable — a module executes its own top-level statements the moment anything
+  // reachable imports it, regardless of whether that importer uses any of its exports.
+  importedFiles: Set<string>;
 }
 
 // The `d` flag (match indices) lets parseFile recover exactly where the captured name
@@ -215,11 +220,36 @@ function braceDelta(strippedLine: string): number {
   return delta;
 }
 
+// Matches the module specifier on either a single-line import (`import { a } from "./x.js"`,
+// `import x from "./x.js"`) or the closing line of a multi-line import block, as well as a
+// bare side-effect import (`import "./x.js"`).
+const IMPORT_SPECIFIER_RE = /from\s+["']([^"']+)["']|^import\s+["']([^"']+)["']/;
+
+function importSpecifierFrom(trimmedLine: string): string | null {
+  const m = IMPORT_SPECIFIER_RE.exec(trimmedLine);
+  if (!m) return null;
+  return m[1] ?? m[2] ?? null;
+}
+
+// Only relative specifiers (`./x`, `../y`) point at another file in this tree; a bare
+// package name ("node:fs", "vitest") never resolves to a node this graph tracks. Mirrors
+// resolveRootFiles' own dist->src, .js->.ts convention (a compiled dist mirrors mcp/'s
+// own source tree one-for-one), since every import here is written against that compiled
+// extension even though the file being scanned is the .ts source.
+function resolveImportSpecifier(fromFile: string, specifier: string): string | null {
+  if (!specifier.startsWith(".")) return null;
+  let resolved = join(dirname(fromFile), specifier).split("\\").join("/");
+  if (resolved.endsWith(".js")) resolved = `${resolved.slice(0, -3)}.ts`;
+  else if (!resolved.endsWith(".ts")) resolved += ".ts";
+  return resolved;
+}
+
 function parseFile(file: string, source: string): ParsedFile {
   const lines = source.split("\n");
   const scopes: Scope[] = [];
   const lineOwner: (string | null)[] = new Array(lines.length).fill(null);
   const isImportLine: boolean[] = new Array(lines.length).fill(false);
+  const importedFiles = new Set<string>();
 
   let depth = 0;
   let currentScope: Scope | null = null;
@@ -243,11 +273,21 @@ function parseFile(file: string, source: string): ParsedFile {
     if (depth === 0 && !inImportBlock && /^import\b/.test(trimmed)) {
       inImportBlock = !/;\s*$/.test(trimmed) && !/^import\s*\(/.test(trimmed);
       isImportLine[i] = true;
+      if (!inImportBlock) {
+        const spec = importSpecifierFrom(trimmed);
+        const resolved = spec ? resolveImportSpecifier(file, spec) : null;
+        if (resolved) importedFiles.add(resolved);
+      }
       continue;
     }
     if (inImportBlock) {
       isImportLine[i] = true;
-      if (/;\s*$/.test(trimmed) || /}\s*from\s+["'][^"']*["'];?\s*$/.test(trimmed)) inImportBlock = false;
+      if (/;\s*$/.test(trimmed) || /}\s*from\s+["'][^"']*["'];?\s*$/.test(trimmed)) {
+        inImportBlock = false;
+        const spec = importSpecifierFrom(trimmed);
+        const resolved = spec ? resolveImportSpecifier(file, spec) : null;
+        if (resolved) importedFiles.add(resolved);
+      }
       continue;
     }
 
@@ -301,7 +341,7 @@ function parseFile(file: string, source: string): ParsedFile {
     }
   }
 
-  return { file, lines, scopes, lineOwner, isImportLine };
+  return { file, lines, scopes, lineOwner, isImportLine, importedFiles };
 }
 
 function toRepoRelative(projectDir: string, absPath: string): string {
@@ -378,6 +418,30 @@ function analyze(projectDir: string, mcpRoot: string): AnalysisResult {
   }
 
   const rootFiles = resolveRootFiles(projectDir, mcpRoot);
+
+  // Module-level reachability, independent of and computed before any symbol-level
+  // reachability: a module's own top-level statements run the instant anything reachable
+  // imports it, whether or not the importer ever names one of its exports (a bare
+  // `import "./hooked.js"` is enough). BFS over the import graph from the same root files
+  // used to seed symbol reachability below.
+  const reachableFiles = new Set<string>();
+  const fileQueue: string[] = [];
+  for (const file of rootFiles) {
+    if (!parsedByFile.has(file) || reachableFiles.has(file)) continue;
+    reachableFiles.add(file);
+    fileQueue.push(file);
+  }
+  while (fileQueue.length) {
+    const file = fileQueue.shift()!;
+    const parsed = parsedByFile.get(file);
+    if (!parsed) continue;
+    for (const imported of parsed.importedFiles) {
+      if (reachableFiles.has(imported) || !parsedByFile.has(imported)) continue;
+      reachableFiles.add(imported);
+      fileQueue.push(imported);
+    }
+  }
+
   const refsByName = new Map<string, Reference[]>();
   // `${file}:${line}` -> the declared name and column that line's own header introduces.
   // Used to skip only that one self-referencing token, never the rest of the line — a
@@ -394,17 +458,27 @@ function analyze(projectDir: string, mcpRoot: string): AnalysisResult {
   for (const [file, parsed] of parsedByFile) {
     const isRoot = rootFiles.has(file);
     const isTest = isTestFile(file);
+    const isReachableModule = reachableFiles.has(file);
     for (let i = 0; i < parsed.lines.length; i++) {
       if (parsed.isImportLine[i]) continue;
       const stripped = stripForBraceCounting(parsed.lines[i]);
       const anchor = declHeaderAnchor.get(`${file}:${i + 1}`);
+      // A bare top-level statement (lineOwner null: not inside any declared function/
+      // const/class scope) executes the moment its module is imported — e.g. an
+      // `onRunTransition((run) => { ... })` call registered at module scope. Reachable
+      // here means "the module executes", not "isRoot": deliberately narrower than the
+      // isRoot branch below, which treats every line of an actual entry-point file as
+      // directly rooted — extending that same breadth to every transitively-imported
+      // module would mark nearly everything reachable and defeat the check.
+      const isModuleScopeStatement = isReachableModule && !isRoot && parsed.lineOwner[i] === null;
       for (const { token, column } of tokensOf(stripped)) {
         if (!declByName.has(token)) continue;
         if (anchor && anchor.name === token && anchor.column === column) continue; // the decl's own name, not a reference
         const list = refsByName.get(token) ?? [];
         list.push({ file, line: i + 1, ownerName: parsed.lineOwner[i], isTest });
         refsByName.set(token, list);
-        if (isRoot && !isTest) rootDirect.add(token);
+        if (isTest) continue;
+        if (isRoot || isModuleScopeStatement) rootDirect.add(token);
       }
     }
   }
