@@ -160,6 +160,19 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
     for (const steer of steers) lines.push(`- ${steer}`);
   }
 
+  lines.push(
+    "",
+    "## You do not run repo harness tools",
+    "",
+    "You never run `kage_refresh`, `kage_learn`, or `kage_pr_check` — those are the operator's",
+    "job, not yours. Your learnings reach memory through the `learned[]` field of your claim",
+    "fence below; merge-ratification is what promotes them into repo memory. Never block on,",
+    "or ask permission to run, those tools — just fill in `learned[]` and finish.",
+    "",
+    "This project compiles to CommonJS — no `import.meta`, no top-level `await` — so avoid",
+    "those in any code or tests you add; they fail TypeScript compilation (TS1470) here.",
+  );
+
   lines.push("", CLAIM_PROTOCOL_INSTRUCTIONS, "");
   return lines.join("\n");
 }
