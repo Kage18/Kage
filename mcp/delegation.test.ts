@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Adapter } from "./delegation/adapters/types.js";
@@ -64,6 +64,7 @@ import {
 import { drainPendingGoalEvents, notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
 import { callTool } from "./index.js";
+import { runStaticChecks } from "./delegation/static-checks.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-delegation-"));
@@ -2137,4 +2138,113 @@ test("liveState: a verifying run with a dead agent pid but a live supervisor pid
   patchRun(project, task.id, { supervisor_pid: 999999999 });
   assert.equal(liveState(readRun(project, task.id)).stale, true, "with neither pid alive the run is genuinely dropped");
   assert.equal(readRun(project, task.id).display_state, "dropped");
+});
+
+// ---------------------------------------------------------------------------
+// Pre-claim static checks (mcp/delegation/static-checks.ts) — kernel-executed, never
+// agent-declared, and merged into every claim's checks before it can reach 'ready'.
+// Appended in its own block at the end of the file to avoid hunk collisions with a
+// parallel run touching earlier tests in this file.
+
+// The real typescript install this very package already depends on — symlinking the
+// whole node_modules directory (not just .bin/tsc) keeps its own internal relative
+// symlink (.bin/tsc -> ../typescript/...) resolvable, and gives a fast, network-free
+// tsc invocation with no per-test `npm install`.
+const REAL_MCP_NODE_MODULES = join(__dirname, "..", "node_modules");
+
+function staticCheckFixture(): string {
+  const dir = tempProject();
+  mkdirSync(join(dir, "mcp"), { recursive: true });
+  writeFileSync(
+    join(dir, "mcp", "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ES2022",
+          module: "Node16",
+          moduleResolution: "Node16",
+          strict: true,
+          esModuleInterop: true,
+          skipLibCheck: true,
+        },
+        include: ["**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  symlinkSync(REAL_MCP_NODE_MODULES, join(dir, "mcp", "node_modules"), "dir");
+  return dir;
+}
+
+// A minimal stand-in for the real app-client/app-html/app-styles trio, preserving the
+// one invariant static-checks.ts relies on: app-html.ts composes app-client.ts's runtime
+// string value (not its source text) into a `<script>` with no `src` attribute.
+function writeAppRendererFixture(dir: string, clientBody: string): void {
+  const delegDir = join(dir, "mcp", "delegation");
+  mkdirSync(delegDir, { recursive: true });
+  writeFileSync(join(delegDir, "app-client.ts"), `export const APP_CLIENT = \`${clientBody}\`;\n`, "utf8");
+  writeFileSync(join(delegDir, "app-styles.ts"), "export const APP_STYLES = `body {}`;\n", "utf8");
+  writeFileSync(
+    join(delegDir, "app-html.ts"),
+    [
+      'import { APP_CLIENT } from "./app-client.js";',
+      "",
+      'export const APP_HTML = `<!doctype html><html><body><script src="/vendor/x.js"></script><script>${APP_CLIENT}</script></body></html>`;',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+}
+
+test("STATIC CHECKS: a worktree with a deliberate TS error fails, with the compiler's message in the evidence", () => {
+  const dir = staticCheckFixture();
+  writeFileSync(join(dir, "mcp", "broken.ts"), 'const total: number = "not a number";\n', "utf8");
+
+  const result = runStaticChecks(dir, "static-check-a", dir, []);
+  const typecheck = result.checks.find((check) => check.id === "static-typecheck");
+  assert.ok(typecheck, "the typecheck runs even with no app renderer present in the worktree");
+  assert.equal(typecheck?.result, "fail");
+  assert.ok(typecheck?.evidence, "a failing check always writes evidence");
+  const log = readFileSync(join(dir, typecheck!.evidence!), "utf8");
+  assert.match(log, /error TS\d+/, "the compiler's own error message is captured in the evidence");
+});
+
+test("STATIC CHECKS: an unbalanced quote in the composed client script fails the parse check", () => {
+  const dir = staticCheckFixture();
+  writeAppRendererFixture(dir, "var s = 'unterminated;");
+
+  const result = runStaticChecks(dir, "static-check-b", dir, ["mcp/delegation/app-client.ts"]);
+  const typecheck = result.checks.find((check) => check.id === "static-typecheck");
+  assert.equal(typecheck?.result, "pass", "the .ts source itself is syntactically valid TypeScript");
+  const parseCheck = result.checks.find((check) => check.id === "static-app-parse");
+  assert.ok(parseCheck, "app-client.ts is in the changed paths, so the parse check always runs");
+  assert.equal(parseCheck?.result, "fail");
+  const log = readFileSync(join(dir, parseCheck!.evidence!), "utf8");
+  assert.match(log, /SyntaxError/i, "node --check's own parse error is captured in the evidence");
+});
+
+test("STATIC CHECKS: a clean worktree passes both the typecheck and the composed-page parse check", () => {
+  const dir = staticCheckFixture();
+  writeAppRendererFixture(dir, "var s = 'ok';");
+
+  const result = runStaticChecks(dir, "static-check-c", dir, ["mcp/delegation/app-client.ts"]);
+  assert.equal(result.checks.length, 2);
+  for (const check of result.checks) assert.equal(check.result, "pass", `${check.id} should pass on clean input`);
+});
+
+test("STATIC CHECKS: a repo with no tsconfig is a no-op pass, never a fail", () => {
+  const dir = tempProject();
+  const result = runStaticChecks(dir, "static-check-d", dir, []);
+  assert.deepEqual(result.checks, [], "no tsconfig — nothing runs, nothing blocks readiness");
+});
+
+test("STATIC CHECKS: static_checks: false in config disables them even with a broken tsconfig'd worktree", () => {
+  const dir = staticCheckFixture();
+  writeDelegationConfig(dir, { static_checks: false });
+  writeFileSync(join(dir, "mcp", "broken.ts"), 'const total: number = "not a number";\n', "utf8");
+
+  const result = runStaticChecks(dir, "static-check-e", dir, []);
+  assert.deepEqual(result.checks, [], "disabled via config — never runs, never fails a run for it");
 });

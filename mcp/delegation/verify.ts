@@ -17,7 +17,9 @@ const COMMAND_TIMEOUT_MS = 10 * 60_000;
 // not judge the claim — never that the claim passed.
 const NO_ENV_EXIT_CODES = new Set([126, 127]);
 
-function writeEvidence(projectDir: string, runId: string, checkId: string, content: string): string {
+// Exported so static-checks.ts (kernel-executed checks that are not part of a declared
+// CheckSpec) can log evidence through the same mechanism the receipt already links to.
+export function writeEvidence(projectDir: string, runId: string, checkId: string, content: string): string {
   const dir = runEvidenceDir(projectDir, runId);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${checkId}.log`);
