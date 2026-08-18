@@ -30,7 +30,7 @@ import {
 } from "./contract.js";
 import { runAllChecks } from "./checks.js";
 import { dirtyPaths } from "./git.js";
-import { attachRunToGoal } from "./goal.js";
+import { attachRunToGoal, checkGoalAcceptsNewRun } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
@@ -193,6 +193,13 @@ function prepareWorkspace(projectDir: string, task: TaskRecord): { dir: string; 
 
 export async function dispatchRun(projectDir: string, options: DispatchOptions, adapter: Adapter): Promise<DispatchResult> {
   const type = options.type ?? "chore";
+  // A resolvable goal that is already over budget or planning a wave with colliding
+  // files_scope is refused before anything is created — an unresolvable goal_id is a
+  // separate, warn-only concern handled below where the attach itself is attempted.
+  if (options.goalId) {
+    const gate = checkGoalAcceptsNewRun(projectDir, options.goalId);
+    if (!gate.ok) throw new Error(gate.message);
+  }
   let plan = compileBrief(projectDir, options.intent, type);
 
   // Manager judgment is applied here, before the brief is frozen — and it is recorded

@@ -408,6 +408,9 @@ function goalCard(goal) {
   var head = h("div", "ghead");
   head.appendChild(h("div", "gt", goal.intent));
   head.appendChild(h("span", "chip state-" + goal.state, goal.state));
+  // The setting the user picked must be visible, not just enforced silently — autonomy
+  // decided whether a verified run merges itself or waits for a human.
+  head.appendChild(h("span", "chip autonomy-" + goal.autonomy, goal.autonomy === "merge" ? "auto-merge" : "recommend"));
   card.appendChild(head);
 
   var waves = goal.plan.waves || [];
