@@ -95,7 +95,16 @@ import { mergeRun, rejectRun } from "./delegation/ratify.js";
 import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
 import { diffBudget } from "./delegation/config.js";
 import { readJudgment, renderJudgment } from "./delegation/manager.js";
-import { DEFAULT_SESSION, readActiveGoal } from "./delegation/room-sessions.js";
+import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
+import {
+  abandonGoal,
+  createGoal,
+  goalSpend,
+  readGoal,
+  type GoalAutonomy,
+  type GoalRunSpec,
+  type GoalWave,
+} from "./delegation/goal.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
 
@@ -1299,9 +1308,94 @@ const DELEGATION_TOOLS = [
       required: ["project_dir"],
     },
   },
+  {
+    name: "kage_goal_create",
+    description:
+      "Open a goal: the room's own bookkeeping for a multi-run intent — a plan of waves, autonomy, and budgets. From a room thread this also makes the new goal that thread's active goal, so kage_dispatch calls after it attach automatically without you passing goal_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        plan: {
+          type: "array",
+          description:
+            "Waves of run specs, in dispatch order — each wave is an array of {intent, type, files_scope}. A wave's files_scope must stay disjoint within the wave; the kernel refuses to dispatch into a colliding one.",
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                intent: { type: "string" },
+                type: { type: "string", enum: [...RUN_TYPES] },
+                files_scope: { type: "array", items: { type: "string" } },
+              },
+              required: ["intent", "type", "files_scope"],
+            },
+          },
+        },
+        autonomy: {
+          type: "string",
+          enum: ["recommend", "merge"],
+          description: "recommend (default): you present ready runs for the user to merge. merge: you may merge them yourself.",
+        },
+        budgets: {
+          type: "object",
+          properties: { usd: { type: "number" }, runs: { type: "number" } },
+          description: "Defaults to $20 / 10 runs.",
+        },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_goal_status",
+    description:
+      "Where a goal stands: its state, each wave's runs with their CURRENT state, spend against budget, and which wave is next to dispatch. Defaults to the room thread's active goal when goal_id is omitted. Reads through the reconciling path, so a goal whose runs already settled reports 'done' even if the stored record lagged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        goal_id: { type: "string", description: "Omit to use the room thread's active goal." },
+      },
+      required: ["project_dir"],
+    },
+  },
+  {
+    name: "kage_goal_finish",
+    description:
+      "Abandon a goal before its runs finish, with a reason that is kept as part of its history. There is no tool to force a goal to 'done' — that state is only ever derived from its runs settling. Defaults to the room thread's active goal when goal_id is omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        goal_id: { type: "string", description: "Omit to use the room thread's active goal." },
+        reason: { type: "string" },
+      },
+      required: ["project_dir", "reason"],
+    },
+  },
 ];
 
 const DELEGATION_TOOL_NAMES = new Set(DELEGATION_TOOLS.map((tool) => tool.name));
+
+/** Same implicit-attach rule kage_dispatch already applies: an explicit id always wins;
+ * absent one, a room thread (KAGE_ROOM=1) resolves its own active goal instead of making
+ * the manager remember to pass goal_id on every call. */
+function resolveGoalId(projectDir: string, explicit: string): string {
+  if (explicit) return explicit;
+  if (process.env.KAGE_ROOM === "1") {
+    return readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
+  }
+  return "";
+}
+
+/** The first wave still owed a run for one of its planned specs — null once every wave is
+ * full, which is what "next wave to dispatch" means from a status report's point of view. */
+function nextOpenWaveIndex(waves: readonly GoalWave[]): number | null {
+  const index = waves.findIndex((wave) => wave.run_ids.length < wave.runs.length);
+  return index === -1 ? null : index;
+}
 
 // The manager's hands. Every one of these is a request to the kernel — the kernel
 // decides what is legal, executes the checks, and owns the record. Nothing here lets a
@@ -1420,6 +1514,69 @@ async function runDelegationTool(
     const result = await executeRun(projectDir, held.task.id, held.plan, adapter);
     const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
     return text(`${briefCard}${judgmentBlock}\n\n${INLINE_RUN_WARNING}\n\n${claimCard}${goalWarning}`);
+  }
+  if (name === "kage_goal_create") {
+    const intent = String(args?.intent ?? "").trim();
+    if (!intent) return text("kage_goal_create needs an intent — the sentence describing what this goal is for.");
+    const autonomy = typeof args?.autonomy === "string" ? (args.autonomy as GoalAutonomy) : undefined;
+    const plan = Array.isArray(args?.plan)
+      ? (args.plan as unknown[]).map((wave) => (Array.isArray(wave) ? (wave as Array<Partial<GoalRunSpec>>) : []))
+      : undefined;
+    const budgets = args?.budgets && typeof args.budgets === "object" ? (args.budgets as Record<string, unknown>) : undefined;
+    const goal = createGoal(projectDir, { intent, plan, autonomy, budgets: budgets as never });
+    let activated = "";
+    if (process.env.KAGE_ROOM === "1") {
+      setActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION, goal.id);
+      activated = " Set as this thread's active goal — kage_dispatch calls now attach to it without goal_id.";
+    }
+    const waveCount = goal.plan.waves.length;
+    return text(
+      `Goal ${goal.id} created ("${goal.intent}") — ${waveCount} wave${waveCount === 1 ? "" : "s"} planned, ` +
+        `autonomy: ${goal.autonomy}, budget $${goal.budgets.usd}/${goal.budgets.runs} runs.${activated}`,
+    );
+  }
+  if (name === "kage_goal_status") {
+    const goalId = resolveGoalId(projectDir, String(args?.goal_id ?? "").trim());
+    if (!goalId) return text("kage_goal_status needs a goal_id, or call it from a room thread with an active goal.");
+    const goal = readGoal(projectDir, goalId);
+    const spend = goalSpend(projectDir, goal);
+    const waves = goal.plan.waves.map((wave, index) => ({
+      index,
+      runs: wave.runs,
+      run_ids: wave.run_ids,
+      run_states: wave.run_ids.map((id) => {
+        try {
+          return { run_id: id, state: readRun(projectDir, id).state };
+        } catch {
+          return { run_id: id, state: "unknown" };
+        }
+      }),
+    }));
+    const nextWave = goal.state === "done" || goal.state === "abandoned" ? null : nextOpenWaveIndex(goal.plan.waves);
+    return text(
+      JSON.stringify(
+        {
+          goal_id: goal.id,
+          intent: goal.intent,
+          state: goal.state,
+          autonomy: goal.autonomy,
+          budgets: goal.budgets,
+          spend,
+          waves,
+          next_wave: nextWave,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (name === "kage_goal_finish") {
+    const goalId = resolveGoalId(projectDir, String(args?.goal_id ?? "").trim());
+    if (!goalId) return text("kage_goal_finish needs a goal_id, or call it from a room thread with an active goal.");
+    const reason = String(args?.reason ?? "").trim();
+    if (!reason) return text("kage_goal_finish needs a reason — it is kept as part of the goal's history.");
+    const goal = abandonGoal(projectDir, goalId, reason);
+    return text(`Goal ${goal.id} abandoned: ${reason}`);
   }
   if (name === "kage_judgment") {
     return text(renderJudgment(readJudgment(projectDir, runId)).join("\n"));
