@@ -28,12 +28,12 @@ import {
   buildClaim,
   writeClaim,
 } from "./contract.js";
-import { dirtyPaths, hasCommits, isGitRepo } from "./git.js";
+import { dirtyPaths } from "./git.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
 import { verifyRun } from "./verify.js";
-import { commitWorktree, createWorktree, worktreePath } from "./worktree.js";
+import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
 export interface DispatchOptions {
   intent: string;
@@ -166,7 +166,10 @@ export function deliverQueuedSteer(projectDir: string, runId: string, steerId: s
 // fresh repo with no commits) the run still works in a sandbox — degraded isolation,
 // stated plainly, never a silent difference.
 function prepareWorkspace(projectDir: string, task: TaskRecord): { dir: string; kind: "worktree" | "sandbox" } {
-  if (isGitRepo(projectDir) && hasCommits(projectDir)) {
+  // resolveWorkspaceKind throws instead of returning "sandbox" when a .git entry is
+  // present but git itself is in trouble — a transient failure must never silently
+  // hand the agent an empty directory.
+  if (resolveWorkspaceKind(projectDir) === "worktree") {
     const handle = createWorktree(projectDir, task.id, task.branch);
     return { dir: handle.path, kind: "worktree" };
   }

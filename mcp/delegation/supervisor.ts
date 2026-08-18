@@ -40,8 +40,7 @@ import {
 import { progressFromStreamEvent } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
 import { verifyRun } from "./verify.js";
-import { commitWorktree, createWorktree, worktreePath } from "./worktree.js";
-import { hasCommits, isGitRepo } from "./git.js";
+import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
 export interface SupervisorRecord {
   run_id: string;
@@ -113,15 +112,16 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   mkdirSync(dir, { recursive: true });
 
   // Workspace: a real worktree when git allows, else a sandbox — stated, never silent.
+  // resolveWorkspaceKind throws rather than choosing "sandbox" when a .git entry is
+  // present but git itself is in trouble (not merely "no commits yet") — a transient
+  // failure must never silently hand the agent an empty directory.
   let workspace: string;
-  let workspaceKind: "worktree" | "sandbox";
-  if (isGitRepo(projectDir) && hasCommits(projectDir)) {
+  const workspaceKind = resolveWorkspaceKind(projectDir);
+  if (workspaceKind === "worktree") {
     workspace = createWorktree(projectDir, runId, task.branch).path;
-    workspaceKind = "worktree";
   } else {
     workspace = runWorkDir(projectDir, runId);
     mkdirSync(workspace, { recursive: true });
-    workspaceKind = "sandbox";
   }
 
   const brief = existsSync(join(dir, "brief.md")) ? readBrief(projectDir, runId) : renderBrief(task, plan);

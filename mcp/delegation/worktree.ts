@@ -7,7 +7,7 @@ import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { readDelegationConfig } from "./config.js";
 import { worktreesDir } from "./contract.js";
-import { commitIdentityArgs, git, hasCommits, isGitRepo } from "./git.js";
+import { commitIdentityArgs, git, hasCommits, isGitRepo, looksLikeGitRepo, retryTransient, type GitResult } from "./git.js";
 
 export interface WorktreeHandle {
   path: string;
@@ -15,11 +15,42 @@ export interface WorktreeHandle {
   base_commit: string;
 }
 
+export type WorkspaceKind = "worktree" | "sandbox";
+
+/**
+ * Worktrees need a git repo with a branch point. Without one (a scratch directory, a
+ * fresh repo with no commits) a run still works in a sandbox — degraded isolation,
+ * stated plainly, never a silent difference.
+ *
+ * A sandbox is only ever the right call for a genuinely non-git or commit-less
+ * project — never because git was momentarily busy. isGitRepo/hasCommits already
+ * retry transient lock contention; if isGitRepo is STILL false while a `.git` entry
+ * sits right there on disk, that is not "not a repo", it is git in real trouble
+ * (corruption, permissions, a broken worktree pointer), and the caller must not
+ * silently hand the agent an empty directory over it.
+ */
+export function resolveWorkspaceKind(projectDir: string): WorkspaceKind {
+  if (isGitRepo(projectDir)) return hasCommits(projectDir) ? "worktree" : "sandbox";
+  if (looksLikeGitRepo(projectDir)) {
+    throw new Error(
+      `${projectDir} has a .git entry on disk but git still reports it is not a repository, even after retries. ` +
+        "This looks like git trouble (lock contention, corruption, permissions), not a non-git project — refusing to silently sandbox it.",
+    );
+  }
+  return "sandbox";
+}
+
 export function worktreePath(projectDir: string, runId: string): string {
   return join(worktreesDir(projectDir), runId);
 }
 
-export function createWorktree(projectDir: string, runId: string, branch: string): WorktreeHandle {
+export function createWorktree(
+  projectDir: string,
+  runId: string,
+  branch: string,
+  deps: { runGit?: (cwd: string, args: string[]) => GitResult } = {},
+): WorktreeHandle {
+  const runGit = deps.runGit ?? git;
   if (!isGitRepo(projectDir)) {
     throw new Error("Kage delegation needs a git repository — run `git init` first.");
   }
@@ -29,7 +60,9 @@ export function createWorktree(projectDir: string, runId: string, branch: string
   const path = worktreePath(projectDir, runId);
   if (existsSync(path)) return { path, branch, base_commit: git(path, ["rev-parse", "HEAD"]).stdout };
 
-  const added = git(projectDir, ["worktree", "add", "-b", branch, path, "HEAD"]);
+  // A concurrent `git worktree add`/`commit` in the same parallel wave can hold the
+  // ref lock this needs for a moment; retry through it instead of failing the run.
+  const added = retryTransient(() => runGit(projectDir, ["worktree", "add", "-b", branch, path, "HEAD"]));
   if (!added.ok) throw new Error(`Could not create worktree for ${runId}: ${added.stderr}`);
 
   const setup = readDelegationConfig(projectDir).setup;

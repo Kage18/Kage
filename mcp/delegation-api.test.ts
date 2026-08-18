@@ -15,7 +15,7 @@ import { guardRequest } from "./delegation/guard.js";
 import { RUN_STATES, createRun, patchRun, readRun, runTranscriptPath, transitionRun } from "./delegation/contract.js";
 import { delegationAppHtml } from "./delegation/app-html.js";
 import { dispatchRun } from "./delegation/dispatch.js";
-import { mergeRun } from "./delegation/ratify.js";
+import { mergeRun, rejectRun } from "./delegation/ratify.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
 import { writeDelegationConfig } from "./delegation/config.js";
 import { superviseRun } from "./delegation/supervisor.js";
@@ -1464,6 +1464,69 @@ test("a goal-owned run carries goal_id through both /runs and /runs/:id, a goal-
     assert.equal(ownedDetail.run.goal_id, goal.goal.id);
     const plainDetail = await (await apiFetch(port, `/runs/${plain.run.id}`)).json() as { run: { goal_id: string | null } };
     assert.equal(plainDetail.run.goal_id, null);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+// --- BUG 2: a blocked run whose supervisor is dead must not be stuck forever --------
+// stop honestly reports "no live supervisor — nothing to stop" but used to leave the
+// state at `blocked`, and reject refuses blocked states (it assumes an agent might
+// still answer). With no live supervisor, nothing IS waiting, so the run could never
+// be stopped, rejected, or cleaned up. stop must persist that reality itself.
+
+test("stop on a blocked run with a DEAD supervisor transitions it to stopped, and it can then be rejected", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const run = createRun(project, { intent: "orphaned mid-question", type: "chore", agent: "stub" });
+    transitionRun(project, run.id, "briefed", "kernel");
+    transitionRun(project, run.id, "dispatched", "kernel");
+    transitionRun(project, run.id, "running", "kernel");
+    transitionRun(project, run.id, "blocked", "kernel", "its supervisor died before answering");
+    // No socket file, no live process — nothing was ever spawned for this run.
+    assert.equal(await isRunLive(project, run.id), false);
+
+    const stop = await apiFetch(port, `/runs/${run.id}/stop`, { method: "POST" });
+    assert.equal(stop.status, 200);
+    const stopBody = await stop.json() as { ok: boolean; stopped: boolean; detail: string; run: { state: string } };
+    assert.equal(stopBody.ok, true);
+    assert.equal(stopBody.stopped, true, "the outcome IS stopped, even though no live socket answered");
+    assert.match(stopBody.detail, /supervisor gone/);
+    assert.equal(stopBody.run.state, "stopped");
+    assert.equal(readRun(project, run.id).state, "stopped", "the transition was persisted, not just reported");
+
+    // The whole point: it can now actually be cleaned up.
+    const rejected = rejectRun(project, run.id, "abandoned — supervisor died mid-question");
+    assert.equal(rejected.ok, true, rejected.message);
+    assert.equal(readRun(project, run.id).state, "rejected");
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("stop on a blocked run with a LIVE supervisor is unaffected — it stops the same way it always did", async () => {
+  const project = tempGitProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const task = createRun(project, { intent: "needs a decision", type: "chore", agent: "stub" });
+    transitionRun(project, task.id, "briefed", "kernel");
+    const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
+    const supervised = superviseRun(project, task.id, liveStub);
+    await waitFor(() => readRun(project, task.id).state === "blocked");
+    await waitFor(() => isRunLive(project, task.id));
+
+    const stop = await apiFetch(port, `/runs/${task.id}/stop`, { method: "POST" });
+    assert.equal(stop.status, 200);
+    const stopBody = await stop.json() as { ok: boolean; stopped: boolean; run: { state: string } };
+    assert.equal(stopBody.stopped, true, "the live supervisor itself confirmed the stop");
+    assert.doesNotMatch(stopBody.detail ?? "", /supervisor gone/, "the live path must not be mistaken for the dead-supervisor path");
+
+    await supervised;
+    assert.equal(readRun(project, task.id).state, "stopped");
+    assert.equal(await isRunLive(project, task.id), false, "the supervisor actually exited");
   } finally {
     feed.close();
     server.close();

@@ -2,6 +2,8 @@
 // non-zero exit means, because "git said no" is often a legitimate outcome (no commits
 // yet, merge conflict, nothing to commit) rather than a crash.
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 export interface GitResult {
   ok: boolean;
@@ -29,12 +31,50 @@ export function git(cwd: string, args: string[]): GitResult {
   }
 }
 
+// Lock contention is the one git failure a retry can fix: two `git worktree add`
+// (or one of those plus a `commit`) racing in the same parallel wave both want
+// .git/index.lock or a ref lock for a moment. Every other failure — not a repo,
+// no commits yet, a real merge conflict — is a genuine answer, not a stall, and
+// retrying it would just return the same answer slower.
+function isTransientLockFailure(stderr: string): boolean {
+  return /index\.lock|cannot lock ref|unable to create .*: File exists/i.test(stderr);
+}
+
+function sleepSync(ms: number): void {
+  // git() is synchronous throughout this module (every caller relies on that), so the
+  // backoff between retries has to block the thread rather than await a timer.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Retry a git invocation a few times when it looks like lock contention, not a real
+ * "no". Exported mainly so the retry behavior itself is unit-testable with an injected
+ * closure — real index.lock contention is timing-dependent and not worth chasing in a
+ * test.
+ */
+export function retryTransient(run: () => GitResult, attempts = 3, backoffMs = 100): GitResult {
+  let result = run();
+  for (let attempt = 1; attempt < attempts && isTransientLockFailure(result.stderr); attempt++) {
+    sleepSync(backoffMs * attempt);
+    result = run();
+  }
+  return result;
+}
+
 export function isGitRepo(projectDir: string): boolean {
-  return git(projectDir, ["rev-parse", "--git-dir"]).ok;
+  return retryTransient(() => git(projectDir, ["rev-parse", "--git-dir"])).ok;
 }
 
 export function hasCommits(projectDir: string): boolean {
-  return git(projectDir, ["rev-parse", "--verify", "HEAD"]).ok;
+  return retryTransient(() => git(projectDir, ["rev-parse", "--verify", "HEAD"])).ok;
+}
+
+// Cheap, retry-free check: is there a `.git` entry on disk at all (directory for a
+// normal repo, file for a worktree's gitdir pointer)? This is how the workspace
+// decision tells "genuinely not a git project" apart from "git commands are failing
+// even though this really is one" — the latter must never quietly degrade to a sandbox.
+export function looksLikeGitRepo(projectDir: string): boolean {
+  return existsSync(join(projectDir, ".git"));
 }
 
 export function currentBranch(projectDir: string): string {
