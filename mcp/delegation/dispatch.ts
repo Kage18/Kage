@@ -12,7 +12,9 @@ import {
   recordSpend,
   CLAIM_PROTOCOL_VERSION,
   type ClaimRecord,
+  type RunState,
   type RunType,
+  type RunView,
   RUN_SCHEMA_VERSION,
   type TaskRecord,
   appendRunLedger,
@@ -374,6 +376,59 @@ export function dispatchDetached(projectDir: string, task: TaskRecord): { pid: n
   child.unref();
   appendRunLedger(projectDir, { kind: "supervisor_spawned", run_id: task.id, pid: child.pid });
   return { pid: child.pid };
+}
+
+// A run still executed by the calling process — no supervisor, no owning pid recorded
+// anywhere but the caller's own — must say so plainly. Reproduced live on 2026-08-18:
+// SIGTERM to `kage dispatch` killed the run it had just started, leaving the record at
+// "running" with a dead agent_pid, supervisor_pid undefined, and no warning that this
+// could happen.
+export const INLINE_RUN_WARNING =
+  "heads up: this run is tied to this shell — closing it, Ctrl-C, or a command timeout will kill the agent mid-work.";
+
+// A run in one of these states has no verdict yet and may still be worked on by its
+// (detached) supervisor — worth polling. Anything else is a resting point.
+const IN_FLIGHT_STATES: ReadonlySet<RunState> = new Set(["briefed", "dispatched", "running", "verifying"]);
+
+const FOLLOW_PHASE_LABEL: Partial<Record<RunState, string>> = {
+  briefed: "handing off to a detached supervisor",
+  dispatched: "handing off to a detached supervisor",
+  running: "agent is working",
+  verifying: "verifying the claim",
+};
+
+/**
+ * Follow a run that a DETACHED supervisor already owns (dispatchDetached spawned it)
+ * and print the same progress line the inline path used to show — so `kage dispatch`
+ * looks the same to a human whether or not this polling loop itself survives.
+ *
+ * This is a POLL, not a hold: it only ever reads task.json. If this process dies too,
+ * the run is unaffected — that is the entire point of following instead of executing.
+ * Bounded by maxWaitMs so a supervisor that never moves the run out of "briefed" (a
+ * failed detach that still returned a pid) cannot hang this loop forever.
+ */
+export async function followRun(
+  projectDir: string,
+  runId: string,
+  options: { progress?: boolean; pollMs?: number; maxWaitMs?: number } = {},
+): Promise<RunView> {
+  const pollMs = options.pollMs ?? 400;
+  const maxWaitMs = options.maxWaitMs ?? 45 * 60_000;
+  const start = Date.now();
+  let task = readRun(projectDir, runId);
+  const line = options.progress ? new ProgressLine(`${task.agent} · ${runId}`) : null;
+  line?.start();
+  let lastState: RunState | null = null;
+  while (IN_FLIGHT_STATES.has(task.state) && Date.now() - start < maxWaitMs) {
+    if (task.state !== lastState) {
+      lastState = task.state;
+      line?.update({ kind: "phase", label: FOLLOW_PHASE_LABEL[task.state] ?? task.state });
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+    task = readRun(projectDir, runId);
+  }
+  line?.stop(task.state === "ready" ? "✓ claim ready for review" : task.state === "failed" ? "✗ verification failed" : undefined);
+  return task;
 }
 
 export function runWorkspacePath(projectDir: string, task: TaskRecord): string {
