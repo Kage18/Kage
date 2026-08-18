@@ -20,6 +20,7 @@ import { stubAdapter } from "./delegation/adapters/stub.js";
 import { writeDelegationConfig } from "./delegation/config.js";
 import { superviseRun } from "./delegation/supervisor.js";
 import { isRunLive, sendControl } from "./delegation/control.js";
+import { goalForRun, readGoal } from "./delegation/goal.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-api-"));
@@ -1275,6 +1276,104 @@ test("a room reply is scoped to its own thread even when the client asks about a
     }
     const main = await (await apiFetch(port, "/room")).json() as { turns: unknown[] };
     assert.deepEqual(main.turns, [], "the default thread stays empty when another thread was addressed");
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("goal routes round-trip: create, list, get, abandon", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const empty = await (await apiFetch(port, "/goals")).json() as { ok: boolean; goals: unknown[] };
+    assert.equal(empty.ok, true);
+    assert.deepEqual(empty.goals, []);
+
+    const created = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({
+        intent: "ship the orchestration substrate",
+        plan: [[{ intent: "build goal.ts", type: "feature", files_scope: ["mcp/delegation/goal.ts"] }]],
+      }),
+    })).json() as { ok: boolean; goal: Record<string, unknown> };
+    assert.equal(created.ok, true);
+    assert.equal(created.goal.state, "planning");
+    assert.equal(created.goal.autonomy, "recommend");
+
+    const listed = await (await apiFetch(port, "/goals")).json() as { goals: Array<{ id: string }> };
+    assert.equal(listed.goals.length, 1);
+    assert.equal(listed.goals[0].id, created.goal.id);
+
+    const fetched = await (await apiFetch(port, `/goals/${created.goal.id}`)).json() as { ok: boolean; goal: { id: string } };
+    assert.equal(fetched.ok, true);
+    assert.equal(fetched.goal.id, created.goal.id);
+
+    const missing = await apiFetch(port, "/goals/does-not-exist");
+    assert.equal(missing.status, 404);
+
+    const abandoned = await (await apiFetch(port, `/goals/${created.goal.id}/abandon`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "superseded by a new plan" }),
+    })).json() as { ok: boolean; goal: { state: string; state_history: Array<{ note?: string }> } };
+    assert.equal(abandoned.ok, true);
+    assert.equal(abandoned.goal.state, "abandoned");
+    assert.equal(abandoned.goal.state_history.at(-1)?.note, "superseded by a new plan");
+
+    // abandoned is terminal — a second abandon must fail, not silently succeed.
+    const illegal = await apiFetch(port, `/goals/${created.goal.id}/abandon`, { method: "POST", body: "{}" });
+    assert.equal(illegal.status, 400);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("POST /goals rejects an empty intent", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const res = await apiFetch(port, "/goals", { method: "POST", body: JSON.stringify({ intent: "  " }) });
+    assert.equal(res.status, 400);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("POST /runs with goal_id attaches the new run to the goal", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const goal = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({ intent: "wave one" }),
+    })).json() as { goal: { id: string } };
+
+    const created = await (await apiFetch(port, "/runs", {
+      method: "POST",
+      body: JSON.stringify({ intent: "attached run", agent: "stub", type: "chore", hold: true, goal_id: goal.goal.id }),
+    })).json() as { ok: boolean; run: { id: string } };
+    assert.equal(created.ok, true);
+
+    const owner = goalForRun(project, created.run.id);
+    assert.equal(owner?.id, goal.goal.id);
+    const persisted = readGoal(project, goal.goal.id);
+    assert.ok(persisted.plan.waves.some((wave) => wave.run_ids.includes(created.run.id)));
+
+    // A run created WITHOUT goal_id must never be attached to anything.
+    const plain = await (await apiFetch(port, "/runs", {
+      method: "POST",
+      body: JSON.stringify({ intent: "plain run", agent: "stub", type: "chore", hold: true }),
+    })).json() as { run: { id: string } };
+    assert.equal(goalForRun(project, plain.run.id), null);
+
+    // An unknown goal_id must fail the whole dispatch, not silently drop the attach.
+    const bad = await apiFetch(port, "/runs", {
+      method: "POST",
+      body: JSON.stringify({ intent: "bad goal", agent: "stub", type: "chore", hold: true, goal_id: "does-not-exist" }),
+    });
+    assert.equal(bad.status, 400);
   } finally {
     feed.close();
     server.close();

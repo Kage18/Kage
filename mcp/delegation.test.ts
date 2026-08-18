@@ -46,6 +46,17 @@ import { buildJudgment, readJudgment, renderJudgment } from "./delegation/manage
 import { buildRoomLaunch } from "./delegation/manager-prompt.js";
 import { stageAndMeasure } from "./delegation/git.js";
 import { packetsDir } from "./kernel.js";
+import {
+  abandonGoal,
+  attachRunToGoal,
+  createGoal,
+  goalForRun,
+  listGoals,
+  patchGoal,
+  readGoal,
+  transitionGoal,
+} from "./delegation/goal.js";
+import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-delegation-"));
@@ -1514,4 +1525,129 @@ test("sweepDeadRuns persists death for stuck runs, including verifying, after gr
   }
   // Idempotent: a second sweep finds nothing.
   assert.equal(sweepDeadRuns(project, 0).length, 0);
+});
+
+test("goal record: lifecycle and legality", () => {
+  const project = tempProject();
+  const goal = createGoal(project, {
+    intent: "ship the orchestration substrate",
+    plan: [[{ intent: "build goal.ts", type: "feature", files_scope: ["mcp/delegation/goal.ts"] }]],
+  });
+  assert.equal(goal.state, "planning");
+  assert.equal(goal.autonomy, "recommend", "default autonomy is recommend, never merge");
+  assert.equal(goal.plan.waves.length, 1);
+  assert.deepEqual(goal.plan.waves[0].run_ids, []);
+  assert.equal(readGoal(project, goal.id).id, goal.id);
+  assert.equal(listGoals(project).length, 1);
+
+  // planning -> done is illegal; must go through executing.
+  assert.throws(() => transitionGoal(project, goal.id, "done"), /Illegal transition/);
+  const executing = transitionGoal(project, goal.id, "executing");
+  assert.equal(executing.state, "executing");
+  assert.equal(executing.state_history.length, 2);
+  const done = transitionGoal(project, goal.id, "done");
+  assert.equal(done.state, "done");
+  // done is terminal.
+  assert.throws(() => transitionGoal(project, goal.id, "executing"), /Illegal transition/);
+
+  const other = createGoal(project, { intent: "a second goal" });
+  const abandoned = abandonGoal(project, other.id, "superseded");
+  assert.equal(abandoned.state, "abandoned");
+  assert.equal(abandoned.state_history.at(-1)?.note, "superseded");
+  assert.throws(() => abandonGoal(project, other.id), /Illegal transition/, "abandoned is terminal too");
+
+  assert.throws(() => createGoal(project, { intent: "  " }), /non-empty/);
+  assert.throws(() => readGoal(project, "does-not-exist"), /No goal found/);
+});
+
+test("attachRunToGoal + goalForRun round-trip, and a goal-less run finds nothing", () => {
+  const project = tempProject();
+  const goal = createGoal(project, {
+    intent: "parity wave",
+    plan: [[{ intent: "part one", type: "feature", files_scope: [] }]],
+  });
+  const run = createRun(project, { intent: "part one", type: "feature", agent: "stub" });
+  assert.equal(goalForRun(project, run.id), null, "not attached yet");
+
+  const attached = attachRunToGoal(project, goal.id, run.id);
+  assert.deepEqual(attached.plan.waves[0].run_ids, [run.id]);
+  const found = goalForRun(project, run.id);
+  assert.equal(found?.id, goal.id);
+
+  // Attaching the same run twice must not duplicate it.
+  attachRunToGoal(project, goal.id, run.id);
+  assert.deepEqual(readGoal(project, goal.id).plan.waves[0].run_ids, [run.id]);
+
+  // A run never attached to any goal has no owner.
+  const orphan = createRun(project, { intent: "human only", type: "chore", agent: "stub" });
+  assert.equal(goalForRun(project, orphan.id), null);
+
+  // patchGoal is a plain merge — no state-machine involvement.
+  const patched = patchGoal(project, goal.id, { autonomy: "merge" });
+  assert.equal(patched.autonomy, "merge");
+});
+
+test("notifyManagerOfRunEvent: exactly one rate-limited frame for a goal-owned run, none for a goal-less run", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "wave one" });
+  const ownedRun = createRun(project, { intent: "owned", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, ownedRun.id);
+  const orphanRun = createRun(project, { intent: "orphan", type: "chore", agent: "stub" });
+
+  const sent: string[] = [];
+  const deps = {
+    isLiveFn: async () => true,
+    sendFrameFn: async (_project: string, message: string) => {
+      sent.push(message);
+      return true;
+    },
+  };
+
+  // A human-only run must NEVER wake the manager, even though the session is live.
+  const orphanResult = await notifyManagerOfRunEvent(project, orphanRun.id, { state: "ready" }, undefined, deps);
+  assert.equal(orphanResult, false);
+  assert.equal(sent.length, 0);
+
+  // A goal-owned run wakes it — exactly one frame, naming the run and the goal's intent.
+  const first = await notifyManagerOfRunEvent(project, ownedRun.id, { state: "blocked", detail: "needs a decision" }, undefined, deps);
+  assert.equal(first, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0], `[kage event] run ${ownedRun.id} (wave one) is now blocked: needs a decision`);
+
+  // Same state again, immediately after — dropped as a duplicate.
+  const duplicate = await notifyManagerOfRunEvent(project, ownedRun.id, { state: "blocked" }, undefined, deps);
+  assert.equal(duplicate, false);
+  assert.equal(sent.length, 1, "a duplicate state must never be re-sent");
+
+  // A DIFFERENT state, but still inside the 30s rate-limit window — also dropped.
+  const tooSoon = await notifyManagerOfRunEvent(project, ownedRun.id, { state: "ready" }, undefined, deps);
+  assert.equal(tooSoon, false);
+  assert.equal(sent.length, 1, "the 30s-per-run limit governs regardless of which state changed");
+});
+
+test("notifyManagerOfRunEvent: nothing is sent when the held session isn't live, or when the goal is done/abandoned", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "finished goal" });
+  const run = createRun(project, { intent: "attached", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, run.id);
+  transitionGoal(project, goal.id, "executing");
+  transitionGoal(project, goal.id, "done");
+
+  const sent: string[] = [];
+  const liveDeps = {
+    isLiveFn: async () => true,
+    sendFrameFn: async (_project: string, message: string) => {
+      sent.push(message);
+      return true;
+    },
+  };
+  assert.equal(await notifyManagerOfRunEvent(project, run.id, { state: "ready" }, undefined, liveDeps), false);
+  assert.equal(sent.length, 0, "a done goal is no longer active — no frame");
+
+  const deadSessionDeps = { isLiveFn: async () => false, sendFrameFn: liveDeps.sendFrameFn };
+  const goal2 = createGoal(project, { intent: "not started yet" });
+  const run2 = createRun(project, { intent: "attached2", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal2.id, run2.id);
+  assert.equal(await notifyManagerOfRunEvent(project, run2.id, { state: "ready" }, undefined, deadSessionDeps), false);
+  assert.equal(sent.length, 0, "no live session means never touch stdin");
 });
