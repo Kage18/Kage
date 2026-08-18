@@ -106,6 +106,8 @@ import {
   setContextSlot,
   staleCatch,
   formatStaleCatch,
+  staleTriage,
+  formatStaleTriage,
   supersedeMemory,
   kageConflicts,
   syncPersonal,
@@ -175,6 +177,7 @@ Memory:
 
 Keep it healthy:
   kage refresh --project <dir>               rebuild indexes, graphs and metrics
+  kage stale --project <dir>                 triage withheld memory: what moved, worth rescuing, one command to act
   kage doctor --project <dir>                health check
   kage repair --project <dir>                fix what doctor finds (indexes, broken packets, wiring)
   kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
@@ -226,6 +229,7 @@ Usage:
   kage handoff --project <dir> [--json]
   kage layers --project <dir> [--json]
   kage lifecycle --project <dir> [--json]
+  kage stale --project <dir> [--limit <n>] [--json]   triage stale/withheld memory, ranked by rescue value; one packet at a time
   kage reverify --project <dir> --packet <id> [--json]
   kage reconcile --project <dir> [--session <id>] [--json]
   kage timeline --project <dir> [--days <n>] [--json]
@@ -1734,6 +1738,17 @@ async function main(): Promise<void> {
     const result = reverifyRun(projectArg(args), runId);
     console.log(result.message);
     if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "stale") {
+    const limit = numberArg(args, "--limit", 20);
+    const result = staleTriage(projectArg(args), { limit });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(formatStaleTriage(result, limit).join("\n"));
     return;
   }
 
