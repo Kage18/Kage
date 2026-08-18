@@ -25,7 +25,7 @@ import {
 } from "./contract.js";
 import { commitIdentityArgs, currentBranch, dirtyPaths, git } from "./git.js";
 import { goalForRun } from "./goal.js";
-import type { CitationText } from "./verify.js";
+import { type CitationText, claimVerdict } from "./verify.js";
 import { commitWorktree, removeWorktree, worktreePath } from "./worktree.js";
 
 // Rewrite a packet file's status in place, preserving the lossless OKF round-trip.
@@ -192,14 +192,26 @@ export function maybeAutoMerge(projectDir: string, runId: string): void {
   const task = readRun(projectDir, runId);
   if (task.state !== "ready") return;
   const claim = readClaim(projectDir, runId);
-  const fullyVerified = Boolean(claim) && claim!.checks.length > 0 && claim!.checks.every((check) => check.result === "pass");
+  // Every check passing is NOT enough. In a repo with no test command the only checks
+  // that run are non-executing ones (diff size, citations, reachability) — they all pass
+  // while nothing was actually executed, and claimVerdict labels exactly that case
+  // "UNVERIFIED — nothing was executed". Auto-merge is the one place code lands with no
+  // human in the loop, so it must not land what the product itself refuses to call
+  // verified. Require an executed command too.
+  const verdict = claim ? claimVerdict(claim) : null;
+  const fullyVerified =
+    Boolean(claim) && claim!.checks.length > 0 && claim!.checks.every((check) => check.result === "pass") && Boolean(verdict?.executed);
   if (!fullyVerified) {
-    const reason = claim
-      ? `not fully verified — ${
-          claim.checks.filter((check) => check.result !== "pass").map((check) => `${check.id}: ${check.result}`).join(", ") ||
-          "no checks recorded"
-        }`
-      : "no claim to verify";
+    const failing = claim
+      ? claim.checks.filter((check) => check.result !== "pass").map((check) => `${check.id}: ${check.result}`).join(", ")
+      : "";
+    const reason = !claim
+      ? "no claim to verify"
+      : failing
+        ? `not fully verified — ${failing}`
+        : verdict && !verdict.executed
+          ? `not fully verified — nothing was executed (${verdict.label})`
+          : "not fully verified — no checks recorded";
     appendRunLedger(projectDir, { kind: "auto_merge_held", run_id: runId, goal_id: goal.id, reason });
     return;
   }
