@@ -2063,3 +2063,78 @@ test("renderBrief tells hired agents repo harness tools are the operator's job, 
     "the harness-tools note should sit close to the reporting-protocol section"
   );
 });
+
+// ---------------------------------------------------------------------------------
+// Two ordering/liveness bugs found live 2026-08-18:
+//
+// BUG 1 — goal attachment used to happen AFTER dispatchRun's whole run (agent work
+// plus verification) had already finished, so goalForRun(runId) returned null for the
+// run's entire life and the orchestrator wake-loop's event bridge never fired.
+// dispatchRun now takes an optional goalId and attaches right after createRun, before
+// the brief is even written.
+//
+// BUG 2 — verification runs INSIDE the supervisor process after the hired agent's own
+// child has already exited by design, but liveState checked only agent_pid — so every
+// verifying run displayed as "dropped" and, past the sweep grace period, could be
+// reaped outright while its supervisor was demonstrably alive and still checking.
+// liveState now also accepts a live supervisor_pid.
+
+test("dispatchRun with a goalId resolves through goalForRun WHILE the adapter is still running, not only after", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "orchestrated wave" });
+
+  let seenDuringRun: string | null | undefined;
+  const probeAdapter: Adapter = {
+    name: "probe",
+    async run(input) {
+      seenDuringRun = goalForRun(project, input.runId)?.id ?? null;
+      return {
+        exit_code: 0,
+        final_message: ["Done.", "", "```kage-claim", JSON.stringify({ statement: "probed", unsure: [], learned: [] }), "```"].join("\n"),
+      };
+    },
+  };
+
+  const result = await dispatchRun(project, { intent: "probe goal timing", type: "chore", goalId: goal.id }, probeAdapter);
+  assert.equal(seenDuringRun, goal.id, "the run must already be attached to its goal while the agent is still working, not just at the end");
+  assert.equal(goalForRun(project, result.task.id)?.id, goal.id);
+  assert.equal(result.goalWarning, undefined);
+});
+
+test("dispatchRun with a goalId attaches on a briefOnly dispatch too, before any execution starts", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "held brief" });
+
+  const result = await dispatchRun(project, { intent: "held for approval", type: "chore", goalId: goal.id, briefOnly: true }, stubAdapter());
+  assert.equal(result.task.state, "briefed");
+  assert.equal(goalForRun(project, result.task.id)?.id, goal.id, "attachment does not wait for execution to happen at all");
+  assert.equal(result.goalWarning, undefined);
+});
+
+test("dispatchRun with an unknown goalId warns on the result but still dispatches the run", async () => {
+  const project = tempProject();
+  const result = await dispatchRun(project, { intent: "unknown goal", type: "chore", goalId: "does-not-exist" }, stubAdapter());
+  assert.match(result.goalWarning ?? "", /Could not attach this run to goal does-not-exist/);
+  assert.equal(goalForRun(project, result.task.id), null, "never attached to any goal");
+  assert.equal(result.task.state, "ready", "the dispatch itself must still succeed despite the unknown goal_id");
+});
+
+test("liveState: a verifying run with a dead agent pid but a live supervisor pid is NOT stale; with both dead it is", () => {
+  const project = tempProject();
+  const task = createRun(project, { intent: "verifying liveness", type: "chore", agent: "stub" });
+  transitionRun(project, task.id, "briefed", "kernel");
+  transitionRun(project, task.id, "dispatched", "kernel");
+  transitionRun(project, task.id, "running", "kernel");
+  transitionRun(project, task.id, "verifying", "kernel");
+
+  // The agent's own child is gone (by design, mid-verification) but the supervisor that
+  // is performing the checks is this very test process — genuinely alive.
+  patchRun(project, task.id, { agent_pid: 999999999, supervisor_pid: process.pid });
+  assert.equal(liveState(readRun(project, task.id)).stale, false, "a live supervisor keeps a verifying run alive");
+  assert.equal(readRun(project, task.id).display_state, "verifying", "must never display as dropped mid-verification");
+
+  // Now neither process exists — a genuinely dead run must still be reaped.
+  patchRun(project, task.id, { supervisor_pid: 999999999 });
+  assert.equal(liveState(readRun(project, task.id)).stale, true, "with neither pid alive the run is genuinely dropped");
+  assert.equal(readRun(project, task.id).display_state, "dropped");
+});

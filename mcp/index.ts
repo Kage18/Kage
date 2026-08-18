@@ -94,7 +94,6 @@ import { mergeRun, rejectRun } from "./delegation/ratify.js";
 import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
 import { diffBudget } from "./delegation/config.js";
 import { readJudgment, renderJudgment } from "./delegation/manager.js";
-import { attachRunToGoal } from "./delegation/goal.js";
 import { DEFAULT_SESSION, readActiveGoal } from "./delegation/room-sessions.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
@@ -1368,24 +1367,22 @@ async function runDelegationTool(
             notes: typeof args?.judgment_note === "string" ? args.judgment_note : undefined,
           }
         : undefined;
-    const result = await dispatchRun(projectDir, { intent: String(args?.intent ?? ""), type, judgment: judged }, adapterByName(agent));
     let goalId = typeof args?.goal_id === "string" ? args.goal_id.trim() : "";
     // No explicit goal_id: inside a room thread (KAGE_ROOM=1), attach to whatever goal
     // that thread has active instead of trusting the manager to remember goal_id every
-    // time — that "remember to pass it" instruction is exactly what failed live.
+    // time — that "remember to pass it" instruction is exactly what failed live. Resolved
+    // BEFORE dispatch so the goal is attached at run creation, not after the run (agent
+    // work plus verification) has already finished — the orchestrator wake-loop's event
+    // bridge needs goalForRun(runId) to resolve for the run's entire life, not just its end.
     if (!goalId && process.env.KAGE_ROOM === "1") {
       goalId = readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
     }
-    let goalWarning = "";
-    if (goalId) {
-      try {
-        attachRunToGoal(projectDir, goalId, result.task.id);
-      } catch (error) {
-        // The run is already real and dispatched — an unknown goal id is a warning, not
-        // a reason to fail a dispatch that already happened.
-        goalWarning = `\n\nCould not attach this run to goal ${goalId}: ${error instanceof Error ? error.message : String(error)}`;
-      }
-    }
+    const result = await dispatchRun(
+      projectDir,
+      { intent: String(args?.intent ?? ""), type, judgment: judged, ...(goalId ? { goalId } : {}) },
+      adapterByName(agent),
+    );
+    const goalWarning = result.goalWarning ? `\n\n${result.goalWarning}` : "";
     const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
     const judgment = readJudgment(projectDir, result.task.id);
     const judgmentBlock = judgment ? `\n\n${renderJudgment(judgment).join("\n")}` : "";

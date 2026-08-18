@@ -110,6 +110,10 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   const plan = compileBrief(projectDir, task.intent, task.type);
   const dir = runDir(projectDir, runId);
   mkdirSync(dir, { recursive: true });
+  // Recorded before anything else: verification (below) runs in THIS process after the
+  // hired agent's child has already exited, so liveState needs this pid to know the run
+  // is still alive once agent_pid alone goes dead by design.
+  patchRun(projectDir, runId, { supervisor_pid: process.pid });
 
   // Workspace: a real worktree when git allows, else a sandbox — stated, never silent.
   // resolveWorkspaceKind throws rather than choosing "sandbox" when a .git entry is
