@@ -46,3 +46,4 @@ kage-mcp-key.pem
 .agent_memory/structural/
 .agent_memory/review/
 .agent_memory/pending/
+.agent_memory/goals/
