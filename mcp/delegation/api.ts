@@ -29,6 +29,7 @@ import {
   type RunView,
 } from "./contract.js";
 import { appendSteerRecord, dispatchDetached, readSteerRecords } from "./dispatch.js";
+import { abandonGoal, attachRunToGoal, createGoal, listGoals, readGoal, type GoalAutonomy, type GoalRunSpec } from "./goal.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { normalizeRunType, preflightForecast } from "./preflight.js";
 import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type SteerQueueResult } from "./steer.js";
@@ -924,6 +925,76 @@ export async function handleDelegationRoute(
     return true;
   }
 
+  // Goals: the room manager's own bookkeeping for a multi-run intent. Runs stay the unit
+  // of dispatch — a goal only records the plan and which runs belong to which wave.
+  if (path === "/goals" && method === "GET") {
+    json(res, 200, { ok: true, goals: listGoals(projectDir) });
+    return true;
+  }
+
+  if (path === "/goals" && method === "POST") {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      json(res, 400, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    const intent = typeof body.intent === "string" ? body.intent.trim() : "";
+    if (!intent) {
+      json(res, 400, { ok: false, error: "intent is required" });
+      return true;
+    }
+    const autonomy = typeof body.autonomy === "string" ? (body.autonomy as GoalAutonomy) : undefined;
+    const plan = Array.isArray(body.plan)
+      ? (body.plan as unknown[]).map((wave) => (Array.isArray(wave) ? (wave as Array<Partial<GoalRunSpec>>) : []))
+      : undefined;
+    const budgets = body.budgets && typeof body.budgets === "object" ? (body.budgets as Record<string, unknown>) : undefined;
+    try {
+      const goal = createGoal(projectDir, {
+        intent,
+        plan,
+        autonomy,
+        budgets: budgets as never,
+      });
+      json(res, 201, { ok: true, goal });
+    } catch (error) {
+      json(res, 400, { ok: false, error: (error as Error).message });
+    }
+    return true;
+  }
+
+  const goalMatch = path.match(/^\/goals\/([A-Za-z0-9._-]+)(?:\/(abandon))?$/);
+  if (goalMatch) {
+    const [, goalId, goalAction] = goalMatch;
+    if (!goalAction && method === "GET") {
+      try {
+        json(res, 200, { ok: true, goal: readGoal(projectDir, goalId) });
+      } catch (error) {
+        json(res, 404, { ok: false, error: (error as Error).message });
+      }
+      return true;
+    }
+    if (goalAction === "abandon" && method === "POST") {
+      let body: Record<string, unknown> = {};
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        // abandon needs no body — a reason is optional, so an unreadable/empty one is fine.
+      }
+      const note = typeof body.reason === "string" ? body.reason.trim() || undefined : undefined;
+      try {
+        const goal = abandonGoal(projectDir, goalId, note);
+        json(res, 200, { ok: true, goal });
+      } catch (error) {
+        const message = (error as Error).message;
+        json(res, message.startsWith("No goal found") ? 404 : 400, { ok: false, error: message });
+      }
+      return true;
+    }
+    return false;
+  }
+
   if (path === "/runs" && method === "GET") {
     json(res, 200, { ok: true, runs: listRuns(projectDir).map((run) => withActivity(projectDir, run)) });
     return true;
@@ -961,6 +1032,8 @@ export async function handleDelegationRoute(
       });
       writeBrief(projectDir, task.id, renderBrief(task, plan));
       const briefed = transitionRun(projectDir, task.id, "briefed", "kernel");
+      const goalId = typeof body.goal_id === "string" ? body.goal_id.trim() : "";
+      if (goalId) attachRunToGoal(projectDir, goalId, task.id);
       const spawned = body.hold === true ? { pid: undefined } : dispatchDetached(projectDir, briefed);
       feed.notify(task.id);
       json(res, 201, { ok: true, run: readRun(projectDir, task.id), supervisor_pid: spawned.pid ?? null });

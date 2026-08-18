@@ -54,7 +54,8 @@ import {
 import { guardRequest, loopbackOrigins, makeToken } from "./delegation/guard.js";
 import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
 import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
-import { sweepDeadRuns } from "./delegation/contract.js";
+import { readRun, sweepDeadRuns } from "./delegation/contract.js";
+import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 
 export interface DaemonStatus {
   ok: boolean;
@@ -766,6 +767,23 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
 
   const guardContext = { allowedOrigins: loopbackOrigins(restPort), token };
   const delegationFeed = createDelegationFeed(projectDir);
+  // Every run-changed notification, from every route and the reap timer alike, funnels
+  // through this one method — wrapping it here is the single choke point for waking the
+  // held manager on a goal-owned run's state change, instead of threading the bridge
+  // call through every feed.notify() call site in api.ts.
+  const notifyRunChanged = delegationFeed.notify.bind(delegationFeed);
+  delegationFeed.notify = (runId: string) => {
+    notifyRunChanged(runId);
+    try {
+      const run = readRun(projectDir, runId);
+      const detail = run.waiting_on ? `${run.waiting_on.needs}${run.waiting_on.detail ? ` — ${run.waiting_on.detail}` : ""}` : undefined;
+      // Best-effort, never awaited: a slow or dead manager session must not stall the
+      // request that triggered this notification.
+      notifyManagerOfRunEvent(projectDir, runId, { state: run.display_state, detail }).catch(() => {});
+    } catch {
+      // An unknown run id or a read race must never break the caller's request.
+    }
+  };
   const delegationRoom = createRoomState();
   const delegationPty = createPtyState();
   const server = createServer(async (req, res) => {

@@ -29,6 +29,7 @@ import {
   MANAGER_ALLOWED_TOOLS, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
+import { goalForRun, type GoalRecord } from "./goal.js";
 
 function roomDir(projectDir: string, session?: string): string {
   return roomDirFor(projectDir, session);
@@ -378,4 +379,67 @@ export async function isRoomSupervisorLive(projectDir: string, session?: string)
   if (reply) return true;
   const record = readRoomSupervisorRecord(projectDir);
   return record ? isProcessAlive(record.pid) : false;
+}
+
+// ---------------------------------------------------------------------------
+// Event bridge — the manager as an event-driven orchestrator, not just a chat partner.
+//
+// A run finishing outside any goal must never wake the manager: a human-only run is the
+// user's own business, and injecting an unsolicited turn into their conversation would
+// be exactly the kind of surprise this product exists to prevent. Only a run attached to
+// an ACTIVE goal (planning or executing — never done/abandoned) qualifies.
+
+export interface RunBridgeEvent {
+  state: string;
+  detail?: string;
+}
+
+/** Test seam: real production dependencies, injectable so tests never spawn a real process. */
+export interface NotifyManagerDeps {
+  isLiveFn?: (projectDir: string, session?: string) => Promise<boolean>;
+  goalForRunFn?: (projectDir: string, runId: string) => GoalRecord | null;
+  sendFrameFn?: (projectDir: string, message: string, session?: string) => Promise<boolean>;
+}
+
+const RUN_EVENT_RATE_LIMIT_MS = 30_000;
+const lastRunEventByKey = new Map<string, { state: string; at: number }>();
+
+function runEventKey(projectDir: string, runId: string, session?: string): string {
+  return `${resolve(projectDir)}\0${normalizeSessionKey(session)}\0${runId}`;
+}
+
+/** Real send path: an ordinary "ask" round trip, same protocol a human message uses. */
+async function sendFrameToHeldSession(projectDir: string, message: string, session?: string): Promise<boolean> {
+  const reply = await askRoomSupervisor(projectDir, message, undefined, session);
+  return reply?.kind === "final";
+}
+
+/**
+ * Wakes the held manager session with a compact context frame when a goal-owned run
+ * changes state — "[kage event] run <id> (<goal intent>) is now <state>: <detail>".
+ * Rate-limited per run: a repeat of the same state is always dropped, and no run gets a
+ * second frame within 30s regardless of state. Resolves false (nothing sent) whenever
+ * the session isn't live, the run has no active goal, or the frame was rate-limited —
+ * callers treat this as fire-and-forget and must never let a false break a request.
+ */
+export async function notifyManagerOfRunEvent(
+  projectDir: string,
+  runId: string,
+  event: RunBridgeEvent,
+  session?: string,
+  deps: NotifyManagerDeps = {},
+): Promise<boolean> {
+  const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
+  if (!(await isLive(projectDir, session))) return false;
+  const findGoal = deps.goalForRunFn ?? goalForRun;
+  const goal = findGoal(projectDir, runId);
+  if (!goal || (goal.state !== "planning" && goal.state !== "executing")) return false;
+  const key = runEventKey(projectDir, runId, session);
+  const now = Date.now();
+  const last = lastRunEventByKey.get(key);
+  if (last && (last.state === event.state || now - last.at < RUN_EVENT_RATE_LIMIT_MS)) return false;
+  lastRunEventByKey.set(key, { state: event.state, at: now });
+  const message = `[kage event] run ${runId} (${goal.intent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}`;
+  const send = deps.sendFrameFn ?? sendFrameToHeldSession;
+  return send(projectDir, message, session);
 }

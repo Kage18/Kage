@@ -292,6 +292,7 @@ export function ensureDelegationIgnores(projectDir: string): void {
   const ignorePath = join(projectDir, ".gitignore");
   const needed = [
     ".agent_memory/runs/",
+    ".agent_memory/goals/",
     ".agent_memory/worktrees/",
     ".agent_memory/audit/",
     ".agent_memory/indexes/",
