@@ -40,6 +40,8 @@ export interface RoomSessionMeta {
   key: string;
   title: string;
   created_at: string;
+  /** The goal this thread's manager dispatches into when a run carries no explicit goal_id. */
+  active_goal_id?: string | null;
 }
 
 function indexPath(projectDir: string): string {
@@ -110,6 +112,51 @@ export function closeRoomSession(projectDir: string, key: string): RoomSessionMe
   // Only ever inside room/s/<key> — never the flat room root.
   if (dir !== roomRoot(projectDir) && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   return sessions;
+}
+
+/**
+ * A thread's active goal is what makes goal attachment IMPLICIT: kage_dispatch, called
+ * with no goal_id from inside a room thread, attaches to whatever this returns instead
+ * of relying on the manager to remember to pass one. Creates the session entry on first
+ * use — the default thread otherwise never appears in sessions.json until renamed.
+ */
+export function setActiveGoal(projectDir: string, sessionKey: string, goalId: string | null): void {
+  const normalized = normalizeSessionKey(sessionKey);
+  const sessions = listRoomSessions(projectDir);
+  const idx = sessions.findIndex((entry) => entry.key === normalized);
+  if (idx === -1) {
+    sessions.push({
+      key: normalized,
+      title: normalized === DEFAULT_SESSION ? "Room" : normalized,
+      created_at: new Date().toISOString(),
+      active_goal_id: goalId,
+    });
+  } else {
+    sessions[idx] = { ...sessions[idx], active_goal_id: goalId };
+  }
+  writeIndex(projectDir, sessions);
+}
+
+export function readActiveGoal(projectDir: string, sessionKey: string): string | null {
+  const normalized = normalizeSessionKey(sessionKey);
+  const entry = listRoomSessions(projectDir).find((session) => session.key === normalized);
+  return entry?.active_goal_id ?? null;
+}
+
+/**
+ * Called when a goal is abandoned or reaches done — a terminal goal must stop being
+ * anyone's active target, or every dispatch after that silently misattaches to a dead
+ * goal. Linear over threads, which stay few, same as goalForRun over goals.
+ */
+export function clearActiveGoalEverywhere(projectDir: string, goalId: string): void {
+  const sessions = listRoomSessions(projectDir);
+  let changed = false;
+  const next = sessions.map((entry) => {
+    if (entry.active_goal_id !== goalId) return entry;
+    changed = true;
+    return { ...entry, active_goal_id: null };
+  });
+  if (changed) writeIndex(projectDir, next);
 }
 
 /** Threads whose directory exists on disk, used to spot orphans after a manual delete. */

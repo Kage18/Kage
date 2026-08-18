@@ -57,6 +57,7 @@ import {
   transitionGoal,
 } from "./delegation/goal.js";
 import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
+import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
 import { callTool } from "./index.js";
 
 function tempProject(): string {
@@ -1683,4 +1684,94 @@ test("notifyManagerOfRunEvent: nothing is sent when the held session isn't live,
   attachRunToGoal(project, goal2.id, run2.id);
   assert.equal(await notifyManagerOfRunEvent(project, run2.id, { state: "ready" }, undefined, deadSessionDeps), false);
   assert.equal(sent.length, 0, "no live session means never touch stdin");
+});
+
+test("setActiveGoal + readActiveGoal round-trip, per thread, defaulting to no active goal", () => {
+  const project = tempProject();
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), null, "nothing set yet");
+
+  setActiveGoal(project, DEFAULT_SESSION, "goal-one");
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), "goal-one");
+
+  // A different thread is a different pointer entirely.
+  assert.equal(readActiveGoal(project, "thread-2"), null);
+  setActiveGoal(project, "thread-2", "goal-two");
+  assert.equal(readActiveGoal(project, "thread-2"), "goal-two");
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), "goal-one", "unrelated thread untouched");
+
+  // Clearing is just setting null.
+  setActiveGoal(project, DEFAULT_SESSION, null);
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), null);
+});
+
+// Drives the real kage_dispatch tool handler (not dispatchRun directly) with the room's
+// own env vars, since that handler is where implicit attachment actually happens.
+async function dispatchInRoom(project: string, intent: string, sessionKey?: string, goalId?: string) {
+  const prevRoom = process.env.KAGE_ROOM;
+  const prevSession = process.env.KAGE_ROOM_SESSION;
+  process.env.KAGE_ROOM = "1";
+  if (sessionKey) process.env.KAGE_ROOM_SESSION = sessionKey;
+  else delete process.env.KAGE_ROOM_SESSION;
+  try {
+    return await callTool("kage_dispatch", {
+      project_dir: project,
+      intent,
+      type: "chore",
+      agent: "stub",
+      ...(goalId ? { goal_id: goalId } : {}),
+    });
+  } finally {
+    if (prevRoom === undefined) delete process.env.KAGE_ROOM;
+    else process.env.KAGE_ROOM = prevRoom;
+    if (prevSession === undefined) delete process.env.KAGE_ROOM_SESSION;
+    else process.env.KAGE_ROOM_SESSION = prevSession;
+  }
+}
+
+test("kage_dispatch with no goal_id attaches implicitly to the room thread's active goal", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "implicit wave" });
+  setActiveGoal(project, DEFAULT_SESSION, goal.id);
+
+  const out = await dispatchInRoom(project, "implicit part one");
+  const outText = out.content[0].text as string;
+  assert.doesNotMatch(outText, /Could not attach/);
+  const run = listRuns(project).find((r) => r.intent === "implicit part one");
+  assert.ok(run, "the run should exist");
+  assert.equal(goalForRun(project, run!.id)?.id, goal.id, "attached with no goal_id passed");
+});
+
+test("kage_dispatch: an explicit goal_id overrides the room thread's active goal", async () => {
+  const project = tempProject();
+  const activeGoal = createGoal(project, { intent: "active wave" });
+  const otherGoal = createGoal(project, { intent: "a different wave" });
+  setActiveGoal(project, DEFAULT_SESSION, activeGoal.id);
+
+  const out = await dispatchInRoom(project, "override part one", undefined, otherGoal.id);
+  const outText = out.content[0].text as string;
+  assert.doesNotMatch(outText, /Could not attach/);
+  const run = listRuns(project).find((r) => r.intent === "override part one");
+  assert.equal(goalForRun(project, run!.id)?.id, otherGoal.id, "explicit goal_id wins over the active one");
+});
+
+test("kage_dispatch: no active goal and no goal_id leaves the run unattached", async () => {
+  const project = tempProject();
+  const out = await dispatchInRoom(project, "ad hoc, no goal");
+  const outText = out.content[0].text as string;
+  assert.doesNotMatch(outText, /Could not attach/);
+  const run = listRuns(project).find((r) => r.intent === "ad hoc, no goal");
+  assert.equal(goalForRun(project, run!.id), null);
+});
+
+test("abandoning a goal clears it as any thread's active goal", () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "will be abandoned" });
+  setActiveGoal(project, DEFAULT_SESSION, goal.id);
+  setActiveGoal(project, "thread-2", goal.id);
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), goal.id);
+
+  abandonGoal(project, goal.id, "changed course");
+
+  assert.equal(readActiveGoal(project, DEFAULT_SESSION), null, "no longer anyone's active goal");
+  assert.equal(readActiveGoal(project, "thread-2"), null);
 });

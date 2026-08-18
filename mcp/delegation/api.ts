@@ -68,6 +68,7 @@ import {
   listRoomSessions,
   normalizeSessionKey,
   renameRoomSession,
+  setActiveGoal,
 } from "./room-sessions.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -960,6 +961,9 @@ export async function handleDelegationRoute(
       ? (body.plan as unknown[]).map((wave) => (Array.isArray(wave) ? (wave as Array<Partial<GoalRunSpec>>) : []))
       : undefined;
     const budgets = body.budgets && typeof body.budgets === "object" ? (body.budgets as Record<string, unknown>) : undefined;
+    // A goal created from a room thread is owned by that thread: its manager dispatches
+    // into it without ever having to pass goal_id, so the wave cannot silently detach.
+    const session = normalizeSessionKey(body.session);
     try {
       const goal = createGoal(projectDir, {
         intent,
@@ -967,6 +971,7 @@ export async function handleDelegationRoute(
         autonomy,
         budgets: budgets as never,
       });
+      setActiveGoal(projectDir, session, goal.id);
       json(res, 201, { ok: true, goal });
     } catch (error) {
       json(res, 400, { ok: false, error: (error as Error).message });
@@ -974,7 +979,7 @@ export async function handleDelegationRoute(
     return true;
   }
 
-  const goalMatch = path.match(/^\/goals\/([A-Za-z0-9._-]+)(?:\/(abandon))?$/);
+  const goalMatch = path.match(/^\/goals\/([A-Za-z0-9._-]+)(?:\/(abandon|activate))?$/);
   if (goalMatch) {
     const [, goalId, goalAction] = goalMatch;
     if (!goalAction && method === "GET") {
@@ -995,6 +1000,23 @@ export async function handleDelegationRoute(
       const note = typeof body.reason === "string" ? body.reason.trim() || undefined : undefined;
       try {
         const goal = abandonGoal(projectDir, goalId, note);
+        json(res, 200, { ok: true, goal });
+      } catch (error) {
+        const message = (error as Error).message;
+        json(res, message.startsWith("No goal found") ? 404 : 400, { ok: false, error: message });
+      }
+      return true;
+    }
+    if (goalAction === "activate" && method === "POST") {
+      let body: Record<string, unknown> = {};
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        // A default-session activation needs no body.
+      }
+      try {
+        const goal = readGoal(projectDir, goalId);
+        setActiveGoal(projectDir, normalizeSessionKey(body.session), goal.id);
         json(res, 200, { ok: true, goal });
       } catch (error) {
         const message = (error as Error).message;

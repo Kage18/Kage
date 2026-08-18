@@ -95,6 +95,7 @@ import { buildReport, eventsSincePage, markReportRead, renderReport, roomState }
 import { diffBudget } from "./delegation/config.js";
 import { readJudgment, renderJudgment } from "./delegation/manager.js";
 import { attachRunToGoal } from "./delegation/goal.js";
+import { DEFAULT_SESSION, readActiveGoal } from "./delegation/room-sessions.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
 
@@ -1211,7 +1212,11 @@ const DELEGATION_TOOLS = [
         clarification_question: { type: "string", description: "The question you asked before spending tokens." },
         clarification_answer: { type: "string", description: "What the user answered." },
         judgment_note: { type: "string", description: "Anything else about how you shaped this brief." },
-        goal_id: { type: "string", description: "Attach this run to an orchestrated goal so its state changes wake you." },
+        goal_id: {
+          type: "string",
+          description:
+            "Attach this run to a DIFFERENT goal than the room thread's active one. Runs dispatched from a room thread with an active goal attach to it automatically — you only need this to override that.",
+        },
       },
       required: ["project_dir", "intent"],
     },
@@ -1364,7 +1369,13 @@ async function runDelegationTool(
           }
         : undefined;
     const result = await dispatchRun(projectDir, { intent: String(args?.intent ?? ""), type, judgment: judged }, adapterByName(agent));
-    const goalId = typeof args?.goal_id === "string" ? args.goal_id.trim() : "";
+    let goalId = typeof args?.goal_id === "string" ? args.goal_id.trim() : "";
+    // No explicit goal_id: inside a room thread (KAGE_ROOM=1), attach to whatever goal
+    // that thread has active instead of trusting the manager to remember goal_id every
+    // time — that "remember to pass it" instruction is exactly what failed live.
+    if (!goalId && process.env.KAGE_ROOM === "1") {
+      goalId = readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
+    }
     let goalWarning = "";
     if (goalId) {
       try {

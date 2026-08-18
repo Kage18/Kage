@@ -118,7 +118,7 @@ function userFrame(message: string): string {
 export async function superviseRoom(projectDir: string, session?: string): Promise<void> {
   const dir = roomDir(projectDir, session);
   mkdirSync(dir, { recursive: true });
-  const mcpConfigPath = writeRoomMcpConfig(projectDir);
+  const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
   const resumeId = readRoomSessionId(projectDir, session);
 
   const args = [

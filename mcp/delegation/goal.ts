@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RUN_TYPES, ensureDelegationIgnores, type RunType } from "./contract.js";
+import { clearActiveGoalEverywhere } from "./room-sessions.js";
 
 export const GOAL_SCHEMA_VERSION = 1;
 
@@ -184,6 +185,8 @@ export function transitionGoal(projectDir: string, goalId: string, to: GoalState
   goal.updated_at = at;
   goal.state_history.push({ state: to, at, ...(note ? { note } : {}) });
   atomicWriteJson(goalPath(projectDir, goalId), goal);
+  // Terminal: no thread may keep dispatching into a goal that is done or abandoned.
+  if (to === "done" || to === "abandoned") clearActiveGoalEverywhere(projectDir, goalId);
   return goal;
 }
 
