@@ -154,7 +154,7 @@ import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfV
 // used to be missing from this list entirely — the surface the product is sold on was
 // undiscoverable from its own CLI, while `kage viewer` (the legacy dashboard) was
 // advertised in its place.
-const CORE_USAGE = `Kage — repo memory, and an orchestrator that uses it
+const CORE_USAGE = `Kage manages your memory and agents
 
 Start here:
   kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
