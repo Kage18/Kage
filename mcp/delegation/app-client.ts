@@ -12,7 +12,7 @@
 export const APP_CLIENT = `"use strict";
 var TOKEN = "__KAGE_TOKEN__";
 var state = {
-  runs: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
+  runs: [], goals: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
   room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "",
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
@@ -222,6 +222,7 @@ function renderWorkList() {
   var keepScroll = scroller.scrollTop;
   listWrap.textContent = "";
   renderHandover();
+  renderGoalCards();
   // Sections ordered by what it COSTS to ignore, not by when it happened: a blocked
   // run holds a worktree hostage, a lost one may need re-dispatching, a ready one is
   // only waiting for a click — and everything else is either working or history.
@@ -234,17 +235,23 @@ function renderWorkList() {
   ];
   sections.forEach(function (spec) {
     var members = state.runs.filter(spec[1]);
-    if (!members.length) return;
+    // Finished goals collapse into this same section as one quiet row each — they are
+    // not runs, so they never enter the ownership/display_state filters above.
+    var doneGoals = spec[0] === "Done"
+      ? (state.goals || []).filter(function (g) { return g.state === "done" || g.state === "abandoned"; })
+      : [];
+    if (!members.length && !doneGoals.length) return;
     members.sort(function (a, b) { return String(b.updated_at).localeCompare(String(a.updated_at)); });
     var capped = spec[0] === "Done" && !state.showAllDone && members.length > 8;
     var shown = capped ? members.slice(0, 8) : members;
     var head = h("div", "lgroup", spec[0]);
-    head.appendChild(h("em", "", String(members.length)));
+    head.appendChild(h("em", "", String(members.length + doneGoals.length)));
     listWrap.appendChild(head);
     shown.forEach(function (run) {
       listWrap.appendChild(workRow(run));
       state.workOrder.push(run.id);
     });
+    doneGoals.forEach(function (goal) { listWrap.appendChild(goalDoneRow(goal)); });
     if (capped) {
       var more = h("button", "showmore", "show all " + members.length + " done");
       more.onclick = function () { state.showAllDone = true; renderWork(); };
@@ -344,6 +351,100 @@ function renderHandover() {
   // is noise pretending to be a summary.
   if (merged) line("✓", "jade", merged + " merged, verified", "receipts below");
   if (!merged && !lost) line("·", "dim", held + " arrived while you were away", "below");
+}
+
+// --- goal cards: the manager's own bookkeeping for a multi-run intent, rendered
+// above the triaged list. A goal never executes anything itself — every power
+// (merge, steer, reject) still attaches to the runs it owns, same as any other row.
+function goalWaveTone(runId) {
+  var run = state.runs.filter(function (r) { return r.id === runId; })[0];
+  return run ? glyphFor(run) : ["·", "dim"];
+}
+function goalSpendLabel(goal) {
+  var total = 0;
+  var any = false;
+  (goal.plan.waves || []).forEach(function (wave) {
+    wave.run_ids.forEach(function (runId) {
+      var run = state.runs.filter(function (r) { return r.id === runId; })[0];
+      if (run && run.spend && run.spend.usd_est) { total += run.spend.usd_est; any = true; }
+    });
+  });
+  if (!any) return null;
+  return total >= 0.995 ? "$" + total.toFixed(2) : "$" + total.toFixed(total < 0.01 ? 3 : 2).replace(/^\$0/, "$0");
+}
+function abandonGoalClick(goal) {
+  if (!window.confirm("Abandon “" + goal.intent + "”? Its runs are not touched — only the goal stops tracking them.")) return;
+  api("/goals/" + goal.id + "/abandon", { method: "POST" }).then(function (out) {
+    if (!out.ok) { showError(out.error || "could not abandon the goal"); return; }
+    flash("goal abandoned");
+    refresh();
+  });
+}
+function goalCard(goal) {
+  var card = h("div", "card goal-card");
+  card.id = "goal-" + goal.id;
+  var head = h("div", "ghead");
+  head.appendChild(h("div", "gt", goal.intent));
+  head.appendChild(h("span", "chip state-" + goal.state, goal.state));
+  card.appendChild(head);
+
+  var waves = goal.plan.waves || [];
+  var started = waves.filter(function (w) { return w.run_ids.length > 0; }).length;
+  card.appendChild(h("div", "gwaveline",
+    waves.length ? "wave " + Math.min(started || 1, waves.length) + " of " + waves.length : "no plan yet"));
+  waves.forEach(function (wave) {
+    var row = h("div", "gwave");
+    if (!wave.run_ids.length) row.appendChild(h("span", "gwchip dim", "·"));
+    wave.run_ids.forEach(function (runId) {
+      var tone = goalWaveTone(runId);
+      var found = state.runs.filter(function (r) { return r.id === runId; })[0];
+      var chip = h("span", "gwchip " + tone[1], tone[0]);
+      chip.title = found ? found.intent : runId;
+      if (found) chip.onclick = function () { selectRun(runId); };
+      row.appendChild(chip);
+    });
+    card.appendChild(row);
+  });
+
+  var foot = h("div", "gfoot");
+  var spend = goalSpendLabel(goal);
+  if (spend) foot.appendChild(h("span", "atom", spend));
+  var abandon = h("button", "btn danger sm", "Abandon");
+  abandon.onclick = function () { abandonGoalClick(goal); };
+  foot.appendChild(abandon);
+  card.appendChild(foot);
+  return card;
+}
+function goalDoneRow(goal) {
+  var row = h("div", "wrow goal-done");
+  row.appendChild(h("span", "glyph dim", goal.state === "abandoned" ? "✕" : "✓"));
+  var mid = h("div");
+  mid.appendChild(h("div", "qt", goal.intent));
+  var atoms = h("div", "qatoms");
+  atoms.appendChild(h("span", "atom", goal.state));
+  var waveCount = (goal.plan.waves || []).length;
+  atoms.appendChild(h("span", "atom", waveCount + " wave" + (waveCount === 1 ? "" : "s")));
+  mid.appendChild(atoms);
+  row.appendChild(mid);
+  return row;
+}
+function renderGoalCards() {
+  var wrap = document.getElementById("goal-cards");
+  if (!wrap) return;
+  wrap.textContent = "";
+  var active = (state.goals || []).filter(function (g) { return g.state === "planning" || g.state === "executing"; });
+  active.forEach(function (goal) { wrap.appendChild(goalCard(goal)); });
+}
+// The run detail's goal chip lands here: switch out of Board (goal cards only live
+// in the List layout, same footprint as the handover banner) and flash the card so
+// the click actually reads as "landed", not just a silent scroll.
+function jumpToGoalCard(goalId) {
+  if (state.workLayout === "board") setWorkLayout("list");
+  var el = document.getElementById("goal-" + goalId);
+  if (!el) return;
+  el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  el.classList.add("flash-hi");
+  setTimeout(function () { el.classList.remove("flash-hi"); }, 900);
 }
 
 // --- room: the conversation. askManager's tool names arrive as "mcp__kage__kage_dispatch";
@@ -910,6 +1011,23 @@ function dispatchFromComposer() {
     });
 }
 
+// ⌥⏎: a third composer path, for intent too large for one run. Creates the goal
+// record first, then sends the SAME text to the manager (the room's own path,
+// sendRoomMessage) prefixed with the new goal's id — the manager's constitution
+// reads that prefix and proposes a wave decomposition back in chat.
+function createGoalFromComposer() {
+  var input = document.getElementById("room-input");
+  var intent = input.value.trim();
+  if (!intent || state.room.busy) return;
+  api("/goals", { method: "POST", body: { intent: intent } }).then(function (out) {
+    if (!out.ok) { showError(out.error || "could not create the goal"); return; }
+    flash("goal created — the manager is decomposing it");
+    input.value = "[goal " + out.goal.id + "] " + intent;
+    sendRoomMessage();
+    refresh();
+  });
+}
+
 // --- pre-flight forecast: risk before the work exists.
 // While you type an intent, the composer asks the kernel what the BRIEF would
 // carry (memory + predicted touch set) and what imports that predicted area —
@@ -1435,6 +1553,13 @@ function renderDetail() {
     if (run.blast.sample && run.blast.sample.length) chip.title = "imported by " + run.blast.sample.join(", ");
     chips.appendChild(chip);
   }
+  var ownerGoal = run.goal_id ? (state.goals || []).filter(function (g) { return g.id === run.goal_id; })[0] : null;
+  if (ownerGoal) {
+    var goalChip = h("span", "chip goal-chip", "goal: " + ownerGoal.intent);
+    goalChip.title = "jump to the goal card";
+    goalChip.onclick = function () { jumpToGoalCard(ownerGoal.id); };
+    chips.appendChild(goalChip);
+  }
   head.appendChild(chips);
   var tabs = h("div", "tabs");
   [["follow", "Follow"], ["queue", "Queue"], ["receipt", "Receipt"], ["diff", "Diff"], ["brief", "Brief"], ["raw", "Raw"]].forEach(function (t) {
@@ -1774,8 +1899,11 @@ function render() {
   renderProjects();
 }
 function refresh() {
-  return api("/runs").then(function (out) {
+  return Promise.all([api("/runs"), api("/goals")]).then(function (results) {
+    var out = results[0];
+    var goalsOut = results[1];
     state.runs = out.runs || [];
+    state.goals = (goalsOut && goalsOut.goals) || [];
     maybeNotify();
     // Open on something. The Runs view used to render a full-width empty pane until
     // the user guessed to click the list, which on a 1280px window is most of the
@@ -2311,6 +2439,8 @@ roomInput.addEventListener("keydown", function (ev) {
   // 0.1s. ⏎ keeps the manager for ambiguity ("what should we do about the flaky
   // tests?"); ⌘⏎ dispatches clear work immediately — no middleman on the front door.
   if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); dispatchFromComposer(); return; }
+  // ⌥⏎: too large for one run — orchestrate it as a goal instead.
+  if (ev.key === "Enter" && ev.altKey) { ev.preventDefault(); createGoalFromComposer(); return; }
   if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); sendRoomMessage(); }
 });
 document.getElementById("room-send").onclick = sendRoomMessage;
@@ -2423,6 +2553,11 @@ function paletteCommands(query) {
     { grp: "go", name: "Work", hint: "2", run: function () { setView("work"); } },
     { grp: "go", name: "Memory", hint: "3", run: function () { setView("memory"); } },
     { grp: "do", name: "New run…", hint: "n", run: function () { showOverlay(true); } },
+    { grp: "do", name: "Orchestrate as a goal…", hint: "⌥⏎", run: function () {
+      setView("room");
+      flash("type the goal, then ⌥⏎ to send it");
+      setTimeout(function () { document.getElementById("room-input").focus(); }, 0);
+    } },
     { grp: "do", name: "Work: list layout", run: function () { setView("work"); setWorkLayout("list"); } },
     { grp: "do", name: "Work: board layout", run: function () { setView("work"); setWorkLayout("board"); } },
     { grp: "do", name: "Room: chat view", run: function () { setView("room"); setRoomMode("chat"); } },

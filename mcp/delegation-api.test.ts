@@ -1379,3 +1379,37 @@ test("POST /runs with goal_id attaches the new run to the goal", async () => {
     server.close();
   }
 });
+
+test("a goal-owned run carries goal_id through both /runs and /runs/:id, a goal-less run carries null", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const goal = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({ intent: "the goal surface" }),
+    })).json() as { goal: { id: string } };
+
+    const owned = await (await apiFetch(port, "/runs", {
+      method: "POST",
+      body: JSON.stringify({ intent: "owned run", agent: "stub", type: "chore", hold: true, goal_id: goal.goal.id }),
+    })).json() as { run: { id: string } };
+    const plain = await (await apiFetch(port, "/runs", {
+      method: "POST",
+      body: JSON.stringify({ intent: "plain run", agent: "stub", type: "chore", hold: true }),
+    })).json() as { run: { id: string } };
+
+    const list = await (await apiFetch(port, "/runs")).json() as { runs: Array<{ id: string; goal_id: string | null }> };
+    const ownedInList = list.runs.find((r) => r.id === owned.run.id);
+    const plainInList = list.runs.find((r) => r.id === plain.run.id);
+    assert.equal(ownedInList?.goal_id, goal.goal.id);
+    assert.equal(plainInList?.goal_id, null);
+
+    const ownedDetail = await (await apiFetch(port, `/runs/${owned.run.id}`)).json() as { run: { goal_id: string | null } };
+    assert.equal(ownedDetail.run.goal_id, goal.goal.id);
+    const plainDetail = await (await apiFetch(port, `/runs/${plain.run.id}`)).json() as { run: { goal_id: string | null } };
+    assert.equal(plainDetail.run.goal_id, null);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
