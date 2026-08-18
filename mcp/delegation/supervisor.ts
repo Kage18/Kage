@@ -340,6 +340,13 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
                 const note = fence?.question ?? fence?.need ?? state.waiting?.detail ?? "blocked without a stated question";
                 if (readRun(projectDir, runId).state === "running") transitionRun(projectDir, runId, "blocked", "kernel", note);
                 log({ kind: "turn_complete", label: `agent is blocked, waiting for a tell: ${note}` });
+              } else if (readRun(projectDir, runId).state === "blocked") {
+                // Order-independent: this line's own in-memory signals (fence, state.waiting)
+                // say "finished", but the PERSISTED state is the authority, and it already
+                // says blocked — a prior line (or an unrelated stray result, e.g. a control
+                // write a scripted stub misreads as a turn) must never be allowed to close
+                // stdin out from under a session a tell is still supposed to be able to reach.
+                log({ kind: "turn_complete", label: "agent turn finished while the run is already blocked — holding stdin open" });
               } else {
                 log({ kind: "turn_complete", label: "agent finished its turn" });
                 try {
