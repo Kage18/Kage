@@ -2193,6 +2193,44 @@ export interface StaleMemoryFinding {
   suggested_action: "verify" | "update" | "supersede" | "mark_stale";
 }
 
+// One packet's triage entry: what moved under it, what already survived, and the
+// exact one-liner to act on it. `kage stale` never reverifies more than one packet
+// per invocation — see staleTriage below for why that boundary matters.
+export interface StaleTriageWhatChanged {
+  path: string;
+  summary: string;
+}
+
+export interface StaleTriageEntry {
+  id: string;
+  type: MemoryType;
+  title: string;
+  status: MemoryStatus;
+  reasons: string[];
+  total_paths: number;
+  moved_paths: string[];
+  missing_paths: string[];
+  present_paths: string[];
+  what_changed: StaleTriageWhatChanged[];
+  rescue_score: number;
+  suggested_action: "reverify" | "supersede";
+  command: string;
+  quality_score: number | null;
+  uses_30d: number;
+  last_verified_at: string | null;
+}
+
+export interface StaleTriageResult {
+  ok: boolean;
+  project_dir: string;
+  generated_at: string;
+  total_stale: number;
+  shown: number;
+  withheld: number;
+  entries: StaleTriageEntry[];
+  note: string;
+}
+
 export interface RefreshResult {
   ok: boolean;
   project_dir: string;
@@ -20428,6 +20466,168 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     errors: [],
     warnings,
   };
+}
+
+// Best-effort "what changed under this path" line for triage: prefer commits since
+// the packet was last verified (the window a human actually needs to review); fall
+// back to the most recent commits touching the path when that window is empty
+// (clock skew, or the packet has never been reverified). Outside a git repo, or for
+// a path git has no history for, readGit returns null and we say so plainly instead
+// of pretending there is nothing to review.
+function whatChangedUnderPath(projectDir: string, path: string, sinceIso: string | null): string {
+  const sinceArgs = sinceIso ? [`--since=${sinceIso}`] : [];
+  const scoped = readGit(projectDir, ["log", "--oneline", "-n", "5", ...sinceArgs, "--", path]);
+  if (scoped) return scoped.split("\n").filter(Boolean).join(" | ");
+  const fallback = readGit(projectDir, ["log", "--oneline", "-n", "3", "--", path]);
+  if (fallback) return fallback.split("\n").filter(Boolean).join(" | ");
+  return "no git history found for this path (not a git repo, or nothing committed against it)";
+}
+
+// Rescue-worthiness heuristic for `kage stale`. Deliberately cheap and additive —
+// no learned weights, just signals already stored on the packet:
+//  - type (0-3): a decision/convention/runbook/reference's claim is about intent or
+//    process, which usually outlives the exact file it cites moving; a bug_fix or
+//    code_explanation's claim is tied to the code as it was, which usually does not
+//    survive a rewrite. workflow/gotcha sit in between.
+//  - quality.score (0-3): higher-quality packets are worth a reviewer's time; an
+//    ungraded packet gets a neutral 1 rather than 0, so it isn't buried under every
+//    scored packet purely for lacking a score.
+//  - uses_30d (0-3, log-scaled): packets agents actually recalled recently pay back
+//    the triage minute; a packet nobody has used in 30 days barely moves this.
+//  - survival ratio (0-2): the fraction of cited paths that DIDN'T move. More intact
+//    grounding means a cheaper, safer reverify — that is worth ranking up too.
+const STALE_RESCUE_TYPE_WEIGHT: Record<string, number> = {
+  decision: 3,
+  convention: 3,
+  runbook: 2,
+  reference: 2,
+  workflow: 1,
+  gotcha: 1,
+  bug_fix: 0,
+  code_explanation: 0,
+};
+
+function staleRescueScore(
+  packet: MemoryPacket,
+  presentCount: number,
+  totalCount: number,
+  accessEntry: MemoryAccessEntry | undefined,
+): number {
+  const typeComponent = STALE_RESCUE_TYPE_WEIGHT[packet.type] ?? 1;
+  const rawQualityScore = qualityScore(packet);
+  const qualityComponent = rawQualityScore === null ? 1 : (Math.max(0, Math.min(100, rawQualityScore)) / 100) * 3;
+  const usesComponent = Math.min(3, Math.log1p(accessEntry?.uses_30d ?? 0) * 1.5);
+  const survivalComponent = totalCount > 0 ? (presentCount / totalCount) * 2 : 0;
+  return Number((typeComponent + qualityComponent + usesComponent + survivalComponent).toFixed(2));
+}
+
+// The triage surface for the ~20% of memory that a large refactor withholds from
+// recall (see the module comment above staleCatch for why withholding is correct
+// behaviour that must stay). This is READ-ONLY: it never mutates a packet or clears
+// a stale flag. It exists so a human can decide, per packet, "does this claim still
+// hold?" — and then paste the ONE command (reverify or supersede) that acts on that
+// one decision. There is deliberately no flag here that touches more than one packet:
+// reverifyMemory only re-checks that cited paths exist and refreshes fingerprints, it
+// does NOT re-check whether the packet's claim is still true, so looping it over every
+// stale packet would clear 93 honest "not sure this still holds" flags while verifying
+// nothing — converting the one property this product sells into a lie. That command
+// must not exist; this surface is the alternative.
+export function staleTriage(projectDir: string, options: { limit?: number } = {}): StaleTriageResult {
+  ensureMemoryDirs(projectDir);
+  const limit = Math.max(1, Math.floor(options.limit ?? 20));
+  const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
+  const approved = loadApprovedPackets(projectDir);
+  const access = readMemoryAccessEntries(projectDir, approved);
+
+  const entries: StaleTriageEntry[] = [];
+  for (const packet of approved) {
+    const reasons = staleMemoryReasons(projectDir, packet, fingerprintCache);
+    if (!reasons.length) continue;
+
+    const citedPaths = unique([
+      ...packet.paths,
+      ...packetStoredPathFingerprints(packet).map((fingerprint) => fingerprint.path),
+    ]).filter(fingerprintableMemoryPath);
+    const missingPaths = citedPaths.filter((path) => !existsSync(join(projectDir, path)));
+    const changedContentPaths = changedPathsFromStaleReasons(reasons).filter((path) => !missingPaths.includes(path));
+    const movedPaths = unique([...missingPaths, ...changedContentPaths]);
+    const presentPaths = citedPaths.filter((path) => !movedPaths.includes(path));
+    const allCitedGone = citedPaths.length > 0 && missingPaths.length === citedPaths.length;
+
+    const freshness = (packet.freshness ?? {}) as Record<string, unknown>;
+    const lastVerifiedAt = typeof freshness.last_verified_at === "string"
+      ? freshness.last_verified_at
+      : (typeof packet.updated_at === "string" ? packet.updated_at : null);
+
+    const action: StaleTriageEntry["suggested_action"] = allCitedGone ? "supersede" : "reverify";
+    const command = action === "reverify"
+      ? `kage reverify --project ${projectDir} --packet ${packet.id}`
+      : `kage supersede --project ${projectDir} --packet ${packet.id} --replacement <new-packet-id>`;
+
+    entries.push({
+      id: packet.id,
+      type: packet.type,
+      title: packet.title,
+      status: packet.status,
+      reasons,
+      total_paths: citedPaths.length,
+      moved_paths: movedPaths,
+      missing_paths: missingPaths,
+      present_paths: presentPaths,
+      what_changed: movedPaths.slice(0, 6).map((path) => ({
+        path,
+        summary: whatChangedUnderPath(projectDir, path, lastVerifiedAt),
+      })),
+      rescue_score: staleRescueScore(packet, presentPaths.length, citedPaths.length, access.get(packet.id)),
+      suggested_action: action,
+      command,
+      quality_score: qualityScore(packet),
+      uses_30d: access.get(packet.id)?.uses_30d ?? 0,
+      last_verified_at: lastVerifiedAt,
+    });
+  }
+
+  entries.sort((a, b) => b.rescue_score - a.rescue_score || a.title.localeCompare(b.title));
+  const shown = entries.slice(0, limit);
+  return {
+    ok: true,
+    project_dir: projectDir,
+    generated_at: nowIso(),
+    total_stale: entries.length,
+    shown: shown.length,
+    withheld: Math.max(0, entries.length - shown.length),
+    entries: shown,
+    note: "kage reverify only refreshes GROUNDING (cited paths + fingerprints) — it does not re-check whether the claim is still true. \"what changed\" below is evidence for you to judge that; the tool isn't judging it for you.",
+  };
+}
+
+// Shared human rendering for `kage stale` (CLI and tests share this so a printed
+// empty-state or entry line can't drift from what staleTriage actually returned).
+export function formatStaleTriage(result: StaleTriageResult, limitUsed: number): string[] {
+  if (!result.total_stale) {
+    return [
+      "No stale memory to triage — every approved packet's cited grounding still checks out.",
+      "This is computed live, so re-run it after a large refactor to catch what moved.",
+    ];
+  }
+  const lines: string[] = [
+    `Kage stale triage: ${result.total_stale} packet(s) need a human call, ranked by rescue value (highest first)`,
+    result.note,
+  ];
+  for (const entry of result.entries) {
+    lines.push("");
+    lines.push(`- [${entry.type}] ${entry.title}`);
+    lines.push(`  ${entry.id}`);
+    lines.push(`  rescue score ${entry.rescue_score} · quality ${entry.quality_score ?? "n/a"} · uses/30d ${entry.uses_30d} · paths survived ${entry.present_paths.length}/${entry.total_paths}`);
+    lines.push(`  moved: ${entry.moved_paths.join(", ") || "(none listed)"}`);
+    for (const change of entry.what_changed) lines.push(`    ${change.path}: ${change.summary}`);
+    lines.push(`  suggested: ${entry.suggested_action} -> ${entry.command}`);
+  }
+  if (result.withheld) {
+    lines.push("");
+    lines.push(`...${result.withheld} more withheld by --limit ${limitUsed}. Raise --limit to see them.`);
+  }
+  return lines;
 }
 
 export function kageMemoryLineage(projectDir: string): MemoryLineageReport {
