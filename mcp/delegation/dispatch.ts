@@ -33,6 +33,7 @@ import { attachRunToGoal } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
+import { runStaticChecks } from "./static-checks.js";
 import { verifyRun } from "./verify.js";
 import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
@@ -317,7 +318,14 @@ export async function executeRun(
     (event) => line?.update(event),
   );
 
-  const claim: ClaimRecord = buildClaim({ runId, statement, checks: verification.checks, fence, diff: verification.diff });
+  // Kernel-executed, never agent-declared: a narrowly declared (or missing) check must
+  // never be the only thing standing between a broken build and 'ready'. These run on
+  // every claim regardless of what the agent's own checks covered, and merge into the
+  // same list the receipt's VERIFIED n/n line counts — attributed to Kage, not the agent.
+  const staticResult = runStaticChecks(projectDir, runId, workspace.dir, verification.diff.paths);
+  const checks = [...verification.checks, ...staticResult.checks];
+  const passed = checks.every((check) => check.result === "pass");
+  const claim: ClaimRecord = buildClaim({ runId, statement, checks, fence, diff: verification.diff });
   writeClaim(projectDir, runId, claim);
 
   // Learnings ride the branch as pending packets so they are reviewed with the code.
@@ -333,20 +341,20 @@ export async function executeRun(
   }
 
   const strict = strictVerify(projectDir);
-  const ready = verification.passed || !strict;
+  const ready = passed || !strict;
   task = transitionRun(
     projectDir,
     runId,
     ready ? "ready" : "failed",
     "kernel",
-    ready ? undefined : verification.checks.filter((check) => check.result !== "pass").map((check) => check.id).join(", "),
+    ready ? undefined : checks.filter((check) => check.result !== "pass").map((check) => check.id).join(", "),
   );
   appendRunLedger(projectDir, {
     kind: "verified",
     run_id: runId,
     type: task.type,
-    passed: verification.passed,
-    checks: verification.checks.map((check) => ({ id: check.id, result: check.result })),
+    passed,
+    checks: checks.map((check) => ({ id: check.id, result: check.result })),
   });
   line?.stop(ready ? "✓ claim ready for review" : "✗ verification failed");
   return { task, plan, claim, workspace: workspace.dir, workspace_kind: workspace.kind };

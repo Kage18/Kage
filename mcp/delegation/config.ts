@@ -15,6 +15,13 @@ export interface DelegationConfig {
   strict_verify?: boolean;
   /** Max concurrent running runs. */
   max_concurrent?: number;
+  /**
+   * Kernel-executed pre-claim static checks (tsc --noEmit, composed-page parse) that run
+   * on every run before the claim is judged, regardless of what the agent declared.
+   * Default true. A no-op for a repo with no tsconfig either way, but this flag exists
+   * for a non-TypeScript repo that wants to skip the resolution attempt entirely.
+   */
+  static_checks?: boolean;
 }
 
 export const DEFAULT_DIFF_BUDGET = 400;
@@ -85,4 +92,8 @@ export function strictVerify(projectDir: string): boolean {
 
 export function maxConcurrent(projectDir: string): number {
   return readDelegationConfig(projectDir).max_concurrent ?? DEFAULT_MAX_CONCURRENT;
+}
+
+export function staticChecksEnabled(projectDir: string): boolean {
+  return readDelegationConfig(projectDir).static_checks !== false;
 }

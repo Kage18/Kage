@@ -293,7 +293,7 @@ Usage:
   kage stop <run-id> [--project <dir>]
   kage retry <run-id> [--project <dir>]
   kage report [--all] [--project <dir>]
-  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--project <dir>]
+  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--no-strict] [--no-static-checks] [--project <dir>]
 
 Types:
   ${MEMORY_TYPES.join(", ")}`;
@@ -2768,6 +2768,7 @@ async function main(): Promise<void> {
     if (setup) patch.setup = setup;
     if (budget) patch.diff_budget = Number(budget);
     if (args.includes("--no-strict")) patch.strict_verify = false;
+    if (args.includes("--no-static-checks")) patch.static_checks = false;
     const merged = writeDelegationConfig(project, patch);
     console.log(JSON.stringify(merged, null, 2));
     return;
