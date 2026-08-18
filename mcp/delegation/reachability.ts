@@ -84,6 +84,12 @@ interface Scope {
   startLine: number; // 1-indexed
   endLine: number; // 1-indexed, inclusive
   exemptReason?: string;
+  // 0-indexed column, within the RAW startLine, where the declared name itself begins.
+  // Lets the reference scan skip only the declaration's own name token on its own header
+  // line (e.g. the `RunState` in `export type RunState = (typeof RUN_STATES)[number];`)
+  // instead of blanket-skipping the whole line, which used to hide a real reference
+  // (`RUN_STATES`) sitting right next to the declaration on the same line.
+  nameColumn: number;
 }
 
 interface ParsedFile {
@@ -94,32 +100,110 @@ interface ParsedFile {
   isImportLine: boolean[]; // 0-indexed
 }
 
+// The `d` flag (match indices) lets parseFile recover exactly where the captured name
+// starts within the matched (trimmed) line, so it can be mapped back to a column in the
+// raw line — see Scope.nameColumn.
 const DECL_PATTERNS: Array<{ re: RegExp; kind: ScopeKind; exported: boolean }> = [
-  { re: /^export\s+default\s+async\s+function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: true },
-  { re: /^export\s+default\s+function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: true },
-  { re: /^export\s+async\s+function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: true },
-  { re: /^export\s+function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: true },
-  { re: /^async\s+function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: false },
-  { re: /^function\s+([A-Za-z_$][\w$]*)/, kind: "function", exported: false },
-  { re: /^export\s+const\s+([A-Za-z_$][\w$]*)/, kind: "const", exported: true },
-  { re: /^const\s+([A-Za-z_$][\w$]*)/, kind: "const", exported: false },
-  { re: /^export\s+class\s+([A-Za-z_$][\w$]*)/, kind: "class", exported: true },
-  { re: /^class\s+([A-Za-z_$][\w$]*)/, kind: "class", exported: false },
-  { re: /^export\s+interface\s+([A-Za-z_$][\w$]*)/, kind: "interface", exported: true },
-  { re: /^interface\s+([A-Za-z_$][\w$]*)/, kind: "interface", exported: false },
-  { re: /^export\s+type\s+([A-Za-z_$][\w$]*)/, kind: "type", exported: true },
-  { re: /^type\s+([A-Za-z_$][\w$]*)/, kind: "type", exported: false },
+  { re: /^export\s+default\s+async\s+function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: true },
+  { re: /^export\s+default\s+function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: true },
+  { re: /^export\s+async\s+function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: true },
+  { re: /^export\s+function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: true },
+  { re: /^async\s+function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: false },
+  { re: /^function\s+([A-Za-z_$][\w$]*)/d, kind: "function", exported: false },
+  { re: /^export\s+const\s+([A-Za-z_$][\w$]*)/d, kind: "const", exported: true },
+  { re: /^const\s+([A-Za-z_$][\w$]*)/d, kind: "const", exported: false },
+  { re: /^export\s+class\s+([A-Za-z_$][\w$]*)/d, kind: "class", exported: true },
+  { re: /^class\s+([A-Za-z_$][\w$]*)/d, kind: "class", exported: false },
+  { re: /^export\s+interface\s+([A-Za-z_$][\w$]*)/d, kind: "interface", exported: true },
+  { re: /^interface\s+([A-Za-z_$][\w$]*)/d, kind: "interface", exported: false },
+  { re: /^export\s+type\s+([A-Za-z_$][\w$]*)/d, kind: "type", exported: true },
+  { re: /^type\s+([A-Za-z_$][\w$]*)/d, kind: "type", exported: false },
 ];
 
+// Blanks a template literal's LITERAL TEXT while leaving each `${...}` substitution's code
+// untouched (including any template literal nested inside it, to arbitrary depth) — so a
+// symbol referenced only inside an interpolation (e.g. `` `protocol: ${CLAIM_PROTOCOL_VERSION}` ``)
+// still counts as a reference, and a nested template inside a substitution (e.g.
+// `` `${cond ? `a` : `b`}` ``) does not throw off brace-depth counting for the rest of the
+// file. A naive "pair up consecutive backticks" strip mis-pairs on that nested case: it
+// swallows the outer `${` along with real code, both erasing genuine references and
+// producing an unbalanced brace count that can prematurely end an enclosing function's
+// scope (everything after reads as ownerless, so a real reference inside it looks
+// unreachable). Falls back to returning the line untouched if backticks never balance
+// (a genuine multi-line, non-EOF template — rare, and not this scanner's job to solve;
+// the untouched braces get counted as-is, matching this module's existing conservative
+// fallback for anything it can't fully parse).
+function stripTemplateLiteralText(line: string): string {
+  const stack: Array<"tmpl" | "expr"> = [];
+  const exprBraceDepth: number[] = []; // parallel to "expr" frames: extra {} nesting within that substitution
+  let out = "";
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    const top = stack[stack.length - 1];
+    if (top === "tmpl") {
+      if (ch === "\\") {
+        out += "  ";
+        i += 2;
+        continue;
+      }
+      if (ch === "`") {
+        stack.pop();
+        out += ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "$" && line[i + 1] === "{") {
+        stack.push("expr");
+        exprBraceDepth.push(0);
+        out += "${";
+        i += 2;
+        continue;
+      }
+      out += " ";
+      i += 1;
+      continue;
+    }
+    if (ch === "`") {
+      stack.push("tmpl");
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (top === "expr") {
+      if (ch === "{") {
+        exprBraceDepth[exprBraceDepth.length - 1] += 1;
+        out += ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "}") {
+        const depth = exprBraceDepth[exprBraceDepth.length - 1];
+        if (depth === 0) {
+          stack.pop();
+          exprBraceDepth.pop();
+        } else {
+          exprBraceDepth[exprBraceDepth.length - 1] = depth - 1;
+        }
+        out += ch;
+        i += 1;
+        continue;
+      }
+    }
+    out += ch;
+    i += 1;
+  }
+  return stack.length === 0 ? out : line;
+}
+
 // Strips string/template/comment content so brace-counting does not trip over a brace
-// that only exists inside a literal (e.g. a JSON.stringify template or a URL comment).
+// that only exists inside a literal (e.g. a JSON.stringify template or a URL comment),
+// while keeping real code that lives inside a template substitution intact.
 function stripForBraceCounting(line: string): string {
   let stripped = line.replace(/(?<!:)\/\/.*$/, "");
   stripped = stripped.replace(/'(?:[^'\\]|\\.)*'/g, "''");
   stripped = stripped.replace(/"(?:[^"\\]|\\.)*"/g, '""');
-  const backtickCount = (stripped.match(/`/g) ?? []).length;
-  if (backtickCount % 2 === 0) stripped = stripped.replace(/`(?:[^`\\]|\\.)*`/g, "``");
-  return stripped;
+  return stripTemplateLiteralText(stripped);
 }
 
 function braceDelta(strippedLine: string): number {
@@ -170,8 +254,12 @@ function parseFile(file: string, source: string): ParsedFile {
     if (depth === 0) {
       let matched = false;
       for (const pattern of DECL_PATTERNS) {
-        const m = pattern.re.exec(trimmed);
+        const m = pattern.re.exec(trimmed) as (RegExpExecArray & { indices?: Array<[number, number] | undefined> }) | null;
         if (!m) continue;
+        // trimStart (not full trim) is what shifted the match's offsets away from `raw` —
+        // trailing whitespace trimEnd removed never affects a start offset.
+        const leadingWs = raw.length - raw.trimStart().length;
+        const nameColumn = leadingWs + (m.indices?.[1]?.[0] ?? raw.indexOf(m[1]));
         const scope: Scope = {
           name: m[1],
           kind: pattern.kind,
@@ -180,6 +268,7 @@ function parseFile(file: string, source: string): ParsedFile {
           startLine: i + 1,
           endLine: i + 1,
           exemptReason: exemptionReason(lines, i),
+          nameColumn,
         };
         scopes.push(scope);
         currentScope = scope;
@@ -239,10 +328,16 @@ function resolveRootFiles(projectDir: string, mcpRoot: string): Set<string> {
   return new Set([...roots].filter((root) => existsSync(join(projectDir, root))));
 }
 
-// Every symbol-name token on a line, used both to seed direct root reachability and to
-// build the reference graph between declared scopes.
-function tokensOf(line: string): string[] {
-  return line.match(/[A-Za-z_$][\w$]*/g) ?? [];
+const TOKEN_RE = /[A-Za-z_$][\w$]*/g;
+
+// Every symbol-name token on a line with its column, used both to seed direct root
+// reachability and to build the reference graph between declared scopes. Positions matter:
+// a declaration's header line must exclude only the declared name's OWN occurrence, not
+// every occurrence of every token on that line (see nameColumn on Scope).
+function tokensOf(line: string): Array<{ token: string; column: number }> {
+  const out: Array<{ token: string; column: number }> = [];
+  for (const m of line.matchAll(TOKEN_RE)) out.push({ token: m[0], column: m.index });
+  return out;
 }
 
 interface Reference {
@@ -284,10 +379,14 @@ function analyze(projectDir: string, mcpRoot: string): AnalysisResult {
 
   const rootFiles = resolveRootFiles(projectDir, mcpRoot);
   const refsByName = new Map<string, Reference[]>();
-  const declLineSet = new Set<string>(); // `${file}:${line}` of every declaration's own header line
-
+  // `${file}:${line}` -> the declared name and column that line's own header introduces.
+  // Used to skip only that one self-referencing token, never the rest of the line — a
+  // one-line declaration like `export type RunState = (typeof RUN_STATES)[number];` both
+  // declares RunState AND genuinely references RUN_STATES; blanket-skipping the whole line
+  // used to hide that second, real reference.
+  const declHeaderAnchor = new Map<string, { name: string; column: number }>();
   for (const list of declByName.values()) {
-    for (const scope of list) declLineSet.add(`${scope.file}:${scope.startLine}`);
+    for (const scope of list) declHeaderAnchor.set(`${scope.file}:${scope.startLine}`, { name: scope.name, column: scope.nameColumn });
   }
 
   const rootDirect = new Set<string>();
@@ -297,10 +396,11 @@ function analyze(projectDir: string, mcpRoot: string): AnalysisResult {
     const isTest = isTestFile(file);
     for (let i = 0; i < parsed.lines.length; i++) {
       if (parsed.isImportLine[i]) continue;
-      if (declLineSet.has(`${file}:${i + 1}`)) continue; // a decl's own header never counts as a reference to itself
       const stripped = stripForBraceCounting(parsed.lines[i]);
-      for (const token of tokensOf(stripped)) {
+      const anchor = declHeaderAnchor.get(`${file}:${i + 1}`);
+      for (const { token, column } of tokensOf(stripped)) {
         if (!declByName.has(token)) continue;
+        if (anchor && anchor.name === token && anchor.column === column) continue; // the decl's own name, not a reference
         const list = refsByName.get(token) ?? [];
         list.push({ file, line: i + 1, ownerName: parsed.lineOwner[i], isTest });
         refsByName.set(token, list);

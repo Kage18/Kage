@@ -8,11 +8,13 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import vm from "node:vm";
 import { findOrphans } from "./delegation/reachability.js";
-import { createRun, runDir, transitionRun } from "./delegation/contract.js";
+import { createRun, runDir, runTitle, transitionRun, type TaskRecord } from "./delegation/contract.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { superviseRun } from "./delegation/supervisor.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
+import { delegationAppHtml } from "./delegation/app-html.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-reachability-"));
@@ -187,4 +189,159 @@ test("SELF-TEST: findOrphans against this repo's own delegation/goal.ts", () => 
   // eslint-disable-next-line no-console
   console.log("SELF-TEST findOrphans(goal.ts) findings:", JSON.stringify(findings, null, 2));
   assert.ok(Array.isArray(findings), "findOrphans must return an array even against the real repo tree");
+});
+
+// PRECISION REGRESSION TEST — measured against this repo's real tree the day the check
+// landed: findOrphans(["mcp/delegation/goal.ts", "mcp/delegation/contract.ts"]) reported
+// 11 findings, 4 of which were false positives (CLAIM_PROTOCOL_VERSION, CLAIM_PROTOCOL_
+// INSTRUCTIONS, RUN_STATES, GOAL_STATES — each genuinely imported and used in production
+// code, e.g. CLAIM_PROTOCOL_VERSION at brief.ts:117). Root causes: (1) a symbol referenced
+// only inside a template-literal interpolation like `${CLAIM_PROTOCOL_VERSION}` was
+// invisible to the reference scan, because the old brace-counting stripper blanked whole
+// backtick-delimited spans, substitution code included; (2) a one-line declaration like
+// `export type RunState = (typeof RUN_STATES)[number];` both declares RunState AND
+// references RUN_STATES, but the old scan skipped its ENTIRE header line as "the decl's own
+// header", discarding the real reference alongside the self-reference. runTitle was the one
+// TRUE positive in that same run — it is deliberately exempted below (see FIX 2's marker
+// on contract.ts's runTitle), not because the precision fix stopped catching it.
+test("PRECISION: CLAIM_PROTOCOL_VERSION, CLAIM_PROTOCOL_INSTRUCTIONS, RUN_STATES and GOAL_STATES are not false-positive orphans", () => {
+  const repoRoot = join(__dirname, "..", "..");
+  const findings = findOrphans(repoRoot, ["mcp/delegation/goal.ts", "mcp/delegation/contract.ts"]);
+  const symbols = findings.map((f) => f.symbol);
+  for (const shouldNotFlag of ["CLAIM_PROTOCOL_VERSION", "CLAIM_PROTOCOL_INSTRUCTIONS", "RUN_STATES", "GOAL_STATES"]) {
+    assert.ok(
+      !symbols.includes(shouldNotFlag),
+      `${shouldNotFlag} is genuinely reachable from a root file — it must not be reported as an orphan-export`,
+    );
+  }
+  // runTitle is NOT expected here: it is contract.ts's one true orphan, and FIX 2
+  // deliberately marks it exempt (`// reachability: mirrored into the browser client by
+  // hand; the parity test is the contract`) rather than leave a check nobody trusts
+  // flagging a symbol the team already knows about and has chosen to keep. The synthetic
+  // test below proves the precision fix itself still catches an unmarked equivalent —
+  // the exemption is a deliberate, explained choice, not the fix silently going blind.
+  assert.ok(
+    !symbols.includes("runTitle"),
+    "runTitle now carries an explained '// reachability:' marker (FIX 2) — it must not be reported",
+  );
+});
+
+// Proves the precision fix (nested-template-literal-aware stripping + per-column decl-self
+// skip) doesn't overcorrect into silence: an export used only inside a template-literal
+// interpolation, from a scope that is ITSELF unreachable, must still be reported — the same
+// as a one-line `export type X = (typeof Y)[number]` declaration whose Y is itself
+// unreachable. Synthetic (not the real repo tree) because it isolates exactly the two code
+// paths FIX 1 touched, independent of whatever exemption policy contract.ts's real runTitle
+// carries.
+test("PRECISION REGRESSION: the template-literal and one-line-decl fixes still catch genuine orphans", () => {
+  const dir = tempProject();
+  write(dir, "mcp/cli.ts", "export function main() {}\n");
+  write(
+    dir,
+    "mcp/orphan-tmpl.ts",
+    ["export const ORPHAN_VALUE = 1;", "function deadRenderer() {", "  return `value: ${ORPHAN_VALUE}`;", "}", ""].join("\n"),
+  );
+  write(
+    dir,
+    "mcp/orphan-oneliner.ts",
+    ["export const ORPHAN_STATES = [\"a\", \"b\"] as const;", "export type OrphanState = (typeof ORPHAN_STATES)[number];", ""].join("\n"),
+  );
+
+  const findings = findOrphans(dir, ["mcp/orphan-tmpl.ts", "mcp/orphan-oneliner.ts"]);
+  assert.ok(
+    findings.some((f) => f.symbol === "ORPHAN_VALUE"),
+    "a symbol referenced only inside a template interpolation, from an unreachable owner, is still an orphan",
+  );
+  assert.ok(
+    findings.some((f) => f.symbol === "ORPHAN_STATES"),
+    "a symbol referenced only on another declaration's one-line header, from an unreachable file, is still an orphan " +
+      "(RULE A only checks function/const/class exports, so OrphanState itself — a type — is never in scope here; " +
+      "ORPHAN_STATES, a const, is)",
+  );
+});
+
+// FIX 2 — runTitle in contract.ts has no production caller; the browser client keeps a
+// hand-written duplicate (app-client.ts) whose comment promises it "mirrors runTitle in
+// mcp/delegation/contract.ts exactly". This test converts that hand-kept promise into an
+// enforced invariant: extract the CLIENT's actual runTitle from the composed page (not a
+// copy typed into this test) and run it in its own vm context against the same corpus as
+// the real contract.ts runTitle, asserting character-identical output.
+function extractFunctionSource(script: string, name: string): string {
+  const marker = `function ${name}(`;
+  const start = script.indexOf(marker);
+  assert.ok(start >= 0, `${name} not found in the emitted client script`);
+  const braceStart = script.indexOf("{", start);
+  let depth = 0;
+  let i = braceStart;
+  for (; i < script.length; i++) {
+    if (script[i] === "{") depth++;
+    else if (script[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        i++;
+        break;
+      }
+    }
+  }
+  return script.slice(start, i);
+}
+
+function clientRunTitle(): (run: { id: string; intent: string }) => string {
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  const constDecl = script.match(/var RUN_TITLE_MAX_LENGTH\s*=\s*\d+;/)?.[0];
+  assert.ok(constDecl, "RUN_TITLE_MAX_LENGTH constant not found in the emitted client script");
+  const fnSrc = extractFunctionSource(script, "runTitle");
+  const sandbox: { runTitle?: (run: { id: string; intent: string }) => string } = {};
+  vm.createContext(sandbox);
+  vm.runInContext(`${constDecl}\n${fnSrc}`, sandbox);
+  assert.ok(typeof sandbox.runTitle === "function", "runTitle did not evaluate to a function in its own vm context");
+  return sandbox.runTitle!;
+}
+
+function fakeRun(id: string, intent: string): TaskRecord {
+  return { id, intent } as unknown as TaskRecord;
+}
+
+test("PARITY: the browser client's runTitle is character-identical to contract.ts's runTitle", () => {
+  const clientImpl = clientRunTitle();
+  const corpus: Array<{ label: string; id: string; intent: string }> = [
+    { label: "short intent", id: "run-1", intent: "fix the bug" },
+    { label: "200-char intent", id: "run-2", intent: "a".repeat(200) },
+    { label: "empty intent", id: "run-3", intent: "" },
+    {
+      label: "multi-line",
+      id: "run-4",
+      intent: "first line of the intent\nsecond line should never appear\nthird line either",
+    },
+    {
+      label: "realistic long intent",
+      id: "run-5",
+      intent:
+        "The reachability check that just landed is too noisy to trust, and it found one real bug that needs a guard. Fix both, and add a test that pins the exact acceptance bar the brief asked for.",
+    },
+    {
+      label: "many-words",
+      id: "run-6",
+      intent: Array.from({ length: 40 }, (_, i) => `word${i}`).join(" "),
+    },
+    { label: "trailing colon", id: "run-7", intent: "Do the thing:" },
+    { label: "whitespace-only intent", id: "run-8", intent: "   \n\t  " },
+    {
+      label: "question mark ends the first sentence",
+      id: "run-9",
+      intent: "Is this a bug? A very long explanation follows that should never be reached because the sentence match already stopped at the question mark.",
+    },
+    { label: "non-ascii and emoji", id: "run-10", intent: "修复 the caché — ensure emoji 🎉 don't break slicing across a run that is long enough to truncate at ninety-six characters or more." },
+    { label: "exactly 96 chars, no terminal punctuation", id: "run-11", intent: "x".repeat(96) },
+    { label: "exactly 97 chars, no terminal punctuation", id: "run-12", intent: "x".repeat(97) },
+    { label: "trailing punctuation cluster", id: "run-13", intent: "clean up the retry helper!!! ...   " },
+  ];
+
+  for (const { label, id, intent } of corpus) {
+    const run = fakeRun(id, intent);
+    const expected = runTitle(run);
+    const actual = clientImpl({ id, intent });
+    assert.equal(actual, expected, `client runTitle diverged from contract.ts runTitle for case "${label}"`);
+  }
 });

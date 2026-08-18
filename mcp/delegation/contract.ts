@@ -404,7 +404,13 @@ const RUN_TITLE_MAX_LENGTH = 96;
  * ("what should change, and how you'll know it worked") and can run to thousands of
  * characters, so every display surface renders this instead of task.intent directly —
  * pure derivation, never changes what is sent to the kernel or stored on the record.
+ *
+ * Has no production caller of its own: app-client.ts (a TS template literal, so it can't
+ * import this module) keeps a hand-written duplicate instead. reachability.test.ts's
+ * PARITY test extracts that duplicate from the composed page and diffs it against this
+ * function on every run — see the marker below.
  */
+// reachability: mirrored into the browser client by hand; the parity test is the contract.
 export function runTitle(run: TaskRecord): string {
   const raw = (run.intent ?? "").trim();
   if (!raw) return run.id;
