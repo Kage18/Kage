@@ -28,11 +28,12 @@ import {
   type RunType,
   type RunView,
 } from "./contract.js";
-import { dispatchDetached, readSteerRecords } from "./dispatch.js";
+import { appendSteerRecord, dispatchDetached, readSteerRecords } from "./dispatch.js";
 import { compileBrief, renderBrief } from "./brief.js";
 import { normalizeRunType, preflightForecast } from "./preflight.js";
 import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type SteerQueueResult } from "./steer.js";
 import { sendControl, isRunLive } from "./control.js";
+import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
@@ -269,6 +270,17 @@ export interface DelegationApiContext {
   askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; redactions?: string[] }>;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
+  /**
+   * Live take-over attachments, one per run currently seized in a terminal. Unlike the
+   * room's pty (a socket-served view held by a DETACHED process), a take-over's pty runs
+   * directly in this process — see run-pty.ts — so this map IS the daemon's only record
+   * of it, not a cache of something else's state.
+   */
+  runPtys?: Map<string, RunPtyAttachment>;
+  /** Test seam: replace real take-over pty spawning entirely — never a real claude. */
+  takeOverRunFn?: typeof takeOverRun;
+  /** Test seam: replace the real kill-and-reattach hand-back entirely. */
+  handBackFn?: typeof handBack;
 }
 
 /** The serialization chain and pending counter belong to ONE thread, never shared. */
@@ -953,7 +965,63 @@ export async function handleDelegationRoute(
     return true;
   }
 
-  const runMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers))?$/);
+  // Take-over's pty write/resize/snapshot: a different shape than the other run actions
+  // (a sub-action, not a single verb), so it gets its own match ahead of the general one.
+  const runPtyMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)\/pty\/(write|resize|snapshot)$/);
+  if (runPtyMatch) {
+    const [, ptyRunId, sub] = runPtyMatch;
+    const attachment = ctx.runPtys?.get(ptyRunId) ?? null;
+    if (sub === "snapshot" && method === "GET") {
+      json(res, 200, { ok: true, alive: Boolean(attachment), scrollback: attachment ? attachment.snapshot() : "" });
+      return true;
+    }
+    if (sub === "write" && method === "POST") {
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
+        json(res, 400, { ok: false, error: (error as Error).message });
+        return true;
+      }
+      const data = typeof body.data === "string" ? body.data : "";
+      if (!data) {
+        json(res, 400, { ok: false, error: "data is required" });
+        return true;
+      }
+      if (!attachment) {
+        json(res, 503, { ok: false, error: "no active take-over — take over the run first" });
+        return true;
+      }
+      attachment.write(data);
+      json(res, 202, { ok: true });
+      return true;
+    }
+    if (sub === "resize" && method === "POST") {
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
+        json(res, 400, { ok: false, error: (error as Error).message });
+        return true;
+      }
+      const cols = Number(body.cols);
+      const rows = Number(body.rows);
+      if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
+        json(res, 400, { ok: false, error: "cols and rows must be positive numbers" });
+        return true;
+      }
+      if (!attachment) {
+        json(res, 503, { ok: false, error: "no active take-over — take over the run first" });
+        return true;
+      }
+      attachment.resize(Math.floor(cols), Math.floor(rows));
+      json(res, 202, { ok: true });
+      return true;
+    }
+    return false;
+  }
+
+  const runMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers|takeover|handback))?$/);
   if (!runMatch) return false;
   const [, runId, action] = runMatch;
 
@@ -1065,12 +1133,58 @@ export async function handleDelegationRoute(
       } else if (op === "reorder") {
         const order = Array.isArray(body.order) ? body.order.filter((entry): entry is string => typeof entry === "string") : [];
         result = reorderQueuedSteers(projectDir, runId, order);
+      } else if (op === "add") {
+        // Pure queue append — no delivery attempt. This is the "queue for later"
+        // half of the composer's delivery choice; "tell" (deliver now) stays separate.
+        const message = typeof body.message === "string" ? body.message : "";
+        if (!message.trim()) {
+          json(res, 400, { ok: false, error: "message is required" });
+          return true;
+        }
+        appendSteerRecord(projectDir, runId, message.trim());
+        result = { ok: true, records: readSteerRecords(projectDir, runId) };
       } else {
         json(res, 400, { ok: false, error: `unknown op: ${op || "(none)"}` });
         return true;
       }
       feed.notify(runId);
       json(res, result.ok ? 200 : 409, { ok: result.ok, error: result.ok ? undefined : result.reason, steers: result.records });
+      return true;
+    }
+    if (action === "takeover") {
+      readRun(projectDir, runId); // 404s for an unknown run before the mutation runs.
+      const existing = ctx.runPtys?.get(runId);
+      if (existing) {
+        json(res, 200, { ok: true, already: true, run: readRun(projectDir, runId) });
+        return true;
+      }
+      const takeOver = ctx.takeOverRunFn ?? takeOverRun;
+      const result = await takeOver(projectDir, runId);
+      if (!result.ok) {
+        json(res, 409, { ok: false, error: result.reason });
+        return true;
+      }
+      if (!ctx.runPtys) ctx.runPtys = new Map();
+      ctx.runPtys.set(runId, result.attachment);
+      // Bytes stream over the SAME pty channel the room uses, keyed by session so a run
+      // terminal and a room terminal never paint into each other's screen.
+      result.attachment.onData((bytes) => feed.notifyPty({ kind: "data", bytes, session: `run:${runId}` }));
+      result.attachment.onExit(() => {
+        ctx.runPtys?.delete(runId);
+        feed.notifyPty({ kind: "exit", session: `run:${runId}` });
+        feed.notify(runId);
+      });
+      feed.notify(runId);
+      json(res, 200, { ok: true, pid: result.pid, run: readRun(projectDir, runId) });
+      return true;
+    }
+    if (action === "handback") {
+      readRun(projectDir, runId); // 404s for an unknown run before the mutation runs.
+      const doHandBack = ctx.handBackFn ?? handBack;
+      const result = await doHandBack(projectDir, runId);
+      ctx.runPtys?.delete(runId);
+      feed.notify(runId);
+      json(res, result.ok ? 200 : 409, { ok: result.ok, error: result.ok ? undefined : result.reason, run: result.ok ? result.task : readRun(projectDir, runId) });
       return true;
     }
     if (action === "merge") {
