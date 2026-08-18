@@ -1,6 +1,6 @@
 {
   "name": "kage-shell",
-  "version": "0.1.0",
+  "version": "3.1.0",
   "private": true,
   "description": "Kage desktop shell \u2014 a thin Electron frame over the daemon's renderer. Contains zero HTML.",
   "main": "main.js",

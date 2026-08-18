@@ -132,7 +132,14 @@ export function retirePtyRoom(projectDir: string, session?: string): void {
 export async function superviseRoomPty(projectDir: string, session?: string): Promise<void> {
   // Imported lazily: node-pty is a native addon, and every other command this CLI
   // supports must keep working even where it fails to load.
-  const pty = await import("node-pty");
+  let pty: typeof import("node-pty");
+  try {
+    pty = await import("node-pty");
+  } catch {
+    throw new Error(
+      "The terminal view needs node-pty, which is not installed on this machine (it is an optional native module). Everything else in Kage works without it.",
+    );
+  }
   ensureSpawnHelperExecutable();
 
   const dir = roomDir(projectDir, session);

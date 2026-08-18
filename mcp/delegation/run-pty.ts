@@ -37,7 +37,14 @@ export type PtyFactory = (file: string, args: string[], options: PtyOptions) => 
 // Lazy import: node-pty is a native addon; every other command must keep working even
 // where it fails to load.
 async function defaultPtyFactory(file: string, args: string[], options: PtyOptions): Promise<PtyLike> {
-  const pty = await import("node-pty");
+  let pty: typeof import("node-pty");
+  try {
+    pty = await import("node-pty");
+  } catch {
+    throw new Error(
+      "The terminal view needs node-pty, which is not installed on this machine (it is an optional native module). Everything else in Kage works without it.",
+    );
+  }
   ensureSpawnHelperExecutable();
   return pty.spawn(file, args, options) as unknown as PtyLike;
 }
