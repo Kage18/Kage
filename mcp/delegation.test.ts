@@ -2034,5 +2034,5 @@ test("citedPaths ignores identifier pairs and .agent_memory runtime artifacts, b
 test("citedPaths still fails a claim naming a real repo path that does not exist in the worktree", () => {
   const paths = citedPaths("added mcp/delegation/does-not-exist.ts");
   assert.deepEqual(paths, ["mcp/delegation/does-not-exist.ts"]);
-  assert.equal(existsSync(join(import.meta.dirname, "delegation", "does-not-exist.ts")), false);
+  assert.equal(existsSync(join(__dirname, "..", "delegation", "does-not-exist.ts")), false);
 });
