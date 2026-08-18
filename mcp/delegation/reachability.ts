@@ -486,7 +486,9 @@ export function runReachabilityCheck(
     : "no unreachable exports or fields introduced";
   const check: CheckOutcome = {
     id: "reachability",
-    kind: "command",
+    // Not "command": this analysis executes nothing, and claimVerdict derives
+    // "was anything actually executed?" from the command kind alone.
+    kind: "analysis",
     expect,
     result: "pass",
     evidence,
