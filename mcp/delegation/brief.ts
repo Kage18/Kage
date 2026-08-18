@@ -108,6 +108,23 @@ export function compileBrief(projectDir: string, intent: string, type: RunType, 
   };
 }
 
+// A suggested (not mandatory) name for a new test file, derived from the run's own
+// type/intent — cheap to compute, and it gives the agent a concrete default instead of
+// a blank "name something" instruction, which is what the ad-hoc prose version was and
+// why it kept losing to `mcp/delegation.test.ts`'s gravity.
+function suggestedTestFile(plan: BriefPlan): string {
+  const words = plan.intent
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .split("-")
+    .filter(Boolean)
+    .slice(0, 4)
+    .join("-");
+  const slug = (words || plan.type).slice(0, 40).replace(/-+$/, "");
+  return `mcp/${slug}.test.ts`;
+}
+
 // What the hired agent actually receives. Written as an instruction sheet for a
 // competent colleague: context, boundaries, and how to report back.
 export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] = []): string {
@@ -156,6 +173,19 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
     "in your claim's `unsure` list what you were unable to check and how you reasoned instead.",
   );
 
+  lines.push(
+    "",
+    "## Test placement",
+    "",
+    "New behaviour gets its own test file — never append to `mcp/delegation.test.ts`, a",
+    "merge-conflict hotspot where several runs collide in it on the same day. Suggested:",
+    `\`${suggestedTestFile(plan)}\` (rename it if the behaviour warrants a better name).`,
+    "",
+    "New behaviour must ship with a test that FAILS if your change is reverted — a test",
+    "that passes either way proves nothing, and a green suite can't tell them apart. Say",
+    "in your claim which test would fail on revert.",
+  );
+
   lines.push("", "## Never do these without asking", "");
   for (const rule of plan.deny) lines.push(`- ${rule}`);
 
@@ -177,6 +207,14 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
     "those in any code or tests you add; they fail TypeScript compilation (TS1470) here.",
   );
 
+  lines.push(
+    "",
+    "## The claim fence is required, not optional",
+    "",
+    "Skipping it is a failure, not a shortcut: it is the only way your own account, your",
+    "unsure notes, and your learnings reach the operator and repo memory. A run that lands",
+    "without one has its statement reverse-engineered from the diff instead.",
+  );
   lines.push("", CLAIM_PROTOCOL_INSTRUCTIONS, "");
   return lines.join("\n");
 }
