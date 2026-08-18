@@ -1464,7 +1464,7 @@ test("stop on a blocked run with a LIVE supervisor is unaffected — it stops th
 
     const stop = await apiFetch(port, `/runs/${task.id}/stop`, { method: "POST" });
     assert.equal(stop.status, 200);
-    const stopBody = await stop.json() as { ok: boolean; stopped: boolean; run: { state: string } };
+    const stopBody = await stop.json() as { ok: boolean; stopped: boolean; detail: string; run: { state: string } };
     assert.equal(stopBody.stopped, true, "the live supervisor itself confirmed the stop");
     assert.doesNotMatch(stopBody.detail ?? "", /supervisor gone/, "the live path must not be mistaken for the dead-supervisor path");
 
