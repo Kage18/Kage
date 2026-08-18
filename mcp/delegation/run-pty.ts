@@ -22,7 +22,10 @@ import { worktreePath } from "./worktree.js";
 export interface PtyLike {
   pid: number;
   onData(callback: (data: string) => void): void;
-  onExit(callback: (event: { exitCode: number }) => void): void;
+  // No exit code in the signature: nothing here waits on it — handBack kills by pid
+  // and polls isProcessAlive, and RunPtyAttachment.onExit below takes no argument
+  // either. Threading an unused value through would be dead plumbing, not honesty.
+  onExit(callback: () => void): void;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
