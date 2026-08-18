@@ -57,6 +57,7 @@ import {
   transitionGoal,
 } from "./delegation/goal.js";
 import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
+import { callTool } from "./index.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-delegation-"));
@@ -1585,6 +1586,38 @@ test("attachRunToGoal + goalForRun round-trip, and a goal-less run finds nothing
   // patchGoal is a plain merge — no state-machine involvement.
   const patched = patchGoal(project, goal.id, { autonomy: "merge" });
   assert.equal(patched.autonomy, "merge");
+});
+
+test("kage_dispatch with goal_id attaches the run to the goal; an unknown goal_id warns without failing the dispatch", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "orchestrated wave" });
+
+  const attached = await callTool("kage_dispatch", {
+    project_dir: project,
+    intent: "wave one part one",
+    type: "chore",
+    agent: "stub",
+    goal_id: goal.id,
+  });
+  const attachedText = attached.content[0].text as string;
+  assert.doesNotMatch(attachedText, /Could not attach/);
+  const runOne = listRuns(project).find((run) => run.intent === "wave one part one");
+  assert.ok(runOne, "the run should exist regardless of goal attachment");
+  assert.deepEqual(readGoal(project, goal.id).plan.waves[0].run_ids, [runOne!.id]);
+  assert.equal(goalForRun(project, runOne!.id)?.id, goal.id);
+
+  const unknown = await callTool("kage_dispatch", {
+    project_dir: project,
+    intent: "wave one part two",
+    type: "chore",
+    agent: "stub",
+    goal_id: "does-not-exist",
+  });
+  const unknownText = unknown.content[0].text as string;
+  assert.match(unknownText, /Could not attach this run to goal does-not-exist/);
+  const runTwo = listRuns(project).find((run) => run.intent === "wave one part two");
+  assert.ok(runTwo, "the dispatch itself still succeeded despite the unknown goal_id");
+  assert.equal(goalForRun(project, runTwo!.id), null, "never attached to any goal");
 });
 
 test("notifyManagerOfRunEvent: exactly one rate-limited frame for a goal-owned run, none for a goal-less run", async () => {
