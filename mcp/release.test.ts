@@ -98,9 +98,12 @@ test("node-pty is only ever loaded through a lazy import", () => {
   // A future refactor could quietly turn the lazy `await import("node-pty")` into a
   // top-level `import ... from "node-pty"`, which would make node-pty mandatory again
   // at module-load time even though package.json now marks it optional.
+  // __dirname is mcp/dist/ at runtime, so reaching the .ts sources needs the ".." the
+  // sibling cli.ts/kernel.ts source tests already use — without it this resolves to
+  // mcp/dist/delegation/run-pty.ts, which does not exist.
   const sources = [
-    join(__dirname, "delegation", "run-pty.ts"),
-    join(__dirname, "delegation", "room-pty.ts"),
+    join(__dirname, "..", "delegation", "run-pty.ts"),
+    join(__dirname, "..", "delegation", "room-pty.ts"),
   ];
   for (const path of sources) {
     const source = readFileSync(path, "utf8");
