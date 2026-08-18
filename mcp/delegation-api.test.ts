@@ -19,7 +19,7 @@ import { mergeRun } from "./delegation/ratify.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
 import { writeDelegationConfig } from "./delegation/config.js";
 import { superviseRun } from "./delegation/supervisor.js";
-import { sendControl } from "./delegation/control.js";
+import { isRunLive, sendControl } from "./delegation/control.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-api-"));
@@ -228,6 +228,11 @@ test("interrupt is an honest 503 with no live supervisor, and delivers to one th
     const liveStub = stubAdapter({ live: { question: "proceed with plan A or B?" } });
     const supervised = superviseRun(project, task.id, liveStub);
     await waitFor(() => readRun(project, task.id).state === "blocked");
+    // The state flip and the control socket becoming reachable are two different signals
+    // — waiting on the socket itself (retried, not a one-shot check) is what the part-1
+    // regression tests do before sending anything through it, and closes the gap a fixed
+    // assumption about ordering does not.
+    await waitFor(() => isRunLive(project, task.id));
 
     const live = await apiFetch(port, `/runs/${task.id}/interrupt`, { method: "POST" });
     assert.equal(live.status, 200);
