@@ -337,7 +337,10 @@ test("a truthful claim verifies, and the card leads with the receipt", async () 
   assert.equal(task.state, "ready");
   assert.ok(claim);
   assert.equal(claim.checks.every((check) => check.result === "pass"), true);
-  assert.match(renderClaimCard(claim, { budget: 400 }), /VERIFIED 3\/3/);
+  // n/n, not a hardcoded 3/3: the kernel gained static-typecheck and reachability checks
+  // after this test was written, and a literal count makes every new check a false failure.
+  // The backreference still asserts what matters — every check that ran, passed.
+  assert.match(renderClaimCard(claim, { budget: 400 }), /VERIFIED (\d+)\/\1\b/);
 });
 
 test("a check the environment cannot run is unverified, never a pass", async () => {

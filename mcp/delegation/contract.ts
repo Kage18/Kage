@@ -120,7 +120,10 @@ export type CheckResultKind = "pass" | "fail" | "unverified_no_env" | "not_run";
 
 export interface CheckSpec {
   id: string;
-  kind: "command" | "diff" | "citation";
+  // "analysis" = a kernel-side static analysis that runs no command. It must stay
+  // distinct from "command": claimVerdict counts only executed commands, so labelling
+  // an analysis as a command would make a claim nothing actually ran read VERIFIED.
+  kind: "command" | "diff" | "citation" | "analysis";
   cmd?: string;
   expect: string;
 }

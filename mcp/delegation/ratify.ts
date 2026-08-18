@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from
 import { join } from "node:path";
 import { capture, packetsDir, refreshProject } from "../kernel.js";
 import { okfConceptToPacket, packetToOkfConcept } from "../okf.js";
-import { runAllChecks } from "./checks.js";
+import { KERNEL_APPENDED_CHECK_IDS, runAllChecks } from "./checks.js";
 import {
   type CheckSpec,
   type ClaimRecord,
@@ -243,11 +243,6 @@ export interface ReverifyResult {
 
 const REVERIFIABLE_STATES = new Set<RunState>(["failed", "ready"]);
 
-// Ids static-checks.ts appends onto every claim's checks — kernel-executed, never a
-// declared CheckSpec. reverifyRun reconstructs the run's ORIGINAL declared checks from
-// the stored claim by dropping these; runAllChecks below re-derives them for real. Feeding
-// them back in as declared "command" checks would run tsc twice under two different ids.
-const STATIC_CHECK_IDS = new Set(["static-typecheck", "static-app-parse"]);
 
 /**
  * Re-checks a run: same kernel-executed checks (verify.ts + static-checks.ts, via
@@ -287,7 +282,7 @@ export function reverifyRun(projectDir: string, runId: string): ReverifyResult {
   }
 
   const declaredChecks: CheckSpec[] = claim.checks
-    .filter((check) => !STATIC_CHECK_IDS.has(check.id))
+    .filter((check) => !KERNEL_APPENDED_CHECK_IDS.has(check.id))
     .map((check) => ({ id: check.id, kind: check.kind, cmd: check.cmd, expect: check.expect }));
 
   transitionRun(projectDir, runId, "verifying", "kernel", "reverify requested");
