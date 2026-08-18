@@ -86,7 +86,7 @@ import {
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { capCollection } from "./response-cap.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
-import { dispatchRun } from "./delegation/dispatch.js";
+import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "./delegation/dispatch.js";
 import { steerRun } from "./delegation/steer.js";
 import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
@@ -1390,16 +1390,36 @@ async function runDelegationTool(
     if (!goalId && process.env.KAGE_ROOM === "1") {
       goalId = readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
     }
-    const result = await dispatchRun(
+    const adapter = adapterByName(agent);
+    // Compile and hold the brief first (mirrors `kage dispatch` in mcp/cli.ts), then hand
+    // the run to a detached supervisor rather than run the agent inline: this tool is the
+    // Room manager's dispatch path, and a run this MCP server owned inline died with the
+    // server process — the exact defect dispatchDetached fixed for the CLI on 2026-08-18.
+    // Unlike the CLI, this tool cannot block on followRun to wait for a verdict — it must
+    // return promptly with the run id so the caller can poll kage_task / kage_room_state.
+    const held = await dispatchRun(
       projectDir,
-      { intent: String(args?.intent ?? ""), type, judgment: judged, ...(goalId ? { goalId } : {}) },
-      adapterByName(agent),
+      { intent: String(args?.intent ?? ""), type, judgment: judged, briefOnly: true, ...(goalId ? { goalId } : {}) },
+      adapter,
     );
-    const goalWarning = result.goalWarning ? `\n\n${result.goalWarning}` : "";
-    const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
-    const judgment = readJudgment(projectDir, result.task.id);
+    const goalWarning = held.goalWarning ? `\n\n${held.goalWarning}` : "";
+    const judgment = readJudgment(projectDir, held.task.id);
     const judgmentBlock = judgment ? `\n\n${renderJudgment(judgment).join("\n")}` : "";
-    return text(`${renderBriefCard(result.task, result.plan)}${judgmentBlock}\n\n${claimCard}${goalWarning}`);
+    const briefCard = renderBriefCard(held.task, held.plan);
+
+    const spawned = dispatchDetached(projectDir, held.task);
+    if (spawned.pid) {
+      const pending =
+        `Dispatched to a detached supervisor (pid ${spawned.pid}) — run_id ${held.task.id}. ` +
+        "No claim yet: this run keeps working after this tool returns; poll kage_task or kage_room_state with that run_id for the verdict.";
+      return text(`${briefCard}${judgmentBlock}\n\n${pending}${goalWarning}`);
+    }
+    // Detaching failed outright (spawn errored before returning a pid) — fall back to the
+    // old inline path rather than claim a detached run that never actually started, and say
+    // plainly that this run is now tied to this process.
+    const result = await executeRun(projectDir, held.task.id, held.plan, adapter);
+    const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
+    return text(`${briefCard}${judgmentBlock}\n\n${INLINE_RUN_WARNING}\n\n${claimCard}${goalWarning}`);
   }
   if (name === "kage_judgment") {
     return text(renderJudgment(readJudgment(projectDir, runId)).join("\n"));
