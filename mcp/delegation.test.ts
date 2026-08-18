@@ -1672,8 +1672,10 @@ test("notifyManagerOfRunEvent: nothing is sent when the held session isn't live,
   const project = tempProject();
   const goal = createGoal(project, { intent: "finished goal" });
   const run = createRun(project, { intent: "attached", type: "chore", agent: "stub" });
+  // attachRunToGoal now auto-advances planning -> executing on the first attach, so the
+  // goal is already executing here — only the direct-to-done transition is still needed.
   attachRunToGoal(project, goal.id, run.id);
-  transitionGoal(project, goal.id, "executing");
+  assert.equal(readGoal(project, goal.id).state, "executing");
   transitionGoal(project, goal.id, "done");
 
   const sent: string[] = [];
@@ -2003,9 +2005,10 @@ test("drainPendingGoalEvents: multiple runs coalesce into exactly one frame; not
   assert.equal(readPendingGoalEvents(project, goal.id).length, 0, "re-marking already-delivered ids is a harmless no-op");
 
   // A goal that has since finished must not be woken, even with events still pending
-  // from before it finished.
+  // from before it finished. The two attachRunToGoal calls above already auto-advanced
+  // this goal to executing, so only the direct-to-done transition is still needed.
   appendGoalEvent(project, goal.id, { run_id: runA.id, state: "merged" });
-  transitionGoal(project, goal.id, "executing");
+  assert.equal(readGoal(project, goal.id).state, "executing");
   transitionGoal(project, goal.id, "done");
   const sentAfterDone: string[] = [];
   const afterDoneDeps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sentAfterDone.push(message), true) };

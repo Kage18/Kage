@@ -32,6 +32,7 @@ import { appendSteerRecord, dispatchDetached, readSteerRecords } from "./dispatc
 import {
   abandonGoal,
   attachRunToGoal,
+  checkGoalAcceptsNewRun,
   createGoal,
   goalForRun,
   listGoals,
@@ -1056,7 +1057,15 @@ export async function handleDelegationRoute(
     }
     const agent = typeof body.agent === "string" && body.agent ? body.agent : "claude";
     const type = (typeof body.type === "string" && body.type ? body.type : "chore") as RunType;
+    const goalId = typeof body.goal_id === "string" ? body.goal_id.trim() : "";
     try {
+      // A resolvable goal already over budget or planning a colliding wave is refused
+      // before anything is created; an unresolvable goal_id is a separate, warn-only
+      // concern that the attach below already fails the whole request for.
+      if (goalId) {
+        const gate = checkGoalAcceptsNewRun(projectDir, goalId);
+        if (!gate.ok) throw new Error(gate.message);
+      }
       // Compile the brief and freeze it, then hand the run to a DETACHED supervisor —
       // the daemon must never hold a live agent (a daemon restart cannot be allowed to
       // kill a 45-minute run).
@@ -1073,7 +1082,6 @@ export async function handleDelegationRoute(
       });
       writeBrief(projectDir, task.id, renderBrief(task, plan));
       const briefed = transitionRun(projectDir, task.id, "briefed", "kernel");
-      const goalId = typeof body.goal_id === "string" ? body.goal_id.trim() : "";
       if (goalId) attachRunToGoal(projectDir, goalId, task.id);
       const spawned = body.hold === true ? { pid: undefined } : dispatchDetached(projectDir, briefed);
       feed.notify(task.id);

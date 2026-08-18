@@ -671,6 +671,22 @@ function readMaxConcurrent(projectDir: string): number {
 
 export const DEFAULT_MAX_CONCURRENT = 3;
 
+type RunTransitionHook = (projectDir: string, runId: string, to: RunState) => void;
+const runTransitionHooks: RunTransitionHook[] = [];
+
+/**
+ * Register a side effect to run after a run's state has already landed on disk.
+ * transitionRun is the ONE place every surface (dispatch, supervisor, ratify, reap, the
+ * CLI, the API) passes through to change a run's state — goal.ts and ratify.ts hook goal
+ * completion and autonomy-driven auto-merge in here instead of at each call site, so
+ * neither can drift out of sync the way the goal record's other fields did. This module
+ * intentionally knows nothing about goals or merging: the hook is a plain callback, not
+ * an import of goal.ts, so the dependency runs one way.
+ */
+export function onRunTransition(hook: RunTransitionHook): void {
+  runTransitionHooks.push(hook);
+}
+
 export function transitionRun(projectDir: string, runId: string, to: RunState, by: RunActor, note?: string): RunView {
   const task = readRun(projectDir, runId);
   const legal = LEGAL_TRANSITIONS[task.state] ?? [];
@@ -686,7 +702,17 @@ export function transitionRun(projectDir: string, runId: string, to: RunState, b
   task.state_history.push(change);
   atomicWriteJson(taskPath(projectDir, runId), task);
   appendRunLedger(projectDir, { kind: "state", run_id: runId, from, to, by, ...(note ? { note } : {}) });
-  return toRunView(task);
+  for (const hook of runTransitionHooks) {
+    try {
+      hook(projectDir, runId, to);
+    } catch {
+      // A side-effect hook must never invalidate a transition that already landed.
+    }
+  }
+  // A hook may have driven the run through further transitions of its own (autonomy
+  // "merge" auto-merging the instant a run goes ready) — re-read so the caller sees
+  // where the run actually ended up, not the state it only passed through.
+  return readRun(projectDir, runId);
 }
 
 export function writeBrief(projectDir: string, runId: string, content: string): void {

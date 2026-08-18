@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { RUN_TYPES, ensureDelegationIgnores, type RunType } from "./contract.js";
+import { RUN_TYPES, ensureDelegationIgnores, onRunTransition, readRun, type RunState, type RunType } from "./contract.js";
 import { clearActiveGoalEverywhere } from "./room-sessions.js";
 
 export const GOAL_SCHEMA_VERSION = 1;
@@ -194,20 +194,39 @@ export function abandonGoal(projectDir: string, goalId: string, note?: string): 
   return transitionGoal(projectDir, goalId, "abandoned", note);
 }
 
+type MutableWave = { runs: GoalRunSpec[]; run_ids: string[] };
+
+/** The first wave still owed a run for one of its planned specs, or the last wave if
+ * every wave is already full (or the plan is empty) — never the last wave just because
+ * it is last. */
+function firstOpenWaveIndex(waves: readonly MutableWave[]): number {
+  const open = waves.findIndex((wave) => wave.run_ids.length < wave.runs.length);
+  return open === -1 ? waves.length - 1 : open;
+}
+
 /**
  * Attach a dispatched run to a goal's wave — the other half of the flywheel that lets
  * the event bridge find "does this run belong to a goal" in one lookup (goalForRun).
- * Defaults to the LAST wave, or creates an empty wave if the plan has none yet (a goal
- * created with no plan, dispatched into ad hoc).
+ * An implicit attach (no waveIndex) targets the first wave with an unfilled run spec,
+ * not the last — a plan with two waves must fill wave one before wave two ever sees a
+ * run. Creates an empty wave if the plan has none yet (a goal created with no plan,
+ * dispatched into ad hoc).
  */
 export function attachRunToGoal(projectDir: string, goalId: string, runId: string, waveIndex?: number): GoalRecord {
   const goal = readGoal(projectDir, goalId);
-  const waves = goal.plan.waves.length
+  const waves: MutableWave[] = goal.plan.waves.length
     ? goal.plan.waves.map((wave) => ({ runs: wave.runs, run_ids: [...wave.run_ids] }))
     : [{ runs: [], run_ids: [] }];
-  const index = typeof waveIndex === "number" && waveIndex >= 0 && waveIndex < waves.length ? waveIndex : waves.length - 1;
+  const index = typeof waveIndex === "number" && waveIndex >= 0 && waveIndex < waves.length ? waveIndex : firstOpenWaveIndex(waves);
   if (!waves[index].run_ids.includes(runId)) waves[index].run_ids.push(runId);
-  return patchGoal(projectDir, goalId, { plan: { waves } });
+  const updated = patchGoal(projectDir, goalId, { plan: { waves } });
+  // A goal's first attached run is the fact that turns intent into motion — a goal
+  // could sit in "planning" forever while it owned running, verified, even merged work
+  // (this is the exact drift the module header warns about: the kernel owns this
+  // record so no surface can leave it lying about what is actually happening). Only the
+  // FIRST attach flips it; later attaches into an already-executing goal are a no-op.
+  if (updated.state === "planning") return transitionGoal(projectDir, goalId, "executing");
+  return updated;
 }
 
 /** Reverse lookup: which goal (if any) owns this run. Linear over goals, which stay few. */
@@ -216,6 +235,138 @@ export function goalForRun(projectDir: string, runId: string): GoalRecord | null
     if (goal.plan.waves.some((wave) => wave.run_ids.includes(runId))) return goal;
   }
   return null;
+}
+
+const RUN_TERMINAL_STATES = new Set<RunState>(["merged", "rejected", "failed"]);
+
+/**
+ * Derives executing -> done the moment every run this goal owns has settled into a
+ * terminal state AND no wave still has an unfilled run spec — never from a manager's
+ * opinion. Hooked into EVERY run-state transition via contract.ts's onRunTransition
+ * (registered below), so this cannot drift out of sync the way the top-level run_ids
+ * field did: whichever surface (dispatch, supervisor, reap, ratify) settles the run,
+ * this fires.
+ */
+export function syncGoalCompletion(projectDir: string, runId: string): GoalRecord | null {
+  const goal = goalForRun(projectDir, runId);
+  if (!goal || goal.state !== "executing") return null;
+  const runIds = goal.plan.waves.flatMap((wave) => wave.run_ids);
+  if (!runIds.length) return null;
+  const allSettled = runIds.every((id) => {
+    try {
+      return RUN_TERMINAL_STATES.has(readRun(projectDir, id).state);
+    } catch {
+      return false;
+    }
+  });
+  const noOpenSpecs = goal.plan.waves.every((wave) => wave.run_ids.length >= wave.runs.length);
+  if (!allSettled || !noOpenSpecs) return null;
+  return transitionGoal(projectDir, goal.id, "done", "every run reached a terminal state");
+}
+
+onRunTransition((projectDir, runId, to) => {
+  if (to === "merged" || to === "rejected" || to === "failed") syncGoalCompletion(projectDir, runId);
+});
+
+// ---------------------------------------------------------------------------
+// Pre-dispatch gates: files_scope disjointness and budgets. Both are checked BEFORE a
+// new run is created, never after — a plan that cannot be safely parallelized, or a
+// goal that is already spent, must never get as far as a real run record.
+
+export interface GoalSpend {
+  usd: number;
+  runs: number;
+}
+
+/** Sums exactly what the goal card already sums (app-client.ts's goalSpendLabel) —
+ * one definition of "how much has this goal spent". */
+export function goalSpend(projectDir: string, goal: GoalRecord): GoalSpend {
+  let usd = 0;
+  let runs = 0;
+  for (const wave of goal.plan.waves) {
+    for (const runId of wave.run_ids) {
+      runs += 1;
+      try {
+        usd += readRun(projectDir, runId).spend.usd_est;
+      } catch {
+        // A run record that vanished contributes nothing further to the tally.
+      }
+    }
+  }
+  return { usd, runs };
+}
+
+function overlappingPaths(a: readonly string[], b: readonly string[]): string[] {
+  const hits = new Set<string>();
+  for (const pathA of a) {
+    for (const pathB of b) {
+      if (pathA === pathB || pathA.startsWith(`${pathB}/`) || pathB.startsWith(`${pathA}/`)) {
+        hits.add(pathA.length <= pathB.length ? pathA : pathB);
+      }
+    }
+  }
+  return [...hits];
+}
+
+export interface WaveScopeCollision {
+  specA: string;
+  specB: string;
+  paths: string[];
+}
+
+/** Pairwise collisions among a wave's DECLARED (planned) files_scope — the plan itself,
+ * not what a run actually touches, since this exists to catch a bad plan before any
+ * agent starts working from it (manager-prompt.ts's whole "disjoint file scopes"
+ * premise, unverified until now). */
+export function waveScopeCollisions(wave: GoalWave): WaveScopeCollision[] {
+  const collisions: WaveScopeCollision[] = [];
+  for (let i = 0; i < wave.runs.length; i++) {
+    for (let j = i + 1; j < wave.runs.length; j++) {
+      const paths = overlappingPaths(wave.runs[i].files_scope, wave.runs[j].files_scope);
+      if (paths.length) collisions.push({ specA: wave.runs[i].intent, specB: wave.runs[j].intent, paths });
+    }
+  }
+  return collisions;
+}
+
+export type GoalGate = { ok: true } | { ok: false; message: string };
+
+/**
+ * The pre-dispatch gate for D (scope disjointness) and E (budgets) — called by
+ * dispatch.ts's dispatchRun and api.ts's /runs POST before a new run is created for a
+ * goal. Resolves silently (ok: true) for an unknown goal id: an unresolvable goal_id is
+ * a warn-only concern handled where the attach itself is attempted, not this gate's job.
+ */
+export function checkGoalAcceptsNewRun(projectDir: string, goalId: string): GoalGate {
+  let goal: GoalRecord;
+  try {
+    goal = readGoal(projectDir, goalId);
+  } catch {
+    return { ok: true };
+  }
+  if (goal.plan.waves.length) {
+    const waves: MutableWave[] = goal.plan.waves.map((wave) => ({ runs: wave.runs, run_ids: [...wave.run_ids] }));
+    const wave = goal.plan.waves[firstOpenWaveIndex(waves)];
+    const collisions = waveScopeCollisions(wave);
+    if (collisions.length) {
+      const detail = collisions.map((c) => `"${c.specA}" vs "${c.specB}" on ${c.paths.join(", ")}`).join("; ");
+      return { ok: false, message: `Refusing to dispatch — wave has overlapping files_scope: ${detail}` };
+    }
+  }
+  const spend = goalSpend(projectDir, goal);
+  if (spend.runs >= goal.budgets.runs) {
+    return {
+      ok: false,
+      message: `Goal "${goal.intent}" is already at its run budget (${spend.runs}/${goal.budgets.runs} runs) — refusing to attach another.`,
+    };
+  }
+  if (spend.usd >= goal.budgets.usd) {
+    return {
+      ok: false,
+      message: `Goal "${goal.intent}" is already at its spend budget ($${spend.usd.toFixed(2)}/$${goal.budgets.usd.toFixed(2)}) — refusing to attach another run.`,
+    };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------

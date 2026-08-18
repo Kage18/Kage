@@ -10,9 +10,11 @@ import { KERNEL_APPENDED_CHECK_IDS, runAllChecks } from "./checks.js";
 import {
   type CheckSpec,
   type ClaimRecord,
+  type RunActor,
   type RunState,
   type TaskRecord,
   appendRunLedger,
+  onRunTransition,
   reapRun,
   readClaim,
   readRun,
@@ -22,7 +24,8 @@ import {
   writeClaim,
 } from "./contract.js";
 import { commitIdentityArgs, currentBranch, dirtyPaths, git } from "./git.js";
-import type { CitationText } from "./verify.js";
+import { goalForRun } from "./goal.js";
+import { type CitationText, claimVerdict } from "./verify.js";
 import { commitWorktree, removeWorktree, worktreePath } from "./worktree.js";
 
 // Rewrite a packet file's status in place, preserving the lossless OKF round-trip.
@@ -109,7 +112,7 @@ export interface MergeResult {
   message: string;
 }
 
-export function mergeRun(projectDir: string, runId: string): MergeResult {
+export function mergeRun(projectDir: string, runId: string, actor: RunActor = "user"): MergeResult {
   const task = readRun(projectDir, runId);
   if (task.state !== "ready") {
     return { ok: false, merged: false, ratified: 0, message: `Run ${runId} is ${task.state}, not ready. Only a verified claim can be merged.` };
@@ -159,7 +162,7 @@ export function mergeRun(projectDir: string, runId: string): MergeResult {
   }
 
   removeWorktree(projectDir, runId);
-  transitionRun(projectDir, runId, "merged", "user");
+  transitionRun(projectDir, runId, "merged", actor);
   appendRunLedger(projectDir, { kind: "merged", run_id: runId, type: task.type, ratified: ratifiedFiles.length });
   try {
     refreshProject(projectDir);
@@ -173,6 +176,57 @@ export function mergeRun(projectDir: string, runId: string): MergeResult {
     message: `Merged ${task.branch} into ${base}.${ratifiedFiles.length ? ` Ratified ${ratifiedFiles.length} learning(s) — the next brief will carry them.` : ""}`,
   };
 }
+
+/**
+ * Autonomy is what decides whether a verified run merges itself. "recommend" (the
+ * default) leaves a ready run exactly where it always sat — waiting for a human. "merge"
+ * merges it the instant it is ready, but ONLY when every check the claim recorded
+ * actually passed: `ready` alone is not proof of that (strict_verify can be turned off,
+ * letting a run reach `ready` with a failing check), so this re-derives "fully verified"
+ * from the claim itself rather than trusting the state name. Anything short of that is
+ * never auto-merged, and the reason is written to the run ledger either way.
+ */
+export function maybeAutoMerge(projectDir: string, runId: string): void {
+  const goal = goalForRun(projectDir, runId);
+  if (!goal || goal.autonomy !== "merge") return;
+  const task = readRun(projectDir, runId);
+  if (task.state !== "ready") return;
+  const claim = readClaim(projectDir, runId);
+  // Every check passing is NOT enough. In a repo with no test command the only checks
+  // that run are non-executing ones (diff size, citations, reachability) — they all pass
+  // while nothing was actually executed, and claimVerdict labels exactly that case
+  // "UNVERIFIED — nothing was executed". Auto-merge is the one place code lands with no
+  // human in the loop, so it must not land what the product itself refuses to call
+  // verified. Require an executed command too.
+  const verdict = claim ? claimVerdict(claim) : null;
+  const fullyVerified =
+    Boolean(claim) && claim!.checks.length > 0 && claim!.checks.every((check) => check.result === "pass") && Boolean(verdict?.executed);
+  if (!fullyVerified) {
+    const failing = claim
+      ? claim.checks.filter((check) => check.result !== "pass").map((check) => `${check.id}: ${check.result}`).join(", ")
+      : "";
+    const reason = !claim
+      ? "no claim to verify"
+      : failing
+        ? `not fully verified — ${failing}`
+        : verdict && !verdict.executed
+          ? `not fully verified — nothing was executed (${verdict.label})`
+          : "not fully verified — no checks recorded";
+    appendRunLedger(projectDir, { kind: "auto_merge_held", run_id: runId, goal_id: goal.id, reason });
+    return;
+  }
+  const result = mergeRun(projectDir, runId, "kernel");
+  appendRunLedger(projectDir, {
+    kind: result.merged ? "auto_merged" : "auto_merge_failed",
+    run_id: runId,
+    goal_id: goal.id,
+    ...(result.merged ? {} : { reason: result.message }),
+  });
+}
+
+onRunTransition((projectDir, runId, to) => {
+  if (to === "ready") maybeAutoMerge(projectDir, runId);
+});
 
 export interface RejectResult {
   ok: boolean;
