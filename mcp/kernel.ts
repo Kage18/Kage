@@ -20468,6 +20468,43 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
   };
 }
 
+// This repo's own commit subjects can run to hundreds of characters (a dispatch
+// brief as the subject line), so printing them verbatim turned the triage surface
+// into the same context-bloat disease kage_refresh had (149,739 -> 11,923 chars) —
+// a ~5KB-per-packet dump is worse than opening the cited files directly. Truncate
+// each subject on a word boundary so the line stays a scan-able one-liner; commit
+// bodies are never read here (--oneline never includes them) or printed.
+const STALE_TRIAGE_COMMIT_SUBJECT_MAX_CHARS = 72;
+// Per moved path, 3 commits is plenty to judge "did this just move or did the
+// claim change" — showing more re-introduces the bloat this fix removes.
+const STALE_TRIAGE_MAX_COMMITS_PER_PATH = 3;
+
+function truncateCommitSubject(subject: string, maxChars = STALE_TRIAGE_COMMIT_SUBJECT_MAX_CHARS): string {
+  if (subject.length <= maxChars) return subject;
+  const cut = subject.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  // Only break on a word boundary if it doesn't throw away most of the budget;
+  // otherwise a single very long first word would collapse to almost nothing.
+  const boundary = lastSpace > maxChars * 0.4 ? cut.slice(0, lastSpace) : cut;
+  return `${boundary.trimEnd()}…`;
+}
+
+// `git log --oneline` lines are "<short-hash> <subject>" — split once so the hash
+// is never truncated along with the (possibly very long) subject.
+function truncateOnelineCommit(line: string): string {
+  const spaceIndex = line.indexOf(" ");
+  if (spaceIndex === -1) return truncateCommitSubject(line);
+  const hash = line.slice(0, spaceIndex);
+  const subject = line.slice(spaceIndex + 1);
+  return `${hash} ${truncateCommitSubject(subject)}`;
+}
+
+function formatOnelineCommits(lines: string[]): string {
+  const shown = lines.slice(0, STALE_TRIAGE_MAX_COMMITS_PER_PATH).map(truncateOnelineCommit);
+  const remainder = lines.length - shown.length;
+  return remainder > 0 ? `${shown.join(" | ")} (+${remainder} more)` : shown.join(" | ");
+}
+
 // Best-effort "what changed under this path" line for triage: prefer commits since
 // the packet was last verified (the window a human actually needs to review); fall
 // back to the most recent commits touching the path when that window is empty
@@ -20477,9 +20514,11 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
 function whatChangedUnderPath(projectDir: string, path: string, sinceIso: string | null): string {
   const sinceArgs = sinceIso ? [`--since=${sinceIso}`] : [];
   const scoped = readGit(projectDir, ["log", "--oneline", "-n", "5", ...sinceArgs, "--", path]);
-  if (scoped) return scoped.split("\n").filter(Boolean).join(" | ");
+  const scopedLines = scoped ? scoped.split("\n").filter(Boolean) : [];
+  if (scopedLines.length) return formatOnelineCommits(scopedLines);
   const fallback = readGit(projectDir, ["log", "--oneline", "-n", "3", "--", path]);
-  if (fallback) return fallback.split("\n").filter(Boolean).join(" | ");
+  const fallbackLines = fallback ? fallback.split("\n").filter(Boolean) : [];
+  if (fallbackLines.length) return formatOnelineCommits(fallbackLines);
   return "no git history found for this path (not a git repo, or nothing committed against it)";
 }
 

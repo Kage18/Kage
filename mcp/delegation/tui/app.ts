@@ -9,7 +9,7 @@ import { adapterByName, detectAgent } from "../adapters/index.js";
 import { compileBrief, renderBrief } from "../brief.js";
 import { diffBudget } from "../config.js";
 import { CLAIM_PROTOCOL_VERSION, type ClaimRecord, type RunView, type TaskRecord, listRuns, readClaim, readRun, runDir, runTranscriptPath } from "../contract.js";
-import { dispatchRun } from "../dispatch.js";
+import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "../dispatch.js";
 import { git } from "../git.js";
 import { readJudgment, renderJudgment } from "../manager.js";
 import { askManager } from "../manager-client.js";
@@ -331,10 +331,30 @@ export async function runTui(projectDir: string): Promise<number> {
         touch();
         // Fire and forget: the kernel writes state to disk, so the board reflects
         // progress on the next poll. Blocking here would freeze the UI for minutes.
-        void dispatchRun(projectDir, { intent: effect.intent, type: effect.type }, adapterByName(agent))
-          .then((result) => {
-            state = { ...state, message: `${result.task.id} → ${result.task.state}`, dispatchBusy: false };
-            refreshRuns();
+        // Brief, then hand off to a detached supervisor — closing this TUI (or the
+        // terminal it runs in) must not kill the agent mid-work, the same defect
+        // dispatchDetached fixed for the CLI and the kage_dispatch MCP tool.
+        void dispatchRun(projectDir, { intent: effect.intent, type: effect.type, briefOnly: true }, adapterByName(agent))
+          .then((held) => {
+            const spawned = dispatchDetached(projectDir, held.task);
+            if (spawned.pid) {
+              state = { ...state, message: `${held.task.id} → dispatched (pid ${spawned.pid})`, dispatchBusy: false };
+              refreshRuns();
+              return;
+            }
+            // Detaching failed outright — fall back to the old inline path (same as
+            // the CLI) rather than silently drop a run that was already created.
+            state = { ...state, message: `${held.task.id} → ${INLINE_RUN_WARNING}`, dispatchBusy: false };
+            touch();
+            void executeRun(projectDir, held.task.id, held.plan, adapterByName(agent))
+              .then((result) => {
+                state = { ...state, message: `${result.task.id} → ${result.task.state}`, dispatchBusy: false };
+                refreshRuns();
+              })
+              .catch((error: unknown) => {
+                state = { ...state, message: `dispatch failed: ${error instanceof Error ? error.message : String(error)}`, dispatchBusy: false };
+                touch();
+              });
           })
           .catch((error: unknown) => {
             state = { ...state, message: `dispatch failed: ${error instanceof Error ? error.message : String(error)}`, dispatchBusy: false };
