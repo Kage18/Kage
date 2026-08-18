@@ -50,15 +50,18 @@ import { createWorktree, resolveWorkspaceKind } from "./delegation/worktree.js";
 import { packetsDir } from "./kernel.js";
 import {
   abandonGoal,
+  appendGoalEvent,
   attachRunToGoal,
   createGoal,
   goalForRun,
   listGoals,
+  markGoalEventsDelivered,
   patchGoal,
   readGoal,
+  readPendingGoalEvents,
   transitionGoal,
 } from "./delegation/goal.js";
-import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
+import { drainPendingGoalEvents, notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
 import { callTool } from "./index.js";
 
@@ -1855,4 +1858,153 @@ test("createWorktree retries a locked `git worktree add` through an injected git
   const handle = createWorktree(project, "retry-lock-run", "kage/retry-lock-run", { runGit: flakyGit });
   assert.equal(calls, 3, "the first two locked attempts were retried, the third succeeded");
   assert.equal(existsSync(handle.path), true, "the worktree exists despite the earlier lock failures");
+});
+
+// --- Durable goal events: notifyManagerOfRunEvent + drainPendingGoalEvents -----------
+// The wake bridge above (notifyManagerOfRunEvent) used to require busy===false to send
+// at all — a busy manager was an accepted, silent drop. A dispatched wave changes state
+// immediately after the very turn that dispatched it, while the manager is still busy,
+// so those were exactly the events that mattered most. Now every event is appended to
+// the goal's durable pending log (goal.ts) BEFORE any delivery is attempted, and the
+// room supervisor drains whatever is still pending the moment a turn completes and the
+// session goes idle (room-supervisor.ts). These tests use only the exported functions
+// and injected deps — no real `claude` process is ever spawned.
+
+test("notifyManagerOfRunEvent: a busy manager leaves the event PENDING, never lost", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "wave one" });
+  const run = createRun(project, { intent: "part one", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, run.id);
+
+  // The session IS live (isLiveFn true) but every "ask" is rejected because a turn is
+  // already in flight — exactly what sendFrameToHeldSession sees when the socket
+  // handler answers "a turn is already in flight" instead of a final reply.
+  const deps = { isLiveFn: async () => true, sendFrameFn: async () => false };
+  const result = await notifyManagerOfRunEvent(project, run.id, { state: "blocked", detail: "needs a decision" }, undefined, deps);
+  assert.equal(result, false, "no immediate delivery while busy");
+
+  const pending = readPendingGoalEvents(project, goal.id);
+  assert.equal(pending.length, 1, "the event was appended durably despite the failed delivery attempt");
+  assert.equal(pending[0].run_id, run.id);
+  assert.equal(pending[0].state, "blocked");
+  assert.equal(pending[0].detail, "needs a decision");
+  assert.equal(pending[0].status, "pending");
+});
+
+test("notifyManagerOfRunEvent: a dead manager also leaves the event pending for the next live one", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "wave one" });
+  const run = createRun(project, { intent: "part one", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, run.id);
+
+  const sent: string[] = [];
+  const deadDeps = {
+    isLiveFn: async () => false,
+    sendFrameFn: async (_p: string, message: string) => {
+      sent.push(message);
+      return true;
+    },
+  };
+  const result = await notifyManagerOfRunEvent(project, run.id, { state: "ready" }, undefined, deadDeps);
+  assert.equal(result, false);
+  assert.equal(sent.length, 0, "a dead manager is never dialed for delivery");
+  assert.equal(readPendingGoalEvents(project, goal.id).length, 1, "still recorded, waiting for the manager to come back");
+
+  // The manager comes back: a later drain (simulating idle after the next turn) picks
+  // the same event up and delivers it — this is "the next live one", not a redispatch
+  // of notifyManagerOfRunEvent itself.
+  setActiveGoal(project, DEFAULT_SESSION, goal.id);
+  const delivered: string[] = [];
+  const liveDrainDeps = {
+    isLiveFn: async () => true,
+    sendFrameFn: async (_p: string, message: string) => {
+      delivered.push(message);
+      return true;
+    },
+  };
+  const drained = await drainPendingGoalEvents(project, DEFAULT_SESSION, liveDrainDeps);
+  assert.equal(drained, true);
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /run .* is now ready/);
+  assert.equal(readPendingGoalEvents(project, goal.id).length, 0, "delivered, no longer pending");
+});
+
+test("a run with no goal produces no event and no frame", async () => {
+  const project = tempProject();
+  const run = createRun(project, { intent: "human only", type: "chore", agent: "stub" });
+
+  const sent: string[] = [];
+  const deps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sent.push(message), true) };
+  const result = await notifyManagerOfRunEvent(project, run.id, { state: "ready" }, undefined, deps);
+  assert.equal(result, false);
+  assert.equal(sent.length, 0, "a human-only run never wakes the manager");
+});
+
+test("drainPendingGoalEvents: two state changes for the same run coalesce to the latest", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "wave one" });
+  const run = createRun(project, { intent: "part one", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, run.id);
+  setActiveGoal(project, DEFAULT_SESSION, goal.id);
+
+  // Two events for the SAME run, appended directly (bypassing notifyManagerOfRunEvent's
+  // rate limit, which is a separate concern from coalescing itself).
+  appendGoalEvent(project, goal.id, { run_id: run.id, state: "running" });
+  appendGoalEvent(project, goal.id, { run_id: run.id, state: "blocked", detail: "needs a decision" });
+
+  const sent: string[] = [];
+  const deps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sent.push(message), true) };
+  const drained = await drainPendingGoalEvents(project, DEFAULT_SESSION, deps);
+  assert.equal(drained, true);
+  assert.equal(sent.length, 1, "exactly one coalesced frame");
+  assert.doesNotMatch(sent[0], /running/, "the superseded state must not appear");
+  assert.match(sent[0], /run .* is now blocked: needs a decision/, "only the latest state per run survives");
+  assert.match(sent[0], /1 superseded update/, "states how many were coalesced");
+  assert.equal(readPendingGoalEvents(project, goal.id).length, 0, "both original events marked delivered, not just the latest");
+});
+
+test("drainPendingGoalEvents: multiple runs coalesce into exactly one frame; nothing to drain with no active goal or no pending events", async () => {
+  const project = tempProject();
+  const goal = createGoal(project, { intent: "parallel wave" });
+  const runA = createRun(project, { intent: "part a", type: "chore", agent: "stub" });
+  const runB = createRun(project, { intent: "part b", type: "chore", agent: "stub" });
+  attachRunToGoal(project, goal.id, runA.id);
+  attachRunToGoal(project, goal.id, runB.id);
+
+  // No active goal for this thread yet — nothing to drain.
+  const sentNone: string[] = [];
+  const noneDeps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sentNone.push(message), true) };
+  assert.equal(await drainPendingGoalEvents(project, DEFAULT_SESSION, noneDeps), false);
+  assert.equal(sentNone.length, 0);
+
+  setActiveGoal(project, DEFAULT_SESSION, goal.id);
+  // An active goal with nothing pending yet is also a no-op.
+  assert.equal(await drainPendingGoalEvents(project, DEFAULT_SESSION, noneDeps), false);
+
+  const evtA = appendGoalEvent(project, goal.id, { run_id: runA.id, state: "verifying" });
+  const evtB = appendGoalEvent(project, goal.id, { run_id: runB.id, state: "blocked", detail: "waiting on merge" });
+
+  const sent: string[] = [];
+  const deps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sent.push(message), true) };
+  const drained = await drainPendingGoalEvents(project, DEFAULT_SESSION, deps);
+  assert.equal(drained, true);
+  assert.equal(sent.length, 1, "both runs land in ONE coalesced frame, not one each");
+  assert.match(sent[0], new RegExp(`run ${runA.id} is now verifying`));
+  assert.match(sent[0], new RegExp(`run ${runB.id} is now blocked: waiting on merge`));
+
+  // Marked delivered as a pair, exercising markGoalEventsDelivered directly too.
+  const stillPending = readPendingGoalEvents(project, goal.id);
+  assert.equal(stillPending.length, 0);
+  markGoalEventsDelivered(project, goal.id, [evtA.id, evtB.id]);
+  assert.equal(readPendingGoalEvents(project, goal.id).length, 0, "re-marking already-delivered ids is a harmless no-op");
+
+  // A goal that has since finished must not be woken, even with events still pending
+  // from before it finished.
+  appendGoalEvent(project, goal.id, { run_id: runA.id, state: "merged" });
+  transitionGoal(project, goal.id, "executing");
+  transitionGoal(project, goal.id, "done");
+  const sentAfterDone: string[] = [];
+  const afterDoneDeps = { isLiveFn: async () => true, sendFrameFn: async (_p: string, message: string) => (sentAfterDone.push(message), true) };
+  assert.equal(await drainPendingGoalEvents(project, DEFAULT_SESSION, afterDoneDeps), false, "a finished goal is never woken");
+  assert.equal(sentAfterDone.length, 0);
 });

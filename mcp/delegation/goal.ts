@@ -5,7 +5,7 @@
 // dispatched, and how much autonomy the user granted. The kernel owns this record the
 // same way it owns task.json: atomic writes, one legality table, no surface allowed to
 // invent a state transition.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RUN_TYPES, ensureDelegationIgnores, type RunType } from "./contract.js";
@@ -216,4 +216,96 @@ export function goalForRun(projectDir: string, runId: string): GoalRecord | null
     if (goal.plan.waves.some((wave) => wave.run_ids.includes(runId))) return goal;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Pending events log — the durable half of the manager event bridge. A run's state
+// change is recorded here BEFORE anyone attempts to deliver it to the held manager
+// session, so a busy or dead manager never turns into a silent drop: the event just
+// waits here until the room supervisor's idle-drain (room-supervisor.ts) or a later
+// live delivery picks it up. Same atomic temp+rename rewrite as the steer log
+// (dispatch.ts's writeSteerRecords) — read the whole log, mutate, rewrite it whole.
+
+export interface GoalEventRecord {
+  id: string;
+  run_id: string;
+  state: string;
+  detail?: string;
+  at: string;
+  status: "pending" | "delivered";
+  delivered_at?: string;
+}
+
+function goalEventsPath(projectDir: string, goalId: string): string {
+  return join(goalDir(projectDir, goalId), "events.jsonl");
+}
+
+function readGoalEvents(projectDir: string, goalId: string): GoalEventRecord[] {
+  const path = goalEventsPath(projectDir, goalId);
+  if (!existsSync(path)) return [];
+  const records: GoalEventRecord[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+    let parsed: Partial<GoalEventRecord>;
+    try {
+      parsed = JSON.parse(line) as Partial<GoalEventRecord>;
+    } catch {
+      continue;
+    }
+    if (typeof parsed.id !== "string" || typeof parsed.run_id !== "string" || typeof parsed.state !== "string") continue;
+    records.push({
+      id: parsed.id,
+      run_id: parsed.run_id,
+      state: parsed.state,
+      ...(typeof parsed.detail === "string" ? { detail: parsed.detail } : {}),
+      at: typeof parsed.at === "string" ? parsed.at : new Date(0).toISOString(),
+      status: parsed.status === "delivered" ? "delivered" : "pending",
+      ...(typeof parsed.delivered_at === "string" ? { delivered_at: parsed.delivered_at } : {}),
+    });
+  }
+  return records;
+}
+
+function writeGoalEvents(projectDir: string, goalId: string, records: GoalEventRecord[]): void {
+  const path = goalEventsPath(projectDir, goalId);
+  mkdirSync(dirname(path), { recursive: true });
+  const body = records.map((record) => JSON.stringify(record)).join("\n");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, body ? `${body}\n` : "", "utf8");
+  renameSync(tmp, path);
+}
+
+/** Record a run's state change as pending. Delivery is marked separately, once it actually lands. */
+export function appendGoalEvent(
+  projectDir: string,
+  goalId: string,
+  event: { run_id: string; state: string; detail?: string },
+): GoalEventRecord {
+  const record: GoalEventRecord = {
+    id: randomUUID().replace(/-/g, "").slice(0, 8),
+    run_id: event.run_id,
+    state: event.state,
+    ...(event.detail ? { detail: event.detail } : {}),
+    at: nowIso(),
+    status: "pending",
+  };
+  const records = readGoalEvents(projectDir, goalId);
+  records.push(record);
+  writeGoalEvents(projectDir, goalId, records);
+  return record;
+}
+
+/** Every event this goal is still owed, oldest first. */
+export function readPendingGoalEvents(projectDir: string, goalId: string): GoalEventRecord[] {
+  return readGoalEvents(projectDir, goalId).filter((record) => record.status === "pending");
+}
+
+/** Flip the given pending events to delivered. Unknown or already-delivered ids are no-ops. */
+export function markGoalEventsDelivered(projectDir: string, goalId: string, ids: string[]): void {
+  if (!ids.length) return;
+  const idSet = new Set(ids);
+  const at = nowIso();
+  const records = readGoalEvents(projectDir, goalId).map((record) =>
+    idSet.has(record.id) && record.status === "pending" ? { ...record, status: "delivered" as const, delivered_at: at } : record,
+  );
+  writeGoalEvents(projectDir, goalId, records);
 }

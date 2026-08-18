@@ -23,13 +23,21 @@ import { createServer, connect, type Socket } from "node:net";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isProcessAlive } from "./contract.js";
-import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
+import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
   MANAGER_ALLOWED_TOOLS, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
-import { goalForRun, type GoalRecord } from "./goal.js";
+import {
+  appendGoalEvent,
+  goalForRun,
+  markGoalEventsDelivered,
+  readGoal,
+  readPendingGoalEvents,
+  type GoalEventRecord,
+  type GoalRecord,
+} from "./goal.js";
 
 function roomDir(projectDir: string, session?: string): string {
   return roomDirFor(projectDir, session);
@@ -187,6 +195,13 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
             tools: turn.tools,
             ...(guarded.redactions.length ? { redactions: guarded.redactions } : {}),
           });
+          // Now idle: pick up anything the event bridge left pending while this turn
+          // was in flight. Self-dials the control socket we are about to listen on
+          // (below) — by the time this connects, busy is already false, so it lands
+          // as an ordinary "ask" and reuses the exact same delivery path a human
+          // message takes. Best-effort: a failure here just leaves events pending for
+          // the next idle window, never a crash of the held session.
+          drainPendingGoalEvents(projectDir, session).catch(() => {});
         }
       } catch {
         // not a result line
@@ -399,6 +414,12 @@ export interface NotifyManagerDeps {
   isLiveFn?: (projectDir: string, session?: string) => Promise<boolean>;
   goalForRunFn?: (projectDir: string, runId: string) => GoalRecord | null;
   sendFrameFn?: (projectDir: string, message: string, session?: string) => Promise<boolean>;
+  appendGoalEventFn?: (
+    projectDir: string,
+    goalId: string,
+    event: { run_id: string; state: string; detail?: string },
+  ) => GoalEventRecord;
+  markGoalEventsDeliveredFn?: (projectDir: string, goalId: string, ids: string[]) => void;
 }
 
 const RUN_EVENT_RATE_LIMIT_MS = 30_000;
@@ -418,9 +439,15 @@ async function sendFrameToHeldSession(projectDir: string, message: string, sessi
  * Wakes the held manager session with a compact context frame when a goal-owned run
  * changes state — "[kage event] run <id> (<goal intent>) is now <state>: <detail>".
  * Rate-limited per run: a repeat of the same state is always dropped, and no run gets a
- * second frame within 30s regardless of state. Resolves false (nothing sent) whenever
- * the session isn't live, the run has no active goal, or the frame was rate-limited —
- * callers treat this as fire-and-forget and must never let a false break a request.
+ * second frame within 30s regardless of state.
+ *
+ * ALWAYS appends the event to the goal's durable pending log first (goal.ts) — a busy
+ * or dead manager must never turn a real state change into a silent drop. Immediate
+ * delivery is then attempted best-effort; on success the just-appended event is marked
+ * delivered, on failure it simply stays pending for the room supervisor's idle-drain
+ * (drainPendingGoalEvents, below) or a later live call to pick up. Resolves false
+ * whenever nothing was sent this call — callers treat this as fire-and-forget and must
+ * never let a false break a request; it does NOT mean the event was lost.
  */
 export async function notifyManagerOfRunEvent(
   projectDir: string,
@@ -429,17 +456,101 @@ export async function notifyManagerOfRunEvent(
   session?: string,
   deps: NotifyManagerDeps = {},
 ): Promise<boolean> {
-  const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
-  if (!(await isLive(projectDir, session))) return false;
   const findGoal = deps.goalForRunFn ?? goalForRun;
   const goal = findGoal(projectDir, runId);
   if (!goal || (goal.state !== "planning" && goal.state !== "executing")) return false;
+
   const key = runEventKey(projectDir, runId, session);
   const now = Date.now();
   const last = lastRunEventByKey.get(key);
   if (last && (last.state === event.state || now - last.at < RUN_EVENT_RATE_LIMIT_MS)) return false;
   lastRunEventByKey.set(key, { state: event.state, at: now });
+
+  const append = deps.appendGoalEventFn ?? appendGoalEvent;
+  const record = append(projectDir, goal.id, { run_id: runId, state: event.state, ...(event.detail ? { detail: event.detail } : {}) });
+
+  const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
+  if (!(await isLive(projectDir, session))) return false;
+
   const message = `[kage event] run ${runId} (${goal.intent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}`;
   const send = deps.sendFrameFn ?? sendFrameToHeldSession;
-  return send(projectDir, message, session);
+  const delivered = await send(projectDir, message, session);
+  if (delivered) (deps.markGoalEventsDeliveredFn ?? markGoalEventsDelivered)(projectDir, goal.id, [record.id]);
+  return delivered;
+}
+
+const GOAL_EVENT_DRAIN_CAP = 5;
+
+/** Group by run, latest state wins; cap how many distinct runs make it into one frame. */
+function coalesceGoalEvents(events: GoalEventRecord[]): {
+  lines: string[];
+  ids: string[];
+  supersededCount: number;
+  omittedCount: number;
+} {
+  const latestByRun = new Map<string, GoalEventRecord>();
+  for (const evt of events) latestByRun.set(evt.run_id, evt);
+  const runs = [...latestByRun.values()];
+  const shown = runs.slice(0, GOAL_EVENT_DRAIN_CAP);
+  const lines = shown.map((evt) => `run ${evt.run_id} is now ${evt.state}${evt.detail ? `: ${evt.detail}` : ""}`);
+  return {
+    lines,
+    ids: events.map((evt) => evt.id),
+    supersededCount: events.length - runs.length,
+    omittedCount: runs.length - shown.length,
+  };
+}
+
+/**
+ * Drains whatever goal events are pending for the thread's ACTIVE goal (room-sessions.ts)
+ * into one coalesced frame, delivered as the next user frame into the held session.
+ * Called at the moment a turn completes and the room goes idle (superviseRoom, above) so
+ * events dropped by notifyManagerOfRunEvent while busy are never lost — only delayed.
+ * Resolves false (nothing delivered — events remain pending) when there is no active
+ * goal, no goal events are pending, the goal already finished, the session isn't live,
+ * or delivery itself failed (e.g. a race re-grabbed busy first).
+ */
+export async function drainPendingGoalEvents(
+  projectDir: string,
+  session?: string,
+  deps: NotifyManagerDeps & {
+    readActiveGoalFn?: (projectDir: string, session?: string) => string | null;
+    readGoalFn?: (projectDir: string, goalId: string) => GoalRecord;
+    readPendingGoalEventsFn?: (projectDir: string, goalId: string) => GoalEventRecord[];
+  } = {},
+): Promise<boolean> {
+  const getActiveGoal = deps.readActiveGoalFn ?? readActiveGoal;
+  // readActiveGoal's real signature takes a required thread key, not an optional one —
+  // a drain with no explicit session means the default thread, same normalization every
+  // other session-keyed lookup in this file already applies (roomSocketPath, runEventKey).
+  const goalId = getActiveGoal(projectDir, normalizeSessionKey(session));
+  if (!goalId) return false;
+
+  const getPending = deps.readPendingGoalEventsFn ?? readPendingGoalEvents;
+  const pending = getPending(projectDir, goalId);
+  if (!pending.length) return false;
+
+  const getGoal = deps.readGoalFn ?? readGoal;
+  let goal: GoalRecord;
+  try {
+    goal = getGoal(projectDir, goalId);
+  } catch {
+    return false;
+  }
+  if (goal.state !== "planning" && goal.state !== "executing") return false;
+
+  const isLive = deps.isLiveFn ?? isRoomSupervisorLive;
+  if (!(await isLive(projectDir, session))) return false;
+
+  const { lines, ids, supersededCount, omittedCount } = coalesceGoalEvents(pending);
+  const suffixParts: string[] = [];
+  if (supersededCount > 0) suffixParts.push(`${supersededCount} superseded update${supersededCount === 1 ? "" : "s"} coalesced`);
+  if (omittedCount > 0) suffixParts.push(`${omittedCount} more run${omittedCount === 1 ? "" : "s"} not shown`);
+  const suffix = suffixParts.length ? ` (${suffixParts.join("; ")})` : "";
+  const message = `[kage event] ${goal.intent}: ${lines.join("; ")}${suffix}`;
+
+  const send = deps.sendFrameFn ?? sendFrameToHeldSession;
+  const delivered = await send(projectDir, message, session);
+  if (delivered) (deps.markGoalEventsDeliveredFn ?? markGoalEventsDelivered)(projectDir, goalId, ids);
+  return delivered;
 }
