@@ -25,6 +25,7 @@ import {
 } from "./contract.js";
 import { commitIdentityArgs, currentBranch, dirtyPaths, git } from "./git.js";
 import { goalForRun } from "./goal.js";
+import { autonomyGateForType } from "./trackrecord.js";
 import { type CitationText, claimVerdict } from "./verify.js";
 import { commitWorktree, removeWorktree, worktreePath } from "./worktree.js";
 
@@ -183,7 +184,10 @@ export function mergeRun(projectDir: string, runId: string, actor: RunActor = "u
  * merges it the instant it is ready, but ONLY when every check the claim recorded
  * actually passed: `ready` alone is not proof of that (strict_verify can be turned off,
  * letting a run reach `ready` with a failing check), so this re-derives "fully verified"
- * from the claim itself rather than trusting the state name. Anything short of that is
+ * from the claim itself rather than trusting the state name. A fully verified claim still
+ * is not enough on its own — the run's TYPE also has to have earned unattended merge power
+ * (autonomyGateForType, trackrecord.ts), so a type with no track record or a poor one falls
+ * back to "recommend" even under an autonomy 'merge' goal. Anything short of both bars is
  * never auto-merged, and the reason is written to the run ledger either way.
  */
 export function maybeAutoMerge(projectDir: string, runId: string): void {
@@ -213,6 +217,14 @@ export function maybeAutoMerge(projectDir: string, runId: string): void {
           ? `not fully verified — nothing was executed (${verdict.label})`
           : "not fully verified — no checks recorded";
     appendRunLedger(projectDir, { kind: "auto_merge_held", run_id: runId, goal_id: goal.id, reason });
+    return;
+  }
+  // The claim itself checks out, but that only earns THIS run a verified label — whether
+  // its TYPE has a track record trustworthy enough for unattended merge is a separate
+  // question, answered the same way for every autonomy 'merge' goal.
+  const typeGate = autonomyGateForType(projectDir, task.type);
+  if (!typeGate.ok) {
+    appendRunLedger(projectDir, { kind: "auto_merge_held", run_id: runId, goal_id: goal.id, reason: typeGate.reason });
     return;
   }
   const result = mergeRun(projectDir, runId, "kernel");

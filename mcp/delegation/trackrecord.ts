@@ -3,6 +3,7 @@
 // its batting average. Every number here is derived from runs on disk, so it cannot
 // drift from what actually happened and cannot be inflated.
 import { type RunType, type TaskRecord, listRuns, readClaim } from "./contract.js";
+import { claimVerdict } from "./verify.js";
 
 export interface TypeRecord {
   dispatched: number;
@@ -25,8 +26,13 @@ export function computeTrackRecord(projectDir: string, runs?: TaskRecord[]): Tra
     if (task.state === "merged") entry.merged += 1;
     if (task.state === "rejected") entry.rejected += 1;
     const claim = readClaim(projectDir, task.id);
-    if (claim && claim.checks.length && claim.checks.every((check) => check.result === "pass")) {
-      entry.verified_first += 1;
+    // "Every check passed" is not "verified" — a claim with no executed command can pass
+    // every check it has (diff size, citations, reachability all run no code) and
+    // claimVerdict is the one place that distinction lives. Ask it rather than re-deriving
+    // pass/fail by folding over checks a second time.
+    if (claim) {
+      const verdict = claimVerdict(claim);
+      if (verdict.passed && verdict.executed) entry.verified_first += 1;
     }
   }
   return record;
@@ -73,6 +79,11 @@ export function curationComparison(projectDir: string, runs?: TaskRecord[]): Cur
   return out;
 }
 
+// Below this many dispatched runs, a rate is noise, not a track record. renderCurationLine
+// set this bar first (refusing to compare manager-vs-kernel judgment on thin data); the
+// autonomy gate below reuses the same number rather than inventing a second threshold.
+export const MIN_TRACK_RECORD_SAMPLE = 5;
+
 // Deliberately refuses to compare on thin data: a difference drawn from three runs is
 // noise, and this product does not ship numbers it cannot stand behind.
 export function renderCurationLine(projectDir: string): string {
@@ -81,8 +92,43 @@ export function renderCurationLine(projectDir: string): string {
   const rate = (record: TypeRecord): string =>
     record.dispatched ? `${record.verified_first}/${record.dispatched} verified first try` : "no runs";
   const line = `Manager-curated briefs: ${rate(manager)} · kernel-default briefs: ${rate(kernel)}`;
-  const thin = manager.dispatched < 5 || kernel.dispatched < 5;
+  const thin = manager.dispatched < MIN_TRACK_RECORD_SAMPLE || kernel.dispatched < MIN_TRACK_RECORD_SAMPLE;
   return thin ? `${line} (too few runs to compare — collecting)` : line;
+}
+
+// The bar for handing a run TYPE unattended merge power. Same cutoff confidenceFor already
+// uses to call a type's calibration "high" — autonomy should never trust a type more
+// loosely than the number already shown to the user on every report.
+export const AUTO_MERGE_MIN_VERIFIED_RATE = 0.8;
+
+export type AutonomyGateVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Whether a run TYPE has earned autonomy 'merge''s unattended power, based on the
+ * corrected track record above (nothing-executed no longer counts as verified). Below
+ * MIN_TRACK_RECORD_SAMPLE dispatched runs of this type there is not enough data to trust
+ * either way, so this holds and says exactly how thin the sample is — the same "collecting,
+ * not concluding" stance renderCurationLine already takes. Above the sample floor, the
+ * type's verified_first rate must clear AUTO_MERGE_MIN_VERIFIED_RATE.
+ */
+export function autonomyGateForType(projectDir: string, type: RunType): AutonomyGateVerdict {
+  const entry = computeTrackRecord(projectDir)[type] ?? emptyRecord();
+  if (entry.dispatched < MIN_TRACK_RECORD_SAMPLE) {
+    return {
+      ok: false,
+      reason: `holding: only ${entry.dispatched} ${type} run(s) on record, need ${MIN_TRACK_RECORD_SAMPLE}`,
+    };
+  }
+  const rate = entry.verified_first / entry.dispatched;
+  if (rate < AUTO_MERGE_MIN_VERIFIED_RATE) {
+    return {
+      ok: false,
+      reason:
+        `holding: ${type} verified-first rate is ${entry.verified_first}/${entry.dispatched} ` +
+        `(${Math.round(rate * 100)}%) — below the ${Math.round(AUTO_MERGE_MIN_VERIFIED_RATE * 100)}% bar for auto-merge`,
+    };
+  }
+  return { ok: true };
 }
 
 export function renderTrustLine(projectDir: string): string {
