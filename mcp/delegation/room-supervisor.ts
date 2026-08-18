@@ -520,7 +520,10 @@ export async function drainPendingGoalEvents(
   } = {},
 ): Promise<boolean> {
   const getActiveGoal = deps.readActiveGoalFn ?? readActiveGoal;
-  const goalId = getActiveGoal(projectDir, session);
+  // readActiveGoal's real signature takes a required thread key, not an optional one —
+  // a drain with no explicit session means the default thread, same normalization every
+  // other session-keyed lookup in this file already applies (roomSocketPath, runEventKey).
+  const goalId = getActiveGoal(projectDir, normalizeSessionKey(session));
   if (!goalId) return false;
 
   const getPending = deps.readPendingGoalEventsFn ?? readPendingGoalEvents;
