@@ -1019,7 +1019,7 @@ function createGoalFromComposer() {
   var input = document.getElementById("room-input");
   var intent = input.value.trim();
   if (!intent || state.room.busy) return;
-  api("/goals", { method: "POST", body: { intent: intent } }).then(function (out) {
+  api("/goals", { method: "POST", body: { intent: intent, session: state.session } }).then(function (out) {
     if (!out.ok) { showError(out.error || "could not create the goal"); return; }
     flash("goal created — the manager is decomposing it");
     input.value = "[goal " + out.goal.id + "] " + intent;

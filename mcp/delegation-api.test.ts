@@ -21,6 +21,7 @@ import { writeDelegationConfig } from "./delegation/config.js";
 import { superviseRun } from "./delegation/supervisor.js";
 import { isRunLive, sendControl } from "./delegation/control.js";
 import { goalForRun, readGoal } from "./delegation/goal.js";
+import { DEFAULT_SESSION, readActiveGoal } from "./delegation/room-sessions.js";
 
 function tempProject(): string {
   return mkdtempSync(join(tmpdir(), "kage-api-"));
@@ -1323,6 +1324,61 @@ test("goal routes round-trip: create, list, get, abandon", async () => {
     // abandoned is terminal — a second abandon must fail, not silently succeed.
     const illegal = await apiFetch(port, `/goals/${created.goal.id}/abandon`, { method: "POST", body: "{}" });
     assert.equal(illegal.status, 400);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("POST /goals owns the goal by the session it was created from, defaulting to main", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const defaulted = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({ intent: "owned by main" }),
+    })).json() as { goal: { id: string } };
+    assert.equal(readActiveGoal(project, DEFAULT_SESSION), defaulted.goal.id);
+
+    const scoped = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({ intent: "owned by thread-2", session: "thread-2" }),
+    })).json() as { goal: { id: string } };
+    assert.equal(readActiveGoal(project, "thread-2"), scoped.goal.id);
+    // Creating the second goal must not disturb the first thread's pointer.
+    assert.equal(readActiveGoal(project, DEFAULT_SESSION), defaulted.goal.id);
+  } finally {
+    feed.close();
+    server.close();
+  }
+});
+
+test("POST /goals/:id/activate moves a goal's active-thread pointer; abandoning it clears that pointer everywhere", async () => {
+  const project = tempProject();
+  const { server, port, feed } = await startApi(project);
+  try {
+    const created = await (await apiFetch(port, "/goals", {
+      method: "POST",
+      body: JSON.stringify({ intent: "reassignable wave" }),
+    })).json() as { goal: { id: string } };
+    assert.equal(readActiveGoal(project, DEFAULT_SESSION), created.goal.id);
+
+    const activated = await (await apiFetch(port, `/goals/${created.goal.id}/activate`, {
+      method: "POST",
+      body: JSON.stringify({ session: "thread-2" }),
+    })).json() as { ok: boolean; goal: { id: string } };
+    assert.equal(activated.ok, true);
+    assert.equal(readActiveGoal(project, "thread-2"), created.goal.id);
+
+    const missing = await apiFetch(port, "/goals/does-not-exist/activate", { method: "POST", body: "{}" });
+    assert.equal(missing.status, 404);
+
+    const abandoned = await (await apiFetch(port, `/goals/${created.goal.id}/abandon`, { method: "POST", body: "{}" })).json() as {
+      goal: { state: string };
+    };
+    assert.equal(abandoned.goal.state, "abandoned");
+    assert.equal(readActiveGoal(project, DEFAULT_SESSION), null, "abandon clears every thread's pointer to it");
+    assert.equal(readActiveGoal(project, "thread-2"), null);
   } finally {
     feed.close();
     server.close();
