@@ -192,6 +192,12 @@ function prepareWorkspace(projectDir: string, task: TaskRecord): { dir: string; 
   // hand the agent an empty directory.
   if (resolveWorkspaceKind(projectDir) === "worktree") {
     const handle = createWorktree(projectDir, task.id, task.branch);
+    // Durable before the agent is ever spawned (below, in executeRun) — the worktree
+    // path was declared on TaskRecord but never written anywhere, so every run's record
+    // read worktree: null even once merged; recovery tooling had to rediscover the path
+    // by convention (worktreePath(runId)) or, when even that failed, by shelling out to
+    // lsof on a live process's cwd (see mcp/delegation/recovery.ts's header).
+    patchRun(projectDir, task.id, { worktree: handle.path });
     return { dir: handle.path, kind: "worktree" };
   }
   const dir = runWorkDir(projectDir, task.id);
