@@ -16,6 +16,7 @@ import {
 } from "./contract.js";
 import { git } from "./git.js";
 import { type ConfidenceVerdict, confidenceFor } from "./trackrecord.js";
+import { KNOWN_FILE_EXTENSIONS, KNOWN_TOP_LEVEL_PREFIXES, citedPaths } from "./verify.js";
 
 export interface BriefMemory {
   id: string;
@@ -31,6 +32,15 @@ export interface BriefPlan {
   type: RunType;
   memories: BriefMemory[];
   touches: string[];
+  /**
+   * The subset of `touches` backed by direct evidence about THIS task — a path the
+   * intent names outright, or a memory citation whose path text actually matches an
+   * intent term — as opposed to the code graph's inference. blastRadiusFor uses this,
+   * not the full `touches` set, because graph-derived touches already expand into the
+   * dependents blastRadiusFor is trying to count; using them as the basis too would
+   * double-count and undercount the risk in the same breath.
+   */
+  evidenceTouches: string[];
   checks: CheckSpec[];
   confidence: ConfidenceVerdict;
   /** Actions that always need a human, regardless of confidence or autonomy. */
@@ -44,6 +54,125 @@ export const DENY_LIST = [
   "changing CI, deploy, or infrastructure configuration",
   "force-pushing, rewriting history, or touching git remotes",
 ];
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+// Kage's own runtime storage, never something a code change lands near. Belt-and-
+// suspenders: citedPaths already excludes it from the paths it extracts, but memory
+// packets' own `paths` field (and, in principle, the graph) are not routed through
+// citedPaths, so this is checked again at the point a path actually enters the touch set.
+function isMemoryStoragePath(path: string): boolean {
+  return path.startsWith(".agent_memory/");
+}
+
+// All files git actually tracks in this checkout — the ground truth a name from the
+// intent is resolved against. Empty (not thrown) when there is no git repo here yet,
+// same failure shape as every other optional signal in this compiler.
+function repoTrackedFiles(projectDir: string): string[] {
+  const result = git(projectDir, ["ls-files"]);
+  return result.ok ? result.stdout.split("\n").filter(Boolean) : [];
+}
+
+// A path-shaped or bare-filename token resolves if it IS a tracked file, or is a unique
+// suffix of exactly one — same resolution rule verify.ts's citation check uses, so a
+// path the brief predicts and a path a claim later cites are judged by the same rule.
+function resolveAgainstRepo(token: string, files: string[]): string | null {
+  if (files.includes(token)) return token;
+  const bySuffix = files.filter((file) => file === token || file.endsWith(`/${token}`));
+  return bySuffix.length === 1 ? bySuffix[0] : null;
+}
+
+// "the room-pty file" names a file by stem, no extension. Resolved the same way as a
+// bare filename, but matched against the tracked file's stem (extension stripped)
+// instead of its full basename.
+function resolveStemAgainstRepo(stem: string, files: string[]): string | null {
+  const matches = files.filter((file) => {
+    const base = file.slice(file.lastIndexOf("/") + 1);
+    const dot = base.lastIndexOf(".");
+    return (dot > 0 ? base.slice(0, dot) : base) === stem;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// A filename mentioned with no directory ("app-styles.ts", not "mcp/delegation/app-
+// styles.ts") — citedPaths requires a slash, so it never sees these. Same known-
+// extension whitelist citedPaths uses, so the two never disagree on what "looks like a
+// source file" means.
+function bareFilenameCandidates(intent: string): string[] {
+  const found = new Set<string>();
+  for (const match of intent.matchAll(/\b[\w-]+\.[A-Za-z0-9]{1,8}\b/g)) {
+    const token = match[0];
+    const ext = token.slice(token.lastIndexOf(".") + 1).toLowerCase();
+    if (KNOWN_FILE_EXTENSIONS.has(ext)) found.add(token);
+  }
+  return [...found];
+}
+
+// "the room-pty file" — a bare stem followed by the word "file", no extension at all.
+// Deliberately permissive (it will also capture "the file", "this file"): the actual
+// filter is resolveStemAgainstRepo requiring a UNIQUE match against a real tracked
+// file, so a generic word that happens to precede "file" simply resolves to nothing.
+function fileStemCandidates(intent: string): string[] {
+  const found = new Set<string>();
+  for (const match of intent.matchAll(/\b([a-zA-Z][\w-]{1,60})\s+file\b/gi)) found.add(match[1].toLowerCase());
+  return [...found];
+}
+
+// Paths the intent names directly — the strongest possible evidence about THIS task,
+// because it isn't inferred from anything, it's just read off what the user typed.
+// Every form is resolved against real tracked files before being trusted: an unresolved
+// guess is worse than no prediction, so nothing here is offered on faith.
+function namedTouches(projectDir: string, intent: string): string[] {
+  const files = repoTrackedFiles(projectDir);
+  if (!files.length) return [];
+  const resolved = new Set<string>();
+  for (const token of [...citedPaths(intent), ...bareFilenameCandidates(intent)]) {
+    const hit = resolveAgainstRepo(token, files);
+    if (hit) resolved.add(hit);
+  }
+  for (const stem of fileStemCandidates(intent)) {
+    const hit = resolveStemAgainstRepo(stem, files);
+    if (hit) resolved.add(hit);
+  }
+  return [...resolved];
+}
+
+// Generic words that show up in nearly every intent regardless of what it's actually
+// about ("add", "fix", "change") or that this compiler's own extraction grammar adds
+// as noise ("file"). Excluded so they can't correlate a candidate path by accident —
+// a repo with a file named literally "fix.ts" is the one false negative this accepts.
+// Top-level directory names (from verify.ts's own prefix list, not a second guess at
+// what they are) are excluded too: "mcp" is in the name of nearly every file here, so
+// as a term it correlates with everything — which means it correlates with nothing.
+const CORRELATION_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "in", "on", "at", "to", "of", "for", "is", "this", "that", "it",
+  "add", "fix", "make", "do", "does", "doing", "change", "changes", "changing", "file", "files",
+  "something", "nothing", "else", "all", "one", "word", "local", "inside", "top",
+  ...KNOWN_TOP_LEVEL_PREFIXES.map((prefix) => prefix.replace(/\/$/, "")),
+]);
+
+function correlationTerms(intent: string): string[] {
+  return dedupe(
+    intent
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word.length >= 3 && !CORRELATION_STOPWORDS.has(word)),
+  );
+}
+
+// Whether a candidate path is actually about what the intent says, not just something
+// recall's fuzzy text match or the graph's term scoring happened to surface. Judged on
+// the path's own filename, not its full text — kernel.ts should not "correlate" with
+// an intent that merely contains the word "in" or "on".
+function pathCorrelates(path: string, terms: string[]): boolean {
+  if (!terms.length) return false;
+  const base = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+  const stem = base.replace(/\.[^./]+$/, "");
+  const words = stem.split(/[-_.]+/).filter((word) => word.length >= 3);
+  return terms.some((term) => stem.includes(term) || term.includes(stem) || words.some((word) => word.includes(term) || term.includes(word)));
+}
 
 export function compileBrief(projectDir: string, intent: string, type: RunType, limit = 5): BriefPlan {
   const notes: string[] = [];
@@ -70,17 +199,51 @@ export function compileBrief(projectDir: string, intent: string, type: RunType, 
     notes.push("Memory recall unavailable (no index yet) — briefing without repo memory.");
   }
 
-  // 2. Predicted touch set: memory citations first (they are evidence this task has
-  // history), then the code graph's answer for the intent's terms.
+  // 2. Predicted touch set, in priority order:
+  //   a) paths the intent NAMES outright — direct evidence about THIS task, always
+  //      kept, never crowded out;
+  //   b) memory citations whose path text actually correlates with an intent term —
+  //      evidence about a SIMILAR past task, filtered so a loosely-recalled packet
+  //      can't smuggle in an unrelated file;
+  //   c) the code graph's own answer for the intent, correlation-filtered the same
+  //      way, and given guaranteed slots — a memory recall with many citations must
+  //      never be able to fill all 8 slots before the graph is even asked.
+  // .agent_memory/** never appears: it is Kage's own storage, not source the task
+  // would touch, and citing it as a "likely touch" would be actively misleading.
+  const TOUCH_CAP = 8;
   const touches = new Set<string>();
-  for (const memory of memories) for (const path of memory.paths.slice(0, 3)) touches.add(path);
+  const evidence = new Set<string>();
+
+  for (const path of namedTouches(projectDir, intent)) {
+    touches.add(path);
+    evidence.add(path);
+  }
+
+  const terms = correlationTerms(intent);
+  const memoryCandidates = dedupe(memories.flatMap((memory) => memory.paths.slice(0, 3)))
+    .filter((path) => !isMemoryStoragePath(path) && !touches.has(path) && pathCorrelates(path, terms));
+
+  let graphCandidates: string[] = [];
   try {
     const graph = queryCodeGraph(projectDir, intent, 6);
-    for (const file of graph.files.slice(0, 4)) touches.add(file.path);
-    for (const symbol of graph.symbols.slice(0, 4)) touches.add(symbol.path);
+    graphCandidates = dedupe([...graph.files.slice(0, 4).map((f) => f.path), ...graph.symbols.slice(0, 4).map((s) => s.path)])
+      .filter((path) => !isMemoryStoragePath(path) && !touches.has(path) && pathCorrelates(path, terms));
   } catch {
     notes.push("Code graph unavailable — run `kage index` for touch-set prediction.");
   }
+
+  // Reserve at least half of what's left for the graph before memory can spend it —
+  // memory is evidence about a similar past task, the graph is the direct answer for
+  // THIS one, and it must never be crowded to zero just because recall had more to say.
+  const remainingAfterNamed = Math.max(0, TOUCH_CAP - touches.size);
+  const graphReserved = Math.ceil(remainingAfterNamed / 2);
+  const memoryBudget = remainingAfterNamed - graphReserved;
+  for (const path of memoryCandidates.slice(0, memoryBudget)) {
+    touches.add(path);
+    evidence.add(path);
+  }
+  const graphBudget = TOUCH_CAP - touches.size;
+  for (const path of graphCandidates.slice(0, graphBudget)) touches.add(path);
 
   // 3. Checks. The test command is the backbone; the diff budget and citation truth
   // apply to every run. A repo with no discoverable test command is told so plainly
@@ -100,7 +263,8 @@ export function compileBrief(projectDir: string, intent: string, type: RunType, 
     intent,
     type,
     memories,
-    touches: [...touches].slice(0, 8),
+    touches: [...touches].slice(0, TOUCH_CAP),
+    evidenceTouches: [...evidence],
     checks,
     confidence: confidenceFor(projectDir, type, { memories: memories.length }),
     deny: DENY_LIST,
@@ -153,8 +317,15 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
   }
 
   lines.push("", "## Likely touch set", "");
-  lines.push(plan.touches.length ? plan.touches.map((path) => `- ${path}`).join("\n") : "_No prediction available._");
-  lines.push("", "Staying inside this set is expected but not mandatory — if the work belongs elsewhere, say so in your claim.");
+  if (plan.touches.length) {
+    lines.push(plan.touches.map((path) => `- ${path}`).join("\n"));
+    lines.push("", "Staying inside this set is expected but not mandatory — if the work belongs elsewhere, say so in your claim.");
+  } else {
+    // No path named, no correlated memory citation, no correlated graph match: a
+    // guess here would be the brief lying in the reassuring direction, so it says
+    // nothing rather than offer a set nobody should trust.
+    lines.push("_No prediction available — work from the intent above._");
+  }
 
   lines.push("", "## You will be held to these checks", "");
   for (const check of plan.checks) {

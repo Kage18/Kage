@@ -41,14 +41,15 @@ export function preflightForecast(projectDir: string, intent: string, type: RunT
     return null;
   }
   if (!plan.touches.length && !plan.memories.length) return null;
-  // The dependents question is asked of the MEMORY-CITED paths — the actual
-  // "briefs like this touched X" evidence — not the full predicted touch set.
-  // The code graph expands touches with every file matching the intent's terms,
-  // which happily includes the dependents themselves; blastRadiusFor would then
-  // exclude them as intra-change and the forecast would undercount exactly the
-  // risk it exists to show. Graph touches are the basis only when memory is silent.
-  const memoryPaths = [...new Set(plan.memories.flatMap((memory) => memory.paths))];
-  const blastBasis = memoryPaths.length ? memoryPaths : plan.touches;
+  // The dependents question is asked of `evidenceTouches` — paths the intent names
+  // outright, or memory citations that actually correlate with the intent's own
+  // terms — never the full predicted touch set. The code graph expands touches with
+  // every file matching the intent's terms, which happily includes the dependents
+  // themselves; blastRadiusFor would then exclude them as intra-change and the
+  // forecast would undercount exactly the risk it exists to show. compileBrief has
+  // already filtered and capped this list, so this is the one place that basis is
+  // computed — the modal and the brief read the same answer, not two guesses.
+  const blastBasis = plan.evidenceTouches.length ? plan.evidenceTouches : plan.touches;
   return {
     touches: plan.touches,
     memories: plan.memories.length,
