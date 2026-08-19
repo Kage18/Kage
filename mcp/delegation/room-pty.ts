@@ -21,6 +21,10 @@ import { spawn } from "node:child_process";
 import { isProcessAlive } from "./contract.js";
 import { readRoomSessionId, readRoomSupervisorRecord } from "./room-supervisor.js";
 import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
+import { MANAGER_ALLOWED_TOOLS } from "./manager-client.js";
+import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
+import { writeRoomMcpConfig } from "./room.js";
+import { createWorktree } from "./worktree.js";
 
 function roomDir(projectDir: string, session?: string): string {
   return roomDirFor(projectDir, session);
@@ -109,6 +113,74 @@ export function retireStructuredRoom(projectDir: string, session?: string): void
   }
 }
 
+/**
+ * The orchestrator's own worktree id/branch — the reserved counterpart to a run's id.
+ * Run worktrees already live under .agent_memory/worktrees/<runId> (worktree.ts); the
+ * orchestrator reuses that exact mechanism with a fixed id instead of a run id, so it
+ * gets a dedicated branch and directory the same way AO's orchestrator does
+ * (~/.ao/data/worktrees/<project>/orchestrator/...) — never the user's own checkout.
+ */
+export function orchestratorWorktreeId(session?: string): string {
+  const key = normalizeSessionKey(session);
+  return key === DEFAULT_SESSION ? "orchestrator" : `orchestrator-${key}`;
+}
+
+export function orchestratorBranch(session?: string): string {
+  return `kage/${orchestratorWorktreeId(session)}`;
+}
+
+/**
+ * Creates (or reuses) the orchestrator's worktree and drops the constitution into it as
+ * CLAUDE.md — the mechanism a real interactive session actually reads on its own,
+ * exactly what AO's own welcome banner points a user at with /init. This is deliberately
+ * NOT --append-system-prompt: that flag rides on `-p`, the headless protocol this
+ * session does not use, and a real session's own onboarding path is CLAUDE.md, not a
+ * hidden prompt injection a person watching the terminal would never see.
+ *
+ * Returns the worktree path to use as cwd, or projectDir unchanged when no worktree can
+ * be made (no git repo yet, no commits yet) — the orchestrator must still start rather
+ * than fail outright, same degraded-isolation fallback every other delegation entry
+ * point in this codebase already uses.
+ */
+export function ensureOrchestratorWorktree(projectDir: string, session?: string): string {
+  try {
+    const id = orchestratorWorktreeId(session);
+    const handle = createWorktree(projectDir, id, orchestratorBranch(session));
+    // Rewritten every time, even on a reused worktree: an updated constitution must
+    // reach an orchestrator that already has a worktree from a prior session.
+    writeFileSync(join(handle.path, "CLAUDE.md"), `${MANAGER_CONSTITUTION}\n`, "utf8");
+    return handle.path;
+  } catch {
+    return projectDir;
+  }
+}
+
+export interface RoomPtyLaunch {
+  args: string[];
+  cwd: string;
+}
+
+/**
+ * Pure arg-building, mirroring buildManagerArgs/buildRoomLaunch elsewhere in this
+ * package — testable without spawning a real pty or a real claude process.
+ */
+export function buildRoomPtyLaunch(options: { resumeId?: string; mcpConfigPath: string; cwd: string }): RoomPtyLaunch {
+  return {
+    args: [
+      ...(options.resumeId ? ["--resume", options.resumeId] : []),
+      "--mcp-config",
+      options.mcpConfigPath,
+      // Pre-approved so the orchestrator can act the moment it starts, same list the
+      // headless manager gets (MANAGER_ALLOWED_TOOLS) — everything else (file edits,
+      // shell) still goes through the normal interactive permission prompt, because
+      // unlike the headless path this session has a real terminal a person can answer.
+      "--allowedTools",
+      [...MANAGER_ALLOWED_TOOLS, "ToolSearch"].join(","),
+    ],
+    cwd: options.cwd,
+  };
+}
+
 export type RoomPtyOp = { op: "write"; data: string } | { op: "resize"; cols: number; rows: number } | { op: "status" };
 export type RoomPtyFrame = { kind: "data"; bytes: string } | { kind: "status"; alive: boolean } | { kind: "exit" };
 
@@ -162,12 +234,19 @@ export async function superviseRoomPty(projectDir: string, session?: string): Pr
   // reading its live process args). Kage now does the same: both modes resume the id
   // in room/session.json, so switching view keeps the conversation.
   const resumeId = readRoomSessionId(projectDir, session);
-  const args = resumeId ? ["--resume", resumeId] : [];
+  // The whole point of this being a REAL session: it needs Kage's own tools to actually
+  // orchestrate (kage_dispatch, kage_goal_status, kage_tell, ...), the same MCP config
+  // the headless room already writes — one config path, not a second one for this view.
+  const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
+  // Its own worktree/branch, never the user's checkout — mirrors how every run already
+  // gets one (worktree.ts), just under a reserved orchestrator id instead of a run id.
+  const cwd = ensureOrchestratorWorktree(projectDir, session);
+  const { args } = buildRoomPtyLaunch({ resumeId, mcpConfigPath, cwd });
   const term = pty.spawn(claudeBin, args, {
     name: "xterm-256color",
     cols: 100,
     rows: 30,
-    cwd: projectDir,
+    cwd,
     env: process.env as Record<string, string>,
   });
 
