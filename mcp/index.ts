@@ -84,7 +84,7 @@ import {
   type SetupAgent,
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
-import { capCollection } from "./response-cap.js";
+import { capCollection, capFields, responseCapLimit } from "./response-cap.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
 import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "./delegation/dispatch.js";
 import { steerRun } from "./delegation/steer.js";
@@ -581,11 +581,13 @@ export function listTools() {
     {
       name: "kage_memory_access",
       description:
-        "Report which repo-local memory packets have actually been recalled recently. This uses local ignored access telemetry and does not mutate shareable packet files.",
+        "Report which repo-local memory packets have actually been recalled recently. This uses local ignored access telemetry and does not mutate shareable packet files. On a repo with many packets, `entries` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max entries to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every entry, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -655,11 +657,13 @@ export function listTools() {
     {
       name: "kage_inbox",
       description:
-        "Return an actionable memory review inbox: pending packets, stale packets, duplicates, missing structured context, validation issues, and recommended actions.",
+        "Return an actionable memory review inbox: pending packets, stale packets, duplicates, missing structured context, validation issues, and recommended actions. On a repo with many packets, `items` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max items to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every item, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -704,12 +708,14 @@ export function listTools() {
     {
       name: "kage_pr_check",
       description:
-        "Check whether repo memory, code graph, memory graph, and stale-memory state are ready for merge. Leads with a human summary of team memories invalidated by the current change — relay it to the developer.",
+        "Check whether repo memory, code graph, memory graph, and stale-memory state are ready for merge. Leads with a human summary of team memories invalidated by the current change — relay it to the developer. On a repo with many stale packets, validation findings, or reconciliation items, those lists are each capped to the 10 most actionable entries by default (stale packets ranked by urgency), with true totals and truncation notes; pass limit or verbose for more.",
       annotations: { title: "Check memory readiness for merge", readOnlyHint: true },
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string", description: "Absolute path to the repository root." },
+          limit: { type: "number", description: "Max entries per capped list to return (default 10 each)." },
+          verbose: { type: "boolean", description: "Return every entry in every list, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -731,11 +737,13 @@ export function listTools() {
     {
       name: "kage_quality",
       description:
-        "Return memory quality metrics: useful memory ratio, duplicate burden, stale/wrong feedback, evidence coverage, path grounding, and review queue size.",
+        "Return memory quality metrics: useful memory ratio, duplicate burden, stale/wrong feedback, evidence coverage, path grounding, and review queue size. On a repo with many packets, `packets` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max scored packets to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every scored packet, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -743,11 +751,13 @@ export function listTools() {
     {
       name: "kage_memory_lifecycle",
       description:
-        "Return a repo-local memory lifecycle report: healthy, hot, cold, stale, disputed, ungrounded, pending, generated, and concrete review actions.",
+        "Return a repo-local memory lifecycle report: healthy, hot, cold, stale, disputed, ungrounded, pending, generated, and concrete review actions. `items` never includes packet body/summary text (open the packet file or recall it for that) and is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max items to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every item, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -755,12 +765,14 @@ export function listTools() {
     {
       name: "kage_memory_timeline",
       description:
-        "Return recent repo-memory activity for teammate handoff: added, updated, pending, and deprecated packets with review actions.",
+        "Return recent repo-memory activity for teammate handoff: added, updated, pending, and deprecated packets with review actions. On a repo with heavy recent memory churn, `entries` is capped to the 10 most recent by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
           days: { type: "number" },
+          limit: { type: "number", description: "Max entries to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every entry, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -805,7 +817,7 @@ export function listTools() {
     {
       name: "kage_supersede",
       description:
-        "Replace one repo-local memory packet with a newer one that corrects or obsoletes it. Marks the old packet superseded, links it to the replacement, and writes bidirectional lineage edges so the history stays traceable. Use this instead of deleting when new knowledge updates an old fact, or to resolve a contradiction surfaced by kage_conflicts. Mutates both packets on disk: the superseded packet is withheld from recall but kept for lineage.",
+        "Replace one repo-local memory packet with a newer one that corrects or obsoletes it. Marks the old packet superseded, links it to the replacement, and writes bidirectional lineage edges so the history stays traceable. Use this instead of deleting when new knowledge updates an old fact, or to resolve a contradiction surfaced by kage_conflicts. Mutates both packets on disk: the superseded packet is withheld from recall but kept for lineage. Returns ids, paths, and titles for confirmation, not the full packet bodies.",
       annotations: { title: "Supersede a memory packet with a newer one", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         type: "object",
@@ -821,11 +833,13 @@ export function listTools() {
     {
       name: "kage_conflicts",
       description:
-        "List repo-local memory packet pairs that contradict each other (same cited path, same subject, opposing claim). Resolve each with kage_supersede, or keep both intentionally.",
+        "List repo-local memory packet pairs that contradict each other (same cited path, same subject, opposing claim). Resolve each with kage_supersede, or keep both intentionally. On a repo with many contradictions, `pairs` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max pairs to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every pair, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -1975,22 +1989,38 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_memory_access") {
     const result = kageMemoryAccess(String(args?.project_dir ?? ""));
+    // Measured 416,841 chars on this repo: `entries` is one row per approved packet
+    // (every packet gets a recall-telemetry row even at zero uses), uncapped. `totals`
+    // already summarizes hot/cold/tracked counts; cap the row list itself.
+    const payload = capFields(result, args, [{ key: "entries", label: "access entries" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_memory_lifecycle") {
     const result = kageMemoryLifecycle(String(args?.project_dir ?? ""));
+    // Measured 1,859,953 chars on this repo (433 packets) - the single worst tool on the
+    // MCP surface. `items` carries every approved/pending packet's full `body` (1,050,730
+    // of those chars alone) plus `summary`, even though the CLI's non-JSON `lifecycle`
+    // command never prints either - only totals and the top-8 `recommendations` (already
+    // capped in kernel.ts). Drop body/summary (the caller can read the packet file, or
+    // recall it, if it needs the prose) and cap the array like every other per-packet list.
+    const leanItems = result.items.map(({ body: _body, summary: _summary, ...rest }) => rest);
+    const payload = capFields({ ...result, items: leanItems }, args, [{ key: "items", label: "lifecycle items" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_memory_timeline") {
     const result = kageMemoryTimeline(String(args?.project_dir ?? ""), Number(args?.days ?? 14));
+    // Measured 397,437 chars on this repo's default 14-day window: `entries` is one lean
+    // row per packet added/updated/deprecated in range, uncapped, on a repo with heavy
+    // recent memory churn. `totals` already gives the per-kind counts; cap the row list.
+    const payload = capFields(result, args, [{ key: "entries", label: "timeline entries" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
@@ -2022,15 +2052,32 @@ export async function callTool(name: string, args: Record<string, unknown> | und
       String(args?.replacement_packet_id ?? ""),
       typeof args?.reason === "string" ? args.reason : "",
     );
+    // On success, supersedeMemory() echoes BOTH full MemoryPacket objects back - title,
+    // body, and a freshness.path_fingerprints entry (sha256 + size per cited file, plus a
+    // per-symbol sha256) for each. Measured ~10,000 tokens for one call, vs. the two lines
+    // `kage supersede` prints for the identical operation. The caller already knows what
+    // it asked to supersede; it needs confirmation the mutation landed, not the packets
+    // replayed back wholesale. Drop the packet bodies, keep the ids/paths a caller needs
+    // to act (e.g. open the replacement) plus titles for a human-readable confirmation.
+    const { old_packet, replacement_packet, ...lean } = result;
+    const payload = {
+      ...lean,
+      old_packet_title: old_packet?.title,
+      replacement_packet_title: replacement_packet?.title,
+    };
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_conflicts") {
     const result = kageConflicts(String(args?.project_dir ?? ""));
+    // Measured 195,516 chars on this repo: `pairs` is one entry per contradicting packet
+    // pair (title-only references, already lean), uncapped. `count` already gives the
+    // true total; cap the pair list.
+    const payload = capFields(result, args, [{ key: "pairs", label: "conflict pairs" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
@@ -2086,8 +2133,13 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_inbox") {
     const result = memoryInbox(String(args?.project_dir ?? ""));
+    // Measured 432,613 chars on this repo: `items` is one lean entry per pending/stale/
+    // duplicate/missing-context packet and per validation finding, uncapped across the
+    // whole repo. `counts` and `recommendations` already summarize the same information;
+    // cap the raw list the same way kage_refresh caps stale_packets.
+    const payload = capFields(result, args, [{ key: "items", label: "inbox items" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
       isError: !result.ok,
     };
   }
@@ -2147,8 +2199,65 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // invalidated team memory" to the developer instead of burying it in JSON.
     const guard = formatStaleCatch(staleCatch(projectDir)).join("\n");
     const result = prCheck(projectDir);
+    // Measured 321,873 chars / ~80,000 tokens on this repo before this fix - a third of
+    // a context window for one mandated call. Almost all of it was two things: (1) four
+    // one-entry-per-packet arrays (stale_packets, validation.warnings/errors,
+    // memory_reconciliation.items) each individually lean but uncapped across the whole
+    // repo, same disease kage_refresh already had; and (2) prCheck's top-level `warnings`
+    // is built as `[...validation.warnings, ...ownWarnings]` (kernel.ts), so the same
+    // ~183 strings were being sent TWICE. Cap the arrays (stale_packets ranked by
+    // urgency, same as kage_refresh) and de-duplicate `warnings` down to prCheck's own
+    // summary lines - the capped validation.warnings already carries the rest.
+    const staleCapped = capCollection(
+      rankStalePacketsByUrgency(result.stale_packets),
+      responseCapLimit(args, result.stale_packets.length),
+      "stale packets",
+    );
+    const validationWarningsCapped = capCollection(
+      result.validation.warnings,
+      responseCapLimit(args, result.validation.warnings.length),
+      "validation warnings",
+    );
+    const validationErrorsCapped = capCollection(
+      result.validation.errors,
+      responseCapLimit(args, result.validation.errors.length),
+      "validation errors",
+    );
+    const reconciliationItems = result.memory_reconciliation?.items ?? [];
+    const reconciliationItemsCapped = capCollection(
+      reconciliationItems,
+      responseCapLimit(args, reconciliationItems.length),
+      "reconciliation items",
+    );
+    const validationWarningSet = new Set(result.validation.warnings);
+    const ownWarnings = result.warnings.filter((warning) => !validationWarningSet.has(warning));
+    const payload = {
+      ...result,
+      stale_packets: staleCapped.items,
+      stale_packets_total: staleCapped.total,
+      stale_packets_truncated: staleCapped.truncated,
+      validation: {
+        ...result.validation,
+        warnings: validationWarningsCapped.items,
+        warnings_total: validationWarningsCapped.total,
+        warnings_truncated: validationWarningsCapped.truncated,
+        errors: validationErrorsCapped.items,
+        errors_total: validationErrorsCapped.total,
+        errors_truncated: validationErrorsCapped.truncated,
+      },
+      memory_reconciliation: {
+        ...result.memory_reconciliation,
+        items: reconciliationItemsCapped.items,
+        items_total: reconciliationItemsCapped.total,
+        items_truncated: reconciliationItemsCapped.truncated,
+      },
+      warnings: ownWarnings,
+      warnings_total: result.warnings.length,
+      response_notes: [staleCapped.note, validationWarningsCapped.note, validationErrorsCapped.note, reconciliationItemsCapped.note]
+        .filter((note): note is string => Boolean(note)),
+    };
     return {
-      content: [{ type: "text", text: `${guard}\n\n${JSON.stringify(result, null, 2)}` }],
+      content: [{ type: "text", text: `${guard}\n\n${JSON.stringify(payload, null, 2)}` }],
       isError: !result.ok,
     };
   }
@@ -2166,8 +2275,12 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_quality") {
     const result = qualityReport(String(args?.project_dir ?? ""));
+    // Measured 292,400 chars on this repo: `packets` is one lean scored row per packet in
+    // the repo, uncapped. The scalar ratios/coverage percentages already summarize this;
+    // cap the row list.
+    const payload = capFields(result, args, [{ key: "packets", label: "scored packets" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
