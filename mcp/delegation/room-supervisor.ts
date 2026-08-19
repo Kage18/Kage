@@ -29,6 +29,7 @@ import {
   MANAGER_ALLOWED_TOOLS, collectManagerFacts, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
+import { readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
 import {
   appendGoalEvent,
   goalForRun,
@@ -84,22 +85,129 @@ export function readRoomSupervisorRecord(projectDir: string, session?: string): 
   }
 }
 
-export function readRoomSessionId(projectDir: string, session?: string): string | undefined {
+export interface RoomSessionMeta {
+  session_id?: string;
+  /** roomPermissionDigest() at the moment this session was (re)started — see resolveRoomResumeId. */
+  permission_digest?: string;
+}
+
+export function readRoomSessionMeta(projectDir: string, session?: string): RoomSessionMeta {
   const path = roomSessionPath(projectDir, session);
-  if (!existsSync(path)) return undefined;
+  if (!existsSync(path)) return {};
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { session_id?: string };
-    return parsed.session_id;
+    return JSON.parse(readFileSync(path, "utf8")) as RoomSessionMeta;
   } catch {
-    return undefined;
+    return {};
   }
 }
 
-export function writeRoomSessionId(projectDir: string, sessionId: string, session?: string): void {
+export function writeRoomSessionMeta(projectDir: string, meta: RoomSessionMeta, session?: string): void {
   const path = roomSessionPath(projectDir, session);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify({ session_id: sessionId }, null, 2)}\n`, "utf8");
+  writeFileSync(path, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
 }
+
+export function readRoomSessionId(projectDir: string, session?: string): string | undefined {
+  return readRoomSessionMeta(projectDir, session).session_id;
+}
+
+/** Preserves whatever digest is already on disk — only the id changes here. */
+export function writeRoomSessionId(projectDir: string, sessionId: string, session?: string): void {
+  const existing = readRoomSessionMeta(projectDir, session);
+  writeRoomSessionMeta(projectDir, { ...existing, session_id: sessionId }, session);
+}
+
+/**
+ * The effective permission surface a headless/pty manager session is granted: the tool
+ * allowlist plus which MCP servers are wired in (read back from the config file actually
+ * written for this launch, not re-derived, so a future change to the server set is
+ * caught the same way a change to the tool list is). Verified NOT to be the mechanism
+ * behind the observed "needs your approval" stall (see room-permission-trap.test.ts and
+ * the claim for this run for the live `claude --resume` experiments that ruled it out) —
+ * this digest exists to catch a DIFFERENT, real bug: a long-lived supervisor process
+ * that was spawned under an older, smaller MANAGER_ALLOWED_TOOLS never re-spawns on its
+ * own, so it keeps running with args baked in at whatever moment it started, for as long
+ * as the process stays alive. A digest mismatch is the signal that the currently-recorded
+ * session was (or may have been) started under a different permission surface than the
+ * one about to spawn a fresh process now.
+ */
+export function roomPermissionDigest(mcpConfigPath: string): string {
+  let mcpServerNames: string[] = [];
+  try {
+    const config = JSON.parse(readFileSync(mcpConfigPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+    mcpServerNames = Object.keys(config.mcpServers ?? {}).sort();
+  } catch {
+    // A missing/unreadable config file still yields a stable (empty-server) digest
+    // rather than throwing — the caller's own writeRoomMcpConfig call already handles
+    // the write side; this is read-only and must never block a room from starting.
+  }
+  const allowedTools = [...MANAGER_ALLOWED_TOOLS, "ToolSearch"];
+  return createHash("sha256").update(JSON.stringify({ allowedTools, mcpServerNames })).digest("hex").slice(0, 16);
+}
+
+/**
+ * Whether a (re)spawning supervisor should pass --resume, and whether it is dropping a
+ * previously-recorded session id to do so. Pure so the two cases that matter most — an
+ * unchanged permission surface keeps resuming, a changed one starts fresh — are directly
+ * unit-testable without spawning a process (mcp/room-permission-trap.test.ts).
+ *
+ * No stored digest at all (a session.json from before this field existed, or a thread
+ * that has never started) is treated as "unknown, not a change" — trusting resume rather
+ * than gratuitously restarting every existing conversation the moment this ships.
+ */
+export function resolveRoomResumeId(
+  meta: RoomSessionMeta,
+  currentDigest: string,
+): { resumeId?: string; digestChanged: boolean } {
+  const digestChanged = Boolean(meta.permission_digest) && meta.permission_digest !== currentDigest;
+  return { resumeId: digestChanged ? undefined : meta.session_id, digestChanged };
+}
+
+// ---------------------------------------------------------------------------
+// Safety net: a manager that asks the user to "grant permission" for a tool it already
+// holds is not describing reality — headless (-p) and pty rooms have no permission
+// dialog anywhere in their path. Rewriting the digest is the real fix (above); this
+// catches whatever slips past it — a race, a manually-copied session.json, a model that
+// misreads an unrelated error as a permission denial — and turns a "wait forever"
+// instruction into something the user can actually act on.
+const PERMISSION_STUCK_PATTERN = /\b(grant(?:ed)?\s+permission|needs?\s+your\s+approval|when\s+prompted|permission\s+to\s+use)\b/i;
+
+/**
+ * Returns the bare tool name (e.g. "kage_goal_create") the manager named, when its own
+ * reply both (a) uses stuck-waiting-for-a-prompt language and (b) names a tool that is
+ * ALREADY in MANAGER_ALLOWED_TOOLS — i.e. the manager is asking for something that both
+ * cannot happen (no dialog exists) and should not be necessary (the tool is already
+ * allowed). Returns null on ordinary text, and null when the named tool genuinely is
+ * outside the manager's surface — that is a correct, honest denial, not a stuck state.
+ */
+export function detectPermissionStuckMention(text: string): string | null {
+  if (!PERMISSION_STUCK_PATTERN.test(text)) return null;
+  for (const fullName of MANAGER_ALLOWED_TOOLS) {
+    const bareName = fullName.replace("mcp__kage__", "");
+    if (text.includes(fullName) || text.includes(bareName)) return bareName;
+  }
+  return null;
+}
+
+function permissionStuckNote(toolName: string): string {
+  return (
+    `(Kage note: ${toolName} is already permitted for this session — there is no permission ` +
+    "prompt to grant in this headless room. If this repeats, try again in a moment or reopen the Room.)"
+  );
+}
+
+/** Last 8 turns, replayed as plain text ahead of the real first message — same bound and
+ * "User:"/"You:" convention as composePrompt (manager-client.ts), reused here because a
+ * freshly-started (non-resumed) session has none of a resumed session's native context. */
+function historyReplayPrefix(history: RoomHistoryTurn[]): string {
+  if (!history.length) return "";
+  const lines = history.slice(-8).map((turn) => `${turn.role === "you" ? "User" : "You"}: ${turn.text}`);
+  return `[This session restarted — recent conversation for context:]\n${lines.join("\n")}\n\n`;
+}
+
+const SESSION_RESTART_NOTICE =
+  "[kage] this session restarted because the manager's tool permissions changed since last time — " +
+  "recent conversation was replayed so the thread continues.";
 
 export type RoomControlOp = { op: "ask"; message: string } | { op: "status" } | { op: "stop" };
 
@@ -159,7 +267,12 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
   const dir = roomDir(projectDir, session);
   mkdirSync(dir, { recursive: true });
   const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
-  const resumeId = readRoomSessionId(projectDir, session);
+  const currentDigest = roomPermissionDigest(mcpConfigPath);
+  const { resumeId, digestChanged } = resolveRoomResumeId(readRoomSessionMeta(projectDir, session), currentDigest);
+  // Persisted immediately, before the child even spawns: a crash before the first turn
+  // completes must still leave the NEW digest on disk, not the stale one that triggered
+  // this restart — otherwise the next spawn would see the same mismatch and loop.
+  writeRoomSessionMeta(projectDir, { session_id: resumeId, permission_digest: currentDigest }, session);
 
   const args = buildHeadlessRoomArgs({ resumeId, mcpConfigPath });
   const child: ChildProcess = spawn("claude", args, { cwd: projectDir, stdio: ["pipe", "pipe", "pipe"] });
@@ -167,6 +280,10 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
   let sessionId: string | undefined = resumeId;
   let busy = false;
   let pending = "";
+  // True only until the FIRST turn of a freshly-restarted (non-resumed) session is sent
+  // or completed — a resumed session (digestChanged === false) never touches either.
+  let firstTurnPending = digestChanged;
+  let noticePending = digestChanged;
   // Set only while a turn is in flight, so stdout parsing can route events to the
   // control connection that asked for them instead of the next caller entirely.
   let activeTurn: { onEvent: (event: RoomStreamEvent) => void; tools: string[]; done: (event: RoomStreamEvent) => void } | null = null;
@@ -198,9 +315,19 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
           const turn = activeTurn;
           activeTurn = null;
           busy = false;
+          let text = guarded.text;
+          // Safety net: the manager asking to "grant permission" for a tool it already
+          // holds cannot be satisfied — there is no dialog in this headless path — so
+          // replace the impossible instruction with something the user can act on.
+          const stuckTool = detectPermissionStuckMention(text);
+          if (stuckTool) text = `${text}\n\n${permissionStuckNote(stuckTool)}`;
+          if (noticePending) {
+            text = `${SESSION_RESTART_NOTICE} ${text}`;
+            noticePending = false;
+          }
           turn.done({
             kind: "final",
-            text: guarded.text,
+            text,
             tools: turn.tools,
             ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
           });
@@ -274,7 +401,15 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
           }
         },
       };
-      child.stdin?.write(userFrame(op.message));
+      // A freshly-restarted (non-resumed) session has none of a resumed session's
+      // native context — replay recent history ahead of the real first message so the
+      // thread survives the restart instead of the manager waking up amnesiac.
+      let outgoing = op.message;
+      if (firstTurnPending) {
+        outgoing = `${historyReplayPrefix(readRoomHistory(projectDir, session))}${op.message}`;
+        firstTurnPending = false;
+      }
+      child.stdin?.write(userFrame(outgoing));
     });
     connection.on("error", () => {
       // A dropped connection mid-turn must not crash the room; the turn still runs to

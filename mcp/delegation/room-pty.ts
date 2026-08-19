@@ -19,7 +19,13 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { isProcessAlive } from "./contract.js";
-import { readRoomSessionId, readRoomSupervisorRecord } from "./room-supervisor.js";
+import {
+  readRoomSessionMeta,
+  readRoomSupervisorRecord,
+  resolveRoomResumeId,
+  roomPermissionDigest,
+  writeRoomSessionMeta,
+} from "./room-supervisor.js";
 import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
 import { MANAGER_ALLOWED_TOOLS } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
@@ -233,11 +239,18 @@ export async function superviseRoomPty(projectDir: string, session?: string): Pr
   // and the session id is the shared handle between its renderings (confirmed by
   // reading its live process args). Kage now does the same: both modes resume the id
   // in room/session.json, so switching view keeps the conversation.
-  const resumeId = readRoomSessionId(projectDir, session);
   // The whole point of this being a REAL session: it needs Kage's own tools to actually
   // orchestrate (kage_dispatch, kage_goal_status, kage_tell, ...), the same MCP config
   // the headless room already writes — one config path, not a second one for this view.
   const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
+  // Same trap the headless room has: a resumed pty session held open across a
+  // MANAGER_ALLOWED_TOOLS change would otherwise carry whatever permission surface was
+  // baked in at whenever it was first spawned. Same digest, same pure decision function
+  // as room-supervisor.ts — see roomPermissionDigest's own comment for why this exists
+  // and what it does NOT fix (--resume itself was verified fine; see this run's claim).
+  const currentDigest = roomPermissionDigest(mcpConfigPath);
+  const { resumeId, digestChanged } = resolveRoomResumeId(readRoomSessionMeta(projectDir, session), currentDigest);
+  writeRoomSessionMeta(projectDir, { session_id: resumeId, permission_digest: currentDigest }, session);
   // Its own worktree/branch, never the user's checkout — mirrors how every run already
   // gets one (worktree.ts), just under a reserved orchestrator id instead of a run id.
   const cwd = ensureOrchestratorWorktree(projectDir, session);
@@ -277,6 +290,16 @@ export async function superviseRoomPty(projectDir: string, session?: string): Pr
     if (scrollback.length > SCROLLBACK_LIMIT) scrollback = scrollback.slice(-SCROLLBACK_LIMIT);
     broadcast({ kind: "data", bytes: data });
   });
+
+  // Say so, even in a raw terminal: this view has no structured reply text to prepend a
+  // notice to (guardManagerProse's post-processing never runs here — raw bytes only), so
+  // the notice is broadcast as its own terminal line instead, before the real session's
+  // own output starts. Scrollback keeps it visible to a client that attaches later too.
+  if (digestChanged) {
+    const notice = "[kage] session restarted — tool permissions changed since last time, starting fresh.\r\n\r\n";
+    scrollback += notice;
+    broadcast({ kind: "data", bytes: notice });
+  }
 
   const record: RoomPtyRecord = { pid: process.pid, socket: roomPtySocketPath(projectDir, session), started_at: new Date().toISOString() };
   writeFileSync(roomPtyRecordPath(projectDir, session), `${JSON.stringify(record, null, 2)}\n`, "utf8");
