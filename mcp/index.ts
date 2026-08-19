@@ -1238,6 +1238,11 @@ const DELEGATION_TOOLS = [
           description:
             "Attach this run to a DIFFERENT goal than the room thread's active one. Runs dispatched from a room thread with an active goal attach to it automatically — you only need this to override that.",
         },
+        budget_usd: {
+          type: "number",
+          description:
+            "Raise this run's usd budget above the repo default — for a task you judge worth more (e.g. a large synthesis job), not for every run. Always wins over the repo's configured budgets.usd.",
+        },
       },
       required: ["project_dir", "intent"],
     },
@@ -1491,9 +1496,17 @@ async function runDelegationTool(
     // server process — the exact defect dispatchDetached fixed for the CLI on 2026-08-18.
     // Unlike the CLI, this tool cannot block on followRun to wait for a verdict — it must
     // return promptly with the run id so the caller can poll kage_task / kage_room_state.
+    const budgetUsd = typeof args?.budget_usd === "number" ? args.budget_usd : undefined;
     const held = await dispatchRun(
       projectDir,
-      { intent: String(args?.intent ?? ""), type, judgment: judged, briefOnly: true, ...(goalId ? { goalId } : {}) },
+      {
+        intent: String(args?.intent ?? ""),
+        type,
+        judgment: judged,
+        briefOnly: true,
+        ...(goalId ? { goalId } : {}),
+        ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+      },
       adapter,
     );
     const goalWarning = held.goalWarning ? `\n\n${held.goalWarning}` : "";

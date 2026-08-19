@@ -231,6 +231,7 @@ export function renderBriefCard(task: TaskRecord, plan: BriefPlan): string {
     "│ Knows",
     ...memoryLines.map((line) => `│${line}`),
     `│ Checks     ${plan.checks.map((check) => check.cmd ?? check.id).join(" · ")}`,
+    `│ Budget     $${task.budgets.usd.toFixed(2)} · ${task.budgets.minutes} min · ${task.budgets.diff_lines} diff lines`,
     `│ Agent      ${task.agent} · worktree ${task.branch}`,
     `│ Confidence ${plan.confidence.band} (${plan.confidence.basis})`,
     "└────────────────────────────────────────────────────────────────",

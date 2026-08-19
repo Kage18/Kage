@@ -520,10 +520,20 @@ export interface RunBudgetCheck {
  */
 export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
   if (spend.usd_est > budgets.usd) {
-    return { exceeded: true, reason: `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget` };
+    return {
+      exceeded: true,
+      reason:
+        `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget — raise it with ` +
+        "`kage dispatch --budget-usd <n>` for just this run, or set `budgets.usd` in .agent_memory/config.json for every run",
+    };
   }
   if (spend.minutes > budgets.minutes) {
-    return { exceeded: true, reason: `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget` };
+    return {
+      exceeded: true,
+      reason:
+        `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget — raise it by setting ` +
+        "`budgets.minutes` in .agent_memory/config.json",
+    };
   }
   return { exceeded: false };
 }
@@ -802,6 +812,10 @@ export function renderRunCard(task: TaskRecord, claim?: ClaimRecord | null): str
   const lines = [renderRunLine(task)];
   const lastNote = [...task.state_history].reverse().find((change) => change.note)?.note;
   if (task.state === "blocked" && lastNote) lines.push(`  blocked  ${lastNote}`);
+  // A budget halt (or any other kernel stop) names both figures and how to raise the
+  // limit — a "stopped" card that dropped that note left the operator with nothing
+  // to act on, which is the exact defect this field exists to prevent.
+  if (task.state === "stopped" && lastNote) lines.push(`  stopped  ${lastNote}`);
   if (claim) {
     const checksRun = claim.checks.filter((check) => check.result !== "not_run").length;
     const checksPassed = claim.checks.filter((check) => check.result === "pass").length;
