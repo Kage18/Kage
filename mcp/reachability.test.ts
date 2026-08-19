@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
-import { findOrphans } from "./delegation/reachability.js";
+import { findOrphans, runReachabilityCheck } from "./delegation/reachability.js";
 import { createRun, runDir, runTitle, transitionRun, type TaskRecord } from "./delegation/contract.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { superviseRun } from "./delegation/supervisor.js";
@@ -47,6 +47,19 @@ function write(dir: string, relPath: string, content: string): void {
   const full = join(dir, relPath);
   mkdirSync(join(full, ".."), { recursive: true });
   writeFileSync(full, content, "utf8");
+}
+
+function gitInit(dir: string): void {
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, stdio: "ignore" });
+}
+
+function gitCommitAll(dir: string, message: string): void {
+  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore", env: GIT_ENV });
+  execFileSync("git", ["commit", "-m", message], { cwd: dir, stdio: "ignore", env: GIT_ENV });
+}
+
+function gitStageAll(dir: string): void {
+  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore", env: GIT_ENV });
 }
 
 test("RULE A: an export referenced only by a test file is reported as an orphan", () => {
@@ -116,6 +129,127 @@ test("RULE B: a field with a non-test writer and no reader is reported", () => {
   const finding = findings.find((f) => f.symbol === "agent_pid");
   assert.ok(finding, "a field written somewhere but never read outside its own declaration is reported");
   assert.equal(finding?.rule, "write-only-field");
+});
+
+// REGRESSION — measured against this repo's real tree: delivered_at (goal.ts) used to be
+// reported as write-only even though app-client.ts:2147ish reads it, because the read sits
+// on the "true" branch of a ternary (`delivered ? record.delivered_at : record.at`) — the
+// `:` of the ternary matched the SAME `\bname\s*:` regex used to detect an object-literal
+// write (`{ delivered_at: value }`), so the line was misclassified as a write and the read
+// was discarded outright. Reverting the `(?<!\.)` lookbehind on WRITE_COLON_LITERAL in
+// reachability.ts makes this test fail by reclassifying the ternary line as a writer again.
+test("PRECISION: a field read only via a ternary's `.field : other` is a read, not a false write", () => {
+  const dir = tempProject();
+  write(dir, "mcp/cli.ts", "export function main() {}\n");
+  write(dir, "mcp/ternary-record.ts", ["export interface Steer {", "  delivered_at?: string;", "}", ""].join("\n"));
+  write(
+    dir,
+    "mcp/ternary-reader.ts",
+    [
+      "export function renderRow(delivered, record) {",
+      "  return delivered ? record.delivered_at : record.at;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const findings = findOrphans(dir, ["mcp/ternary-record.ts"]);
+  const finding = findings.find((f) => f.symbol === "delivered_at");
+  assert.ok(finding, "a field read only from a ternary's true-branch is still one-sided (no writer here) and must be reported");
+  assert.equal(
+    finding?.rule,
+    "read-only-field",
+    "the ternary's `:` must not be mistaken for an object-literal write — this field is read-only, not write-only",
+  );
+});
+
+// REGRESSION — measured against this repo's real tree the day this fix landed: findOrphans
+// over goal.ts, ratify.ts and contract.ts used to report autonomy, files_scope and
+// delivered_at as one-sided fields; work landing after Rule B was written made all three
+// genuinely two-sided (a read or write the old detection missed), and the wall of ~198
+// names on one real receipt was mostly the OTHER failure this run fixes — Rule B scanning
+// every field in a changed file's interfaces rather than just the ones this run's own diff
+// touched. Asserted directly against this repo's current tree, the same pattern the
+// PRECISION test above already uses for Rule A.
+test("REGRESSION: autonomy, files_scope and delivered_at are not reported as one-sided fields", () => {
+  const repoRoot = join(__dirname, "..", "..");
+  const findings = findOrphans(repoRoot, ["mcp/delegation/goal.ts", "mcp/delegation/ratify.ts", "mcp/delegation/contract.ts"]);
+  const symbols = findings.map((f) => f.symbol);
+  for (const shouldNotFlag of ["autonomy", "files_scope", "delivered_at"]) {
+    assert.ok(!symbols.includes(shouldNotFlag), `${shouldNotFlag} is genuinely two-sided — it must not be reported as read-only or write-only`);
+  }
+});
+
+// DIFF SCOPING — the fix's primary claim: Rule B must only consider fields this run's own
+// diff actually added or modified, not every field on every interface in a touched file.
+// old_field predates the staged diff (committed, untouched by it) and is one-sided exactly
+// like new_field; only new_field — genuinely added by this "run" — must be reported.
+// Reverting the addedLineNumbers() scoping in findOrphanFields (or its call site) makes
+// this test fail by reporting old_field too.
+test("DIFF SCOPING: a one-sided field pre-dating this run's diff is not reported, even though it's genuinely one-sided", () => {
+  const dir = tempProject();
+  gitInit(dir);
+  write(dir, "mcp/cli.ts", "export function main() {}\n");
+  write(dir, "mcp/scoped-record.ts", ["export interface ScopedRecord {", "  old_field?: number;", "}", ""].join("\n"));
+  write(
+    dir,
+    "mcp/scoped-writer.ts",
+    ["export function patchOld(x) {", "  patch(x, { old_field: 1 });", "}", "function patch(a, b) {}", ""].join("\n"),
+  );
+  gitCommitAll(dir, "seed: old_field already one-sided, already committed");
+
+  // This run's own diff: add a second, equally one-sided field to the same interface,
+  // without touching old_field at all.
+  write(
+    dir,
+    "mcp/scoped-record.ts",
+    ["export interface ScopedRecord {", "  old_field?: number;", "  new_field?: number;", "}", ""].join("\n"),
+  );
+  write(
+    dir,
+    "mcp/scoped-writer2.ts",
+    ["export function patchNew(x) {", "  patch(x, { new_field: 1 });", "}", "function patch(a, b) {}", ""].join("\n"),
+  );
+  gitStageAll(dir);
+
+  const findings = findOrphans(dir, ["mcp/scoped-record.ts", "mcp/scoped-writer2.ts"]);
+  const symbols = findings.map((f) => f.symbol);
+  assert.ok(!symbols.includes("old_field"), "old_field predates this run's diff — it must be out of Rule B's scope regardless of its own one-sidedness");
+  assert.ok(symbols.includes("new_field"), "new_field was genuinely added by this run's diff and is genuinely one-sided — Rule B must still catch it");
+});
+
+// RECEIPT CAP — the acceptance bar's other half: even a run that genuinely touches many
+// fields at once must produce a receipt line short enough for a human to read, not a wall
+// of names. runReachabilityCheck's own `expect` string (what renderClaimCard prints on the
+// check's receipt line) caps how many names it lists and summarizes the remainder as a
+// count instead. findOrphans itself is untouched — the cap lives only in the receipt text.
+test("RECEIPT CAP: a run with many one-sided fields still produces a short, readable expect line", () => {
+  const dir = tempProject();
+  gitInit(dir);
+  write(dir, "mcp/cli.ts", "export function main() {}\n");
+  const FIELD_COUNT = 25;
+  const interfaceLines = ["export interface ManyFields {"];
+  const writerLines: string[] = [];
+  for (let i = 0; i < FIELD_COUNT; i++) {
+    interfaceLines.push(`  field_${i}?: number;`);
+    writerLines.push(`export function patch${i}(x) { patch(x, { field_${i}: ${i} }); }`);
+  }
+  interfaceLines.push("}", "");
+  writerLines.push("function patch(a, b) {}", "");
+  write(dir, "mcp/many-fields.ts", interfaceLines.join("\n"));
+  write(dir, "mcp/many-writers.ts", writerLines.join("\n"));
+  gitStageAll(dir);
+
+  const findings = findOrphans(dir, ["mcp/many-fields.ts", "mcp/many-writers.ts"]);
+  assert.ok(findings.length >= FIELD_COUNT, `fixture must actually produce ${FIELD_COUNT}+ findings for this assertion to mean anything`);
+
+  const { checks } = runReachabilityCheck(dir, "receipt-cap-run", dir, ["mcp/many-fields.ts", "mcp/many-writers.ts"]);
+  const check = checks.find((c) => c.id === "reachability");
+  assert.ok(check, "runReachabilityCheck must always emit its own check outcome");
+  const expect = check!.expect ?? "";
+  const namedCount = (expect.match(/field_\d+/g) ?? []).length;
+  assert.ok(namedCount <= 12, `expect line names ${namedCount} fields — must be capped to a short, readable count, got: ${expect}`);
+  assert.match(expect, /\+\d+ more/, "the remainder past the cap must be summarized as a count, not silently dropped");
 });
 
 test("ESCAPE HATCH: '// reachability: <reason>' exempts an otherwise-orphaned export", () => {

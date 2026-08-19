@@ -11,10 +11,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listRuns, readRun } from "./delegation/contract.js";
+import { listRuns, readRun, runTranscriptPath } from "./delegation/contract.js";
 import { writeDelegationConfig } from "./delegation/config.js";
 import { callTool } from "./index.js";
 
@@ -48,6 +48,29 @@ async function waitFor(check: () => boolean, timeoutMs = 10_000): Promise<void> 
   }
 }
 
+// The stub adapter (delegation/adapters/stub.ts) appends a `{"kind":"final",...}` line to
+// the run's transcript only once its (possibly delayed) work is done — after the artificial
+// KAGE_STUB_RUN_DELAY_MS sleep, the file edit, and the "tool" log line. Its presence is a
+// direct, structural signal that the agent has finished; its absence is a direct signal it
+// has not. Missing entirely (the detached supervisor hasn't even started writing yet) also
+// means "not finished" — never treated as a read failure.
+function transcriptHasFinalEvent(project: string, runId: string): boolean {
+  let content: string;
+  try {
+    content = readFileSync(runTranscriptPath(project, runId), "utf8");
+  } catch {
+    return false;
+  }
+  return content.split("\n").some((line) => {
+    if (!line.trim()) return false;
+    try {
+      return (JSON.parse(line) as { kind?: string }).kind === "final";
+    } catch {
+      return false;
+    }
+  });
+}
+
 test("REGRESSION: kage_dispatch returns before the hired agent finishes, and the run keeps working detached", async () => {
   const project = tempGitProject();
   // Holds the stub agent open for 3s so we can observe the run genuinely in flight at
@@ -55,24 +78,29 @@ test("REGRESSION: kage_dispatch returns before the hired agent finishes, and the
   // already have finished (or, if this process died, taken the run down with it).
   process.env.KAGE_STUB_RUN_DELAY_MS = "3000";
   try {
-    const startedAt = Date.now();
     const response = await callTool("kage_dispatch", {
       project_dir: project,
       intent: "leave a durable note via the manager",
       type: "chore",
       agent: "stub",
     });
-    const elapsedMs = Date.now() - startedAt;
     const responseText = response.content[0].text as string;
-
-    // REVERT CHECK: before this fix, callTool awaited dispatchRun end-to-end, so this
-    // call would take >= 3000ms (the stub's artificial delay) and return a full claim
-    // card. FAILS if kage_dispatch is ever changed back to await the agent inline.
-    assert.ok(elapsedMs < 2000, `kage_dispatch must return promptly, took ${elapsedMs}ms against a 3000ms agent delay`);
 
     const runs = listRuns(project);
     assert.equal(runs.length, 1, "the run must exist even though the agent has not finished");
     const runId = runs[0].id;
+
+    // REVERT CHECK: before this fix, callTool awaited dispatchRun end-to-end, so by the
+    // time it resolved the stub would already have slept its full delay and appended its
+    // "kind":"final" transcript line. This asserts the ORDERING the test actually cares
+    // about — kage_dispatch returns before the agent finishes — directly off the run's own
+    // transcript, rather than off a wall-clock margin: FAILS if kage_dispatch is ever
+    // changed back to await the agent inline, without depending on how fast any given
+    // machine happens to run the synchronous brief-compile-and-handoff path.
+    assert.ok(
+      !transcriptHasFinalEvent(project, runId),
+      "kage_dispatch must return before the stub's delayed agent work (and its transcript's final event) completes",
+    );
     assert.ok(responseText.includes(runId), "the tool must return the run id promptly, not just a bare acknowledgement");
 
     // Still in flight at the moment the tool returned — this is what a synchronous

@@ -20,6 +20,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { CheckOutcome } from "./contract.js";
+import { git } from "./git.js";
 import { writeEvidence } from "./verify.js";
 
 export type OrphanRule = "orphan-export" | "write-only-field" | "read-only-field";
@@ -542,7 +543,15 @@ function findOrphanExports(analysis: AnalysisResult, changedFiles: Set<string>):
 
 const FIELD_LINE = /^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\??:\s*[^(]/;
 const WRITE_DOT_ASSIGN = (name: string) => new RegExp(`\\.${name}\\s*=(?!=)`);
-const WRITE_COLON_LITERAL = (name: string) => new RegExp(`\\b${name}\\s*:`);
+// Object-literal construction (`{ name: value }`) is a write; a ternary's `cond ? a :
+// b` is not, even though `.name :` matches `\bname\s*:` just as well — the two are
+// textually identical apart from what comes immediately before the field name. Real
+// construction never has a `.` directly before the key; a ternary's true-branch
+// naming the same field via property access (`.name`) always does. The lookbehind is
+// what told delivered_at's app-client.ts reader apart from a write: `record.delivered_at
+// : record.at` used to be misread as `delivered_at:` object-literal syntax, discarding
+// the read and leaving the field looking one-sided.
+const WRITE_COLON_LITERAL = (name: string) => new RegExp(`(?<!\\.)\\b${name}\\s*:`);
 const READ_DOT_ACCESS = (name: string) => new RegExp(`\\.${name}\\b(?!\\s*=(?!=))`);
 
 function isWithinScopeKind(analysis: AnalysisResult, file: string, line: number, kinds: ScopeKind[]): boolean {
@@ -551,14 +560,57 @@ function isWithinScopeKind(analysis: AnalysisResult, file: string, line: number,
   return parsed.scopes.some((scope) => kinds.includes(scope.kind) && line >= scope.startLine && line <= scope.endLine);
 }
 
+// Hunk headers from `git diff --unified=0` look like `@@ -a,b +c,d @@` — b/d default to
+// 1 when omitted. Only the "+" side matters here: the line numbers this diff added or
+// modified in the file's CURRENT content.
+const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+
+function addedLineNumbersFromDiff(diffOutput: string): Set<number> {
+  const added = new Set<number>();
+  for (const line of diffOutput.split("\n")) {
+    const m = HUNK_HEADER_RE.exec(line);
+    if (!m) continue;
+    const start = Number(m[1]);
+    const count = m[2] !== undefined ? Number(m[2]) : 1;
+    for (let ln = start; ln < start + count; ln++) added.add(ln);
+  }
+  return added;
+}
+
+// Which lines of `file` (repo-relative) this run's own diff actually added or modified,
+// or null when no diff could be computed — a repo with no `.git` (most of this file's
+// own fixtures), a fresh checkout with no HEAD yet, or any other git failure. Callers
+// treat null as "scan the whole file", the pre-existing behavior, never as "nothing
+// changed" — the two are not the same claim, and confusing them would silently blind
+// the check whenever git can't be asked.
+function addedLineNumbers(projectDir: string, file: string): Set<number> | null {
+  const result = git(projectDir, ["diff", "--cached", "--unified=0", "--", file]);
+  if (!result.ok) return null;
+  return addedLineNumbersFromDiff(result.stdout);
+}
+
 // RULE B — a field only ever written (never read outside its own declaration) or only
 // ever read (never written outside a test) is exactly as dead as an unreached function:
 // the supervisor_pid case, where the write existed but the one call path that mattered
 // never made it, so the read was permanently starved of the value it depended on.
-function findOrphanFields(analysis: AnalysisResult, changedFiles: Set<string>): OrphanFinding[] {
+//
+// Scoped to the run's own diff: a changed FILE does not mean every interface it
+// declares is in play, only the fields this run actually added or modified. Before this,
+// touching one field in contract.ts or kernel.ts (both hold large, mostly-untouched
+// interfaces) flagged the entire type surface — 198 names on one real receipt, a wall
+// of text nobody read. `projectDir` doubles as the git worktree to diff; when no diff
+// can be computed (no `.git`, no HEAD yet), every field in a changed file's interfaces
+// is checked instead, exactly as before this fix.
+function findOrphanFields(analysis: AnalysisResult, changedFiles: Set<string>, projectDir: string): OrphanFinding[] {
   const findings: OrphanFinding[] = [];
+  const diffCache = new Map<string, Set<number> | null>();
+  const addedLinesFor = (file: string): Set<number> | null => {
+    if (!diffCache.has(file)) diffCache.set(file, addedLineNumbers(projectDir, file));
+    return diffCache.get(file)!;
+  };
   for (const [file, parsed] of analysis.parsedByFile) {
     if (!changedFiles.has(file) || isTestFile(file)) continue;
+    const addedLines = addedLinesFor(file);
     for (const scope of parsed.scopes) {
       if (scope.kind !== "interface") continue;
       const seen = new Set<string>();
@@ -570,6 +622,10 @@ function findOrphanFields(analysis: AnalysisResult, changedFiles: Set<string>): 
         const fieldName = m[1];
         if (seen.has(fieldName)) continue;
         seen.add(fieldName);
+        // null (no diff computable) falls through to the old whole-file scan; a real,
+        // computed diff that simply never touched this line means the field predates
+        // this run and is out of scope for it, whatever its read/write shape.
+        if (addedLines && !addedLines.has(ln)) continue;
         const fieldExempt = exemptionReason(parsed.lines, ln - 1);
         if (fieldExempt) continue;
 
@@ -627,7 +683,7 @@ export function findOrphans(projectDir: string, changedFiles: string[]): OrphanF
   if (!existsSync(mcpRoot)) return [];
   const analysis = analyze(projectDir, mcpRoot);
   const changed = new Set(changedFiles);
-  return [...findOrphanExports(analysis, changed), ...findOrphanFields(analysis, changed)];
+  return [...findOrphanExports(analysis, changed), ...findOrphanFields(analysis, changed, projectDir)];
 }
 
 export interface ReachabilityCheckResult {
@@ -642,6 +698,15 @@ export interface ReachabilityCheckResult {
 // renderClaimCard prints on the check's own receipt line) as well as in the full evidence
 // log — a false positive that could block a merge would get this check disabled inside a
 // week, and then nobody would ever see a true positive again either.
+// A human reads `expect` on the receipt's own check line — the full findings list
+// belongs in the evidence log, not there. Before this cap, one real receipt listed 198
+// names on that single line (a touched large-interface file's entire type surface,
+// pre-diff-scoping); even with scoping tightened, a run that genuinely touches many
+// fields at once should still produce a line short enough to read, not another wall of
+// text. 12 names is enough to act on at a glance; the rest collapse to a count with a
+// pointer to the evidence log, which still holds every one of them in full.
+const MAX_RECEIPT_NAMES = 12;
+
 export function runReachabilityCheck(
   projectDir: string,
   runId: string,
@@ -653,10 +718,11 @@ export function runReachabilityCheck(
     ? findings.map((f) => `${f.rule.toUpperCase()} ${f.symbol} (${f.file}:${f.line}) — ${f.detail}`).join("\n")
     : "no unreachable exports or fields introduced by this change\n";
   const evidence = writeEvidence(projectDir, runId, "reachability", summary);
+  const shown = findings.slice(0, MAX_RECEIPT_NAMES).map((f) => f.symbol);
+  const remaining = findings.length - shown.length;
+  const names = remaining > 0 ? `${shown.join(", ")}, +${remaining} more (see evidence log)` : shown.join(", ");
   const expect = findings.length
-    ? `${findings.length} unreachable symbol(s)/field(s) found — advisory only, review before merge: ${findings
-        .map((f) => f.symbol)
-        .join(", ")}`
+    ? `${findings.length} unreachable symbol(s)/field(s) found — advisory only, review before merge: ${names}`
     : "no unreachable exports or fields introduced";
   const check: CheckOutcome = {
     id: "reachability",
