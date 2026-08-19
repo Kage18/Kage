@@ -127,6 +127,14 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   #m-new { background:var(--green-soft); border-color:color-mix(in srgb, var(--green) 45%, var(--line));
     color:var(--green); font-weight:550; }
   #m-new:hover { background:var(--green); color:#06130d; border-color:var(--green); }
+  /* The plus glyph only stands in for the label once there is no room for both —
+     see the narrow media query, which is the only place that shows it. */
+  .mnew-ic { display:none; }
+  /* Shown only under the narrow media query below, where .side (and with it the
+     rail's own project switcher) goes display:none — this reopens the SAME
+     command palette the rail's "+" already used, it just needs a tap target
+     once the rail itself is gone. */
+  .narrow-only { display:none; }
 
   /* The frame below the title bar is a horizontal split: projects rail, then the view.
      main used to own the height itself; it now fills whatever the split gives it. */
@@ -161,6 +169,11 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .prow .pforget { font-size:13px; color:var(--text3); padding:0 4px; border-radius:var(--r-control); display:none; }
   .prow:hover .pforget { display:block; }
   .prow .pforget:hover { color:var(--crimson); }
+  /* Reused inside the settings modal (renderSettings' "Other projects" list) as
+     the narrow-width home for project switch/remove — there is no hover on a
+     phone, so unlike the rail's row this one shows its × unconditionally. */
+  .settings-projects { display:flex; flex-direction:column; gap:1px; margin-bottom:14px; }
+  .settings-projects .prow .pforget { display:block; }
   .side .sidefoot { border-top:1px solid var(--line); padding:9px 12px; font-size:11px; color:var(--text3); }
   .side .sidefoot b { font-weight:600; color:var(--text2); }
   @media (max-width: 900px) { .side { display:none; } }
@@ -505,9 +518,14 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .qrow-text { font-size:13px; color:var(--text2); }
   .qrow-ctrls { display:flex; gap:6px; margin-top:8px; }
   .dhead { position:relative; padding:18px 26px 0; background:var(--surface); border-bottom:1px solid var(--line); flex:none; }
+  /* Rendered in both List and Board layouts now (renderDetail), but it only ever
+     reads as a control where there is somewhere for it to send you: Board's
+     slide-over at any width, or List's single-pane view under the narrow
+     breakpoint below, where it reads "back" instead of "close". */
   .dclose { position:absolute; top:14px; right:16px; font-size:13px; color:var(--text3);
-    padding:4px 9px; border-radius:var(--r-control); }
+    padding:4px 9px; border-radius:var(--r-control); display:none; }
   .dclose:hover { color:var(--text); background:var(--surface2); }
+  #v-work.layout-board .dclose { display:block; }
   .dhead h2 { margin:0 0 9px; padding-right:36px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
   .dhead .foldrow { margin:0 0 12px; }
@@ -848,9 +866,66 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .modal select { font-family:var(--mono); font-size:11.5px; background:var(--surface2); color:var(--text);
     border:1px solid var(--line); border-radius:var(--r-panel); padding:5px 9px; }
 
+  /* ---- narrow width: a phone reaching the daemon over LAN lands here ----
+     Below 900px the topbar, the Work split and the board were a 900px
+     afterthought never opened at phone width: the topbar clipped, .list's
+     max-height:38% resolved against an implicit grid row instead of the
+     container and left a dead zone under it, and the board's two 220px
+     columns didn't fit. This block is a real narrow design, not a fourth
+     patch on the same rule.
+
+     Work: list-beside-detail cannot hold both panes at a readable size, so
+     List layout becomes ONE pane at a time — the triaged list by default,
+     and selecting a run swaps in the detail (JS toggles #v-work.mobile-detail
+     in renderWork/selectRun). The way back is the SAME .dclose Board's
+     slide-over already uses, not a new control — narrow List is just another
+     "how do I get back" case. Both panes get the full height (no fixed
+     max-height math to compound), so no pane is ever shorter than its own
+     content and there is no dead zone between them.
+
+     Topbar: every control stays reachable by shedding what narrow width
+     cannot afford to repeat — the wordmark (the seal alone still reads as
+     Kage) and the seg buttons' keycap hints (a shortcut hint is dead weight
+     once there's no keyboard to hint at) — and by collapsing New run's label
+     to the same plus glyph pattern already used elsewhere. Nothing here
+     invents a menu: Room/Work/Memory, New run, theme, settings and
+     notifications are the same controls, just narrower. */
   @media (max-width:900px) {
-    .runs { grid-template-columns:1fr; } .list { max-height:38%; border-right:none; border-bottom:1px solid var(--line); }
-    .board { grid-template-columns:repeat(2, minmax(220px,1fr)); }
+    .top { gap:8px; padding:0 10px; }
+    .appname { display:none; }
+    .seg { gap:1px; }
+    .seg button { padding:6px 9px; font-size:11.5px; }
+    .seg button .k { display:none; }
+    .mnew-lbl { display:none; }
+    .mnew-ic { display:inline-block; font-size:15px; line-height:1; }
+    .iconbtn { padding:8px 11px; }
+    .narrow-only { display:inline-block; }
+
+    .runs { grid-template-columns:1fr; grid-template-rows:minmax(0,1fr); height:100%; }
+    .list { max-height:none; height:100%; border-right:none; border-bottom:none; }
+    /* Scoped to :not(.layout-board) — Board's own slide-over (.dover) already
+       shows .detail at any width via its own, more specific rule, and must
+       keep doing so here; only List's single-pane view hides it by default. */
+    #v-work:not(.layout-board) .detail { display:none; }
+    #v-work:not(.layout-board) .dclose { display:block; }
+    #v-work.mobile-detail:not(.layout-board) .list { display:none; }
+    #v-work.mobile-detail:not(.layout-board) .detail { display:flex; height:100%; }
+
+    /* One column: two 220px floors plus the gap cannot fit under 900px, let
+       alone at phone width — minmax(0,1fr) removes the floor instead of
+       shrinking the count further by hand. */
+    .board { grid-template-columns:minmax(0, 1fr); }
+
+    /* Touch targets: Kage's rows and chips are sized for a mouse. These widen
+       the hit area only under this breakpoint — desktop's sizes (and layout)
+       are untouched. */
+    .wrow { min-height:44px; padding-top:13px; padding-bottom:13px; }
+    .gwchip { width:22px; height:22px; line-height:20px; font-size:10.5px; }
+    .tab { padding:11px 14px; }
+    .showmore, .foldrow, .dfchip, .dfview { padding-top:8px; padding-bottom:8px; }
+    .settings-projects .prow { padding:11px 10px; }
+    .settings-projects .pforget { padding:6px 9px; }
+    .palette .row { padding:12px 12px; }
   }
 
   /* Terminal mode — a REAL claude session, not our own chat rendering of one */

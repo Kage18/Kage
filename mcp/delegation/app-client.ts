@@ -16,7 +16,7 @@ var state = {
   room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "", installedAgents: [],
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
-  workLayout: "list", dover: false, showAllDone: false, workOrder: [],
+  workLayout: "list", dover: false, mobileDetailOpen: false, showAllDone: false, workOrder: [],
   diffView: "unified", collapsedDiff: {}, expandedGroups: {}, detailIntentOpen: false,
   steerQueueMode: false, runTerminalActive: false, runTermRunId: null,
 };
@@ -141,6 +141,12 @@ function renderWork() {
   var board = state.workLayout === "board";
   view.classList.toggle("layout-board", board);
   view.classList.toggle("dover", board && state.dover && Boolean(state.selected));
+  // Narrow width: List layout shows one pane at a time. Selecting a run opens
+  // the detail over the list; the back button (the same .dclose Board's
+  // slide-over already uses) clears this and returns to the list. Inert at
+  // desktop width — the CSS that reads this class only exists in the narrow
+  // media query.
+  view.classList.toggle("mobile-detail", !board && state.mobileDetailOpen && Boolean(state.selected));
   document.getElementById("wl-list").classList.toggle("on", !board);
   document.getElementById("wl-board").classList.toggle("on", board);
   var needs = state.runs.filter(function (r) { return r.ownership === "needs_you"; }).length;
@@ -301,6 +307,7 @@ function selectRun(id) {
   state.selected = id;
   if (changed) { state.tab = "follow"; state.detail = null; state.collapsedDiff = {}; state.expandedGroups = {}; state.detailIntentOpen = false; }
   if (state.workLayout === "board") state.dover = true;
+  state.mobileDetailOpen = true;
   renderWork();
   api("/runs/" + id).then(function (detail) {
     if (state.selected !== id) return;
@@ -1605,13 +1612,17 @@ function renderDetail() {
 
   var head = h("div", "dhead");
   // In Board layout the detail is a slide-over — give it a way out that isn't
-  // knowing the esc key.
-  if (state.workLayout === "board") {
-    var close = h("button", "dclose", "✕");
-    close.title = "close (esc)";
-    close.onclick = function () { state.dover = false; renderWork(); };
-    head.appendChild(close);
-  }
+  // knowing the esc key. In List layout at narrow width the detail replaces
+  // the list outright, so the same button reads as "back" instead — CSS only
+  // shows it there under the narrow breakpoint, so this is inert at desktop.
+  var isBoard = state.workLayout === "board";
+  var close = h("button", "dclose", "✕");
+  close.title = isBoard ? "close (esc)" : "back to list";
+  close.onclick = function () {
+    if (isBoard) state.dover = false; else state.mobileDetailOpen = false;
+    renderWork();
+  };
+  head.appendChild(close);
   head.appendChild(h("h2", "", runTitle(run)));
   // The title above is a derived short form — the full intent (often the length of a
   // paragraph, by design: the New-run modal asks "what should change, and how you'll
@@ -2707,6 +2718,35 @@ function renderSettings() {
     num(s.max_concurrent, function (v) { s.max_concurrent = v; }));
   row("Strict verification", "Any non-passing check blocks a run from reaching ready. Turning this off lets unverified work look finished — honesty over convenience.",
     toggle(s.strict_verify, function (on) { s.strict_verify = on; }));
+
+  // The projects rail (.side) goes display:none below the same 900px width this
+  // modal has to work under, taking its switch-project and remove-project
+  // controls with it. Rather than invent a narrow-only rail, this reuses the
+  // rail's own row markup (.prow/.pforget) here, where the settings modal
+  // already gives every width a way in.
+  var others = (state.projects || []).filter(function (p) { return p.dir !== state.projectDir; });
+  if (others.length) {
+    body.appendChild(h("div", "seclabel-sm", "Other projects"));
+    var plistWrap = h("div", "settings-projects");
+    others.forEach(function (project) {
+      var prow = h("div", "prow");
+      prow.title = project.dir;
+      prow.appendChild(h("div", "pn", project.name));
+      var forget = h("button", "pforget", "×");
+      forget.title = "remove from this list (the repo is untouched)";
+      forget.onclick = function (event) {
+        event.stopPropagation();
+        api("/projects/forget", { method: "POST", body: { dir: project.dir } }).then(function (out) {
+          if (out.ok) { state.projects = out.projects || []; renderProjects(); renderSettings(); }
+        });
+      };
+      prow.appendChild(forget);
+      prow.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
+      prow.onclick = function () { showSettings(false); openProject(project.dir, null); };
+      plistWrap.appendChild(prow);
+    });
+    body.appendChild(plistWrap);
+  }
 }
 function showSettings(on) {
   document.getElementById("settings-overlay").classList.toggle("on", on);
@@ -2720,6 +2760,13 @@ function showSettings(on) {
   });
 }
 document.getElementById("m-settings").onclick = function () { showSettings(true); };
+// Below the rail's own breakpoint (.side goes display:none at the same 900px
+// width) the rail's project list — and its ⌘K-only palette entry for
+// switching — has no other way in on a touch device. This button is the
+// same iconbtn pattern as theme/settings/bell, just narrow-width-only (see
+// .narrow-only in app-styles.ts); it opens the SAME palette, which already
+// lists every other project as a "project" command.
+document.getElementById("m-palette").onclick = function () { showPalette(true); };
 document.getElementById("p-add").onclick = function () { addProject(); };
 document.getElementById("t-add").onclick = function () { newThread(); };
 document.getElementById("mem-search").oninput = function () { renderMemory(); };
@@ -2853,8 +2900,10 @@ document.addEventListener("keydown", function (ev) {
   if (ev.key === "Escape") {
     var hadOverlay = Boolean(document.querySelector(".overlay.on")) || document.getElementById("notif").classList.contains("on");
     showPalette(false); showOverlay(false); showSettings(false); showAddProject(false); document.getElementById("notif").classList.remove("on");
-    // Only once nothing modal was open does esc mean "close the board's slide-over".
+    // Only once nothing modal was open does esc mean "close the board's slide-over"
+    // (or, at narrow width, "back to the list").
     if (!hadOverlay && state.dover) { state.dover = false; renderWork(); }
+    else if (!hadOverlay && state.mobileDetailOpen) { state.mobileDetailOpen = false; renderWork(); }
     return;
   }
   // ⌥L / ⌥H: next / previous run needing you, from anywhere — including mid-sentence
