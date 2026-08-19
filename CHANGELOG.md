@@ -1,5 +1,82 @@
 # Changelog
 
+## Unreleased — Kage manages your memory and agents
+
+Kage was a memory tool with a dispatch command. It is now an orchestrator: you hand
+it work, it briefs and runs agents for you, and it checks their work itself before
+you ever read a diff. The memory is what makes each brief smarter than the last.
+
+### Goals — hand over work, not tasks
+
+- **A goal now actually runs.** Describe something larger than one change and Kage
+  plans it as waves of parallel runs. The goal moves from planning to executing to
+  done on its own, driven by how its runs actually land — not by anyone asserting it.
+- **`recommend` or `merge`.** A goal set to `recommend` leaves every finished run for
+  you. Set it to `merge` and verified runs land themselves — but only runs where
+  something was genuinely executed, never a run that merely passed inspection.
+- **Auto-merge is gated on track record.** A run type with too few completed runs, or
+  a poor record, falls back to recommending and says why in one line.
+- **Overlapping waves are refused.** Two runs in the same wave that would touch the
+  same files are stopped before dispatch, naming the specs and the paths that collide.
+- **The manager can run the plan.** It can open a goal, ask where the work stands, and
+  close one — and it is told when a wave finishes and what the next one is.
+
+### You can trust the receipt more
+
+- **Kage type-checks and parses your code before accepting a claim**, on top of
+  whatever checks the run declared. A run can no longer reach "ready" with code that
+  does not compile.
+- **"Every check passed" no longer means "verified".** In a repo with no test command
+  the only checks that can run are inspections — they all pass while nothing has been
+  executed. The receipt now says `UNVERIFIED — nothing was executed`, auto-merge
+  refuses, and the track record scores it as unproven.
+- **`kage reverify <run>`** re-runs the checks against a run's current worktree. A run
+  that failed on a fixable technicality, or on a transient API error after the work
+  was already done, can be recovered instead of thrown away.
+- **A run is no longer failed for mentioning a filename in passing.** Cited paths
+  resolve by their short name, and a path that appears only in an agent's prose is a
+  warning rather than a failure.
+- **Runs that exceed their budget say so.** A run whose estimated spend crosses its
+  limit is halted with the limit and the actual figure named, and its work is kept.
+
+### Memory you can keep honest
+
+- **`kage stale`** — after a large refactor, Kage withholds memory whose code moved.
+  This shows you which packets those are, what changed underneath each one, which are
+  worth rescuing, and the single command to act on each. There is deliberately no
+  "reverify everything" button: reverifying refreshes a citation, it does not re-check
+  whether the claim is still true, so doing it in bulk would clear the flags while
+  proving nothing.
+- **`kage_refresh` returns a readable summary** instead of every stale packet and
+  warning it can find — roughly 12KB where it used to be 150KB, with the totals stated
+  and a way to ask for the rest.
+
+### Living with it day to day
+
+- **A run survives the terminal that started it.** `kage dispatch` hands work to a
+  detached supervisor, so closing the window or interrupting the command no longer
+  kills a run that is minutes and dollars in.
+- **Long intents no longer break the app.** A detailed intent used to render as a wall
+  of text that pushed a run's own controls off the screen. Runs now show a short title
+  everywhere, with the full intent one click away.
+
+### Packaging
+
+- **The desktop app shipped with the wrong version** (0.1.0 against a 3.1.0 product).
+  Fixed, and the version guard now covers it.
+- **`node-pty` is an optional dependency.** A machine without a C++ toolchain could
+  fail `npm i -g` entirely over a native module only the terminal view needs.
+
+### Behaviour changes worth knowing
+
+- Runs dispatch **detached** rather than inline. `kage dispatch` returns once the run
+  is handed off and follows it; it no longer holds your terminal for the whole run.
+- A goal set to `merge` **will refuse to merge** a run where no command was executed,
+  even though every check passed. This is intentional.
+- The per-run budget is **enforced**, not decorative. Until the next release it is not
+  configurable, so an unusually large task may be halted at the default $2 — raise it
+  by editing the default if you need to.
+
 ## v3.1.0 — cleaner viewer + `kage okf view`
 
 - **`kage okf view`** — open your memory as a clean, self-contained OKF bundle
