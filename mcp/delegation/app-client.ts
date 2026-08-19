@@ -1046,15 +1046,44 @@ function dispatchFromComposer() {
 // record first, then sends the SAME text to the manager (the room's own path,
 // sendRoomMessage) prefixed with the new goal's id — the manager's constitution
 // reads that prefix and proposes a wave decomposition back in chat.
+// Creating a goal does NOT need the manager to be idle — the goal is a kernel record,
+// and POST /goals never touches the held session. Two bugs lived here, both found by
+// pressing the advertised shortcut while a run was working:
+//   1. a state.room.busy guard made alt-Enter return in silence — the hint bar
+//      promises "orchestrate as a goal" and the user got no goal and no explanation.
+//   2. the manager was told about the goal by stuffing "[goal <id>] ..." into the
+//      composer and calling sendRoomMessage(), which carries the SAME busy guard — so a
+//      room that went busy in between left the goal orphaned, the manager uninformed,
+//      and the user's composer holding a mangled string.
+// Now: always create the goal, always clear the composer, and say honestly whether the
+// manager has been told yet.
 function createGoalFromComposer() {
   var input = document.getElementById("room-input");
   var intent = input.value.trim();
-  if (!intent || state.room.busy) return;
+  if (!intent) return;
   api("/goals", { method: "POST", body: { intent: intent, session: state.session } }).then(function (out) {
     if (!out.ok) { showError(out.error || "could not create the goal"); return; }
+    input.value = "";
+    autoGrow(input);
+    schedulePreflight("", "room-preflight");
+    if (state.room.busy) {
+      // Told plainly rather than queued invisibly: the manager is mid-turn, so it has
+      // not seen this goal yet. The goal is real and the Work view already shows it.
+      flash("goal created — the manager is busy, tell it when the turn ends");
+      refresh();
+      return;
+    }
     flash("goal created — the manager is decomposing it");
-    input.value = "[goal " + out.goal.id + "] " + intent;
-    sendRoomMessage();
+    state.room.busy = true;
+    state.roomStreaming = [];
+    renderRoom();
+    api("/room/message?session=" + encodeURIComponent(state.session), {
+      method: "POST",
+      body: { message: "[goal " + out.goal.id + "] " + intent },
+    }).then(function (sent) {
+      if (!sent.ok) { state.room.busy = false; renderRoom(); showError(sent.error || "the goal was created but the manager did not accept it"); return; }
+      refreshRoom();
+    });
     refresh();
   });
 }
