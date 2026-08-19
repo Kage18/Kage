@@ -314,7 +314,19 @@ test("MCP kage_supersede writes memory lineage", async () => {
   });
   const result = JSON.parse(textContent(superseded));
   assert.equal(result.ok, true);
-  assert.equal(result.old_packet.status, "superseded");
+  // kage_supersede's MCP response intentionally does not echo the full old_packet/
+  // replacement_packet bodies back (measured ~10,000 tokens for one call before this
+  // was capped) - it returns titles for confirmation, so verify the on-disk mutation
+  // directly instead of trusting a wholesale echo.
+  assert.equal(result.old_packet_title, "Old retry note");
+  const rereadPackets = readdirSync(join(project, ".agent_memory", "packets"))
+    .filter((name) => name.endsWith(".md") || name.endsWith(".json"))
+    .map((name) => {
+      const p = join(project, ".agent_memory", "packets", name);
+      return name.endsWith(".md") ? okfConceptToPacket(readFileSync(p, "utf8")) : JSON.parse(readFileSync(p, "utf8"));
+    });
+  const rereadOld = rereadPackets.find((packet) => packet.id === oldPacket.id);
+  assert.equal(rereadOld?.status, "superseded");
 
   const lineage = await callTool("kage_memory_lineage", { project_dir: project });
   const lineageJson = JSON.parse(textContent(lineage));
