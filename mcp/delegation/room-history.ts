@@ -16,8 +16,8 @@ export interface RoomHistoryTurn {
   at: string;
   /** Delegation tools the manager used to produce this turn, e.g. kage_dispatch. */
   tools?: string[];
-  /** Card numbers the manager tried to restate and the kernel replaced on the way out. */
-  redactions?: string[];
+  /** Card numbers the manager restated and the kernel checked on the way out. */
+  corrections?: string[];
 }
 
 export function roomHistoryPath(projectDir: string, session?: string): string {

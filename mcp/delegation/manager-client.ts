@@ -4,8 +4,10 @@
 // answer — the kernel already owns every guarantee it could touch.
 import { spawn } from "node:child_process";
 import { detectAgent } from "./adapters/index.js";
+import { listRuns, readClaim } from "./contract.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
+import { claimVerdict } from "./verify.js";
 
 /** Tools a manager may use without a permission prompt. Read + delegation verbs only. */
 export const MANAGER_ALLOWED_TOOLS = [
@@ -35,8 +37,13 @@ export interface ManagerReply {
   tools: string[];
   cost_usd?: number;
   ok: boolean;
-  /** Card numbers the manager tried to restate, replaced on the way out. */
-  redactions?: string[];
+  /**
+   * Card numbers the manager restated, checked against the truth on the way out. Each
+   * entry is either a correction ("said X, card says Y") when a fact proved the
+   * manager wrong, or the bare figure when no fact was available to check it against
+   * (see guardManagerProse).
+   */
+  corrections?: string[];
 }
 
 export interface ManagerLaunch {
@@ -159,7 +166,8 @@ export async function askManager(options: {
     });
     child.on("close", () => {
       clearTimeout(timer);
-      resolve(parseManagerStream(out) ?? { ok: false, text: err.trim() || "the manager said nothing", tools: [] });
+      const facts = collectManagerFacts(options.projectDir);
+      resolve(parseManagerStream(out, facts) ?? { ok: false, text: err.trim() || "the manager said nothing", tools: [] });
     });
   });
 }
@@ -168,36 +176,157 @@ export async function askManager(options: {
 // broke that rule on its very first live session ("Dispatched and verified 3/3"), which
 // is the expected failure of any prompt-only rule: a model that paraphrases a verdict
 // can paraphrase it WRONG, and a wrong verdict in friendly prose is exactly the failure
-// this product exists to prevent. So the rule is enforced where it can be — in the
-// kernel, on the way out — rather than merely requested.
-const CARD_NUMBER_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
-  { pattern: /\b(NOT VERIFIED|UNVERIFIED|VERIFIED)\b/gi, replacement: "[verdict on the card]" },
-  { pattern: /\b\d+\s*\/\s*\d+\b/g, replacement: "[counts on the card]" },
-  // "all 3 checks" is a restated count too — caught live after the first guard shipped.
-  { pattern: /\b(?:all\s+)?\d+\s+checks?\b/gi, replacement: "[counts on the card]" },
-  { pattern: /\b\d+[-\s]lines?\b(?!\s+\d)/gi, replacement: "[size on the card]" },
-  { pattern: /\b\d+\s+files?\s+changed\b/gi, replacement: "[size on the card]" },
-  { pattern: /\$\s?\d+(?:\.\d+)?/g, replacement: "[cost on the card]" },
-];
+// this product exists to prevent.
+//
+// The first guard (blind redaction of every matching number, regardless of whether the
+// manager was right) fixed the overclaim risk but broke the product's most human-facing
+// surface: correct reporting got shot exactly as hard as fabrication, and it fired on
+// numbers that had nothing to do with any card (a budget cap, a test count, a ledger
+// figure). This version checks instead of censoring: given the facts a card is built
+// from (verdict, diff size, spend), a restated figure that MATCHES survives untouched,
+// one that MISMATCHES gets corrected in place, and one with no fact to check it against
+// is left alone — silently erasing an unrelated number is noise, not safety.
+
+/** One run's ground truth, gathered the same way its own claim card is rendered. */
+export interface ManagerFactCheck {
+  run_id: string;
+  /** claimVerdict's own label, e.g. "VERIFIED 5/5" or "NOT VERIFIED 3/5" — never re-derived. */
+  verdict?: string;
+  diff?: { files: number; lines: number };
+  spend_usd?: number;
+}
+
+/**
+ * Every run's card facts, gathered from the exact same sources renderClaimCard reads
+ * (claimVerdict, claim.diff, run.spend) — never a second derivation of these numbers.
+ * Cheap enough to call once per manager turn: runs are read from disk, not recomputed.
+ */
+export function collectManagerFacts(projectDir: string): ManagerFactCheck[] {
+  const facts: ManagerFactCheck[] = [];
+  for (const run of listRuns(projectDir)) {
+    const claim = readClaim(projectDir, run.id);
+    const fact: ManagerFactCheck = { run_id: run.id };
+    if (claim) {
+      fact.verdict = claimVerdict(claim).label;
+      fact.diff = { files: claim.diff.files, lines: claim.diff.lines };
+    }
+    if (run.spend.usd_est > 0) fact.spend_usd = run.spend.usd_est;
+    if (fact.verdict || fact.diff || fact.spend_usd !== undefined) facts.push(fact);
+  }
+  return facts;
+}
+
+// Case-sensitive and excludes hyphen/letter neighbors on both sides: the kernel always
+// writes these tokens in exact caps ("VERIFIED", "NOT VERIFIED", "UNVERIFIED"), so this
+// stops the guard firing inside "hand-verified" or on the plain English word "unverified"
+// in ordinary prose ("3 unverified claims") — neither is the manager restating a card.
+const VERDICT_PATTERN = /(?<![A-Za-z-])(NOT VERIFIED|UNVERIFIED|VERIFIED)(?![A-Za-z-])(\s+\d+\s*\/\s*\d+)?/g;
+// Excludes a count already consumed by VERDICT_PATTERN above (accurate, corrected, or
+// left alone, it is never an unrelated fraction this pass should re-examine).
+const BARE_COUNT_PATTERN = /(?<!(?:NOT VERIFIED|UNVERIFIED|VERIFIED)\s)\b\d+\s*\/\s*\d+\b/g;
+// "all 3 checks" is a restated count too — caught live after the first guard shipped.
+const CHECKS_COUNT_PATTERN = /\b(?:all\s+)?\d+\s+checks?\b/gi;
+const DIFF_LINES_PATTERN = /\b\d+[-\s]lines?\b(?!\s+\d)/gi;
+const DIFF_FILES_PATTERN = /\b\d+\s+files?\s+changed\b/gi;
+const DOLLAR_PATTERN = /\$\s?\d+(?:\.\d+)?/g;
 
 export interface GuardedProse {
   text: string;
-  redactions: string[];
+  /** What changed on the way out — see ManagerReply.corrections. */
+  corrections: string[];
 }
 
-export function guardManagerProse(text: string): GuardedProse {
-  const redactions: string[] = [];
-  let guarded = text;
-  for (const { pattern, replacement } of CARD_NUMBER_PATTERNS) {
-    guarded = guarded.replace(pattern, (match) => {
-      redactions.push(match.trim());
-      return replacement;
-    });
-  }
-  return { text: guarded, redactions };
+/**
+ * Verify a manager's restated card numbers against `facts` instead of blindly redacting
+ * them. `facts` defaults to empty for callers that genuinely have no ground truth at
+ * hand: for those, verdicts and n/n counts still fall back to the old redaction (the
+ * one place a wrong figure is worse than a missing one) but dollar figures and diff
+ * sizes are left untouched — they mostly fire on legitimate prose unrelated to any
+ * card, and silently erasing them would be noise, not safety.
+ */
+export function guardManagerProse(text: string, facts: ManagerFactCheck[] = []): GuardedProse {
+  const corrections: string[] = [];
+  const verdictTruths = facts.map((fact) => fact.verdict).filter((v): v is string => Boolean(v));
+
+  let guarded = text.replace(VERDICT_PATTERN, (match) => {
+    const said = match.replace(/\s+/g, " ").trim();
+    // A fact's label can be longer than what the manager said ("UNVERIFIED — nothing
+    // was executed (2/3 static checks)" vs just "UNVERIFIED") — that's an abbreviation,
+    // not a wrong number, so prefix matches count as accurate too.
+    if (verdictTruths.some((truth) => truth === said || truth.startsWith(said))) return match;
+    if (verdictTruths.length) {
+      const truth = verdictTruths[0];
+      corrections.push(`said "${said}", card says "${truth}"`);
+      return truth;
+    }
+    if (!facts.length) {
+      corrections.push(said);
+      return "[verdict on the card]";
+    }
+    // Facts exist for this turn (other runs, other fields) but none carry a verdict to
+    // check this one against — not ours to touch.
+    return match;
+  });
+
+  guarded = guarded.replace(BARE_COUNT_PATTERN, (match) => {
+    if (!facts.length) {
+      corrections.push(match.trim());
+      return "[counts on the card]";
+    }
+    return match;
+  });
+
+  guarded = guarded.replace(CHECKS_COUNT_PATTERN, (match) => {
+    if (!facts.length) {
+      corrections.push(match.trim());
+      return "[counts on the card]";
+    }
+    return match;
+  });
+
+  // Diff size and dollar figures mostly fire on legitimate prose that has nothing to do
+  // with any card (an unrelated file count, a budget cap) — rule 4's "tighten" applies
+  // here harder than for a verdict. A figure that matches a known fact is confirmed
+  // accurate and left alone. A figure that mismatches is only ever corrected when
+  // exactly one fact is in scope — with several runs' facts in play (collectManagerFacts'
+  // normal case), a mismatch is at least as likely to be a genuinely different number
+  // (a budget cap, another run entirely) as a wrong restatement, and guessing which run
+  // it "should" be would risk fabricating a correction of its own.
+  const diffTruths = facts.map((fact) => fact.diff).filter((d): d is { files: number; lines: number } => Boolean(d));
+
+  guarded = guarded.replace(DIFF_LINES_PATTERN, (match) => {
+    if (!diffTruths.length) return match;
+    const said = Number(match.match(/\d+/)?.[0]);
+    if (diffTruths.some((diff) => diff.lines === said) || diffTruths.length !== 1) return match;
+    const truth = diffTruths[0];
+    corrections.push(`said "${match.trim()}", card says ${truth.lines} line(s)`);
+    return match.replace(/\d+/, String(truth.lines));
+  });
+
+  guarded = guarded.replace(DIFF_FILES_PATTERN, (match) => {
+    if (!diffTruths.length) return match;
+    const said = Number(match.match(/\d+/)?.[0]);
+    if (diffTruths.some((diff) => diff.files === said) || diffTruths.length !== 1) return match;
+    const truth = diffTruths[0];
+    corrections.push(`said "${match.trim()}", card says ${truth.files} file(s)`);
+    return match.replace(/\d+/, String(truth.files));
+  });
+
+  const spendTruths = facts.map((fact) => fact.spend_usd).filter((s): s is number => typeof s === "number");
+
+  guarded = guarded.replace(DOLLAR_PATTERN, (match) => {
+    if (!spendTruths.length) return match;
+    const said = Number(match.replace(/[$\s]/g, ""));
+    if (spendTruths.some((spend) => Math.abs(spend - said) < 0.005) || spendTruths.length !== 1) return match;
+    const truth = spendTruths[0];
+    corrections.push(`said "${match.trim()}", recorded spend is $${truth.toFixed(2)}`);
+    return `$${truth.toFixed(2)}`;
+  });
+
+  return { text: guarded, corrections };
 }
 
-export function parseManagerStream(stdout: string): ManagerReply | null {
+export function parseManagerStream(stdout: string, facts: ManagerFactCheck[] = []): ManagerReply | null {
   const tools: string[] = [];
   let text = "";
   let cost: number | undefined;
@@ -224,12 +353,12 @@ export function parseManagerStream(stdout: string): ManagerReply | null {
     if (typeof event.total_cost_usd === "number") cost = event.total_cost_usd;
   }
   if (!sawAny) return null;
-  const guarded = guardManagerProse(text);
+  const guarded = guardManagerProse(text, facts);
   return {
     ok: Boolean(text),
     text: guarded.text || "(the manager returned nothing)",
     tools,
     ...(cost === undefined ? {} : { cost_usd: cost }),
-    ...(guarded.redactions.length ? { redactions: guarded.redactions } : {}),
+    ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
   };
 }

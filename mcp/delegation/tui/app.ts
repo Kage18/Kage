@@ -402,12 +402,12 @@ export async function runTui(projectDir: string): Promise<number> {
             const used = reply.tools.length
               ? `\n   (used ${[...new Set(reply.tools.map((tool) => tool.replace("mcp__kage__", "")))].join(", ")})`
               : "";
-            // Say so when the kernel edited the manager's prose: a silent redaction
+            // Say so when the kernel edited the manager's prose: a silent correction
             // would be its own small dishonesty.
-            const redacted = reply.redactions?.length
-              ? `\n   (kernel replaced ${reply.redactions.length} restated card number${reply.redactions.length === 1 ? "" : "s"}: ${reply.redactions.join(", ")} — read the card, not the summary)`
+            const corrected = reply.corrections?.length
+              ? `\n   (kernel checked ${reply.corrections.length} restated card number${reply.corrections.length === 1 ? "" : "s"}: ${reply.corrections.join(", ")} — read the card, not the summary)`
               : "";
-            const suffix = `${used}${redacted}`;
+            const suffix = `${used}${corrected}`;
             state = {
               ...state,
               ask: { ...state.ask, busy: false, streaming: [], history: [...state.ask.history, { role: "kage", text: `${reply.text}${suffix}` }] },
