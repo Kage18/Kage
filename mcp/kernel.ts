@@ -9459,8 +9459,14 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   // match `kage stale`'s scope — it can still read slightly lower than a live `kage
   // stale` run because it checks kageignore-pruned grounding (see "refresh prunes
   // kageignore'd grounding" above), which is intentional, not a second bug.
+  // kageMetrics, NOT the shallow variant `metrics` above: the health strip also reads
+  // memory_access (used-recently, never-recalled) and memory_graph's approved_packets /
+  // average_quality_score, and kageMetricsShallow omits all of them. Writing the shallow
+  // shape here fixed the stale count and silently zeroed four neighbouring numbers —
+  // caught by opening the app, not by the suite, because no test asserted the strip was
+  // complete. Reuse the graphs refresh already rebuilt so this costs no extra pass.
   writeJson(join(memoryRoot(projectDir), "metrics.json"), {
-    ...metrics,
+    ...kageMetrics(projectDir),
     quality: { totals: { stale: stale.findings.filter((finding) => finding.status === "approved").length } },
   });
   ensureDir(reportsDir(projectDir));
