@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher, chmodSync } from "node:fs";
 import { spawn } from "node:child_process";
 import type { AddressInfo } from "node:net";
+import { networkInterfaces } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import {
   benchmarkCodingMemoryQuality,
@@ -51,7 +52,8 @@ import {
   validateProject,
   type ObservationEvent,
 } from "./kernel.js";
-import { guardRequest, loopbackOrigins, makeToken } from "./delegation/guard.js";
+import { guardRequest, lanOrigins, loopbackOrigins, makeToken } from "./delegation/guard.js";
+import { lanModeEnabled } from "./delegation/config.js";
 import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
 import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
 import { readRun, sweepDeadRuns } from "./delegation/contract.js";
@@ -484,6 +486,63 @@ export function readDaemonToken(projectDir: string): string {
   }
 }
 
+/**
+ * The pairing secret LAN mode requires on every request. Distinct from the daemon token
+ * above: that token sits in a 0600 file readable by any local process, which is fine when
+ * only this machine can reach the port — it stops being a fit credential the moment the
+ * port is reachable from the network. This secret is generated once and persisted (unlike
+ * the token, which is regenerated every start) so a phone that has already paired keeps
+ * working across daemon restarts.
+ */
+function pairingSecretPath(projectDir: string): string {
+  return join(daemonDir(projectDir), "lan-secret");
+}
+
+export function provisionPairingSecret(projectDir: string): string {
+  const path = pairingSecretPath(projectDir);
+  try {
+    const existing = readFileSync(path, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // No secret yet — provision one below.
+  }
+  const secret = makeToken();
+  mkdirSync(daemonDir(projectDir), { recursive: true });
+  writeFileSync(path, `${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort on filesystems without POSIX modes.
+  }
+  return secret;
+}
+
+/** This machine's own non-internal IPv4 addresses — the only hosts LAN mode accepts. */
+export function lanAddresses(): string[] {
+  const addresses: string[] = [];
+  const interfaces = networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    if (!entries) continue;
+    for (const entry of entries) {
+      if (entry.family === "IPv4" && !entry.internal) addresses.push(entry.address);
+    }
+  }
+  return addresses;
+}
+
+/** Exactly what a user needs to point a phone at this daemon — no jargon. */
+export function lanPairingMessage(addresses: string[], port: number, secret: string): string {
+  if (!addresses.length) {
+    return "LAN mode is on, but no local network address was found on this machine — only this machine can reach the daemon right now.";
+  }
+  const urls = addresses.map((address) => `http://${address}:${port}`).join(" or ");
+  return [
+    "This opens a port on your local network so a device on the same Wi-Fi/LAN can reach this daemon.",
+    `URL: ${urls}`,
+    `Pairing secret: ${secret}`,
+  ].join("\n");
+}
+
 /** Refuse the request, saying plainly why — a silent 404 would teach nothing. */
 function refuse(res: ServerResponse, verdict: { status: number; reason?: string }): void {
   json(res, verdict.status, { ok: false, error: "refused", reason: verdict.reason });
@@ -661,7 +720,7 @@ export function stopDaemon(projectDir: string): { ok: boolean; message: string; 
   }
 }
 
-export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number } = {}): Promise<void> {
+export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number; lan?: boolean } = {}): Promise<void> {
   const host = options.host ?? DEFAULT_HOST;
   const requestedRestPort = options.restPort ?? DEFAULT_REST_PORT;
   // Reassigned once listen() confirms the real bound port — requesting port 0 asks the
@@ -669,6 +728,15 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   // fetches, the printed URL) must use what actually got bound, not what was asked for.
   let restPort = requestedRestPort;
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
+  // Off unless explicitly turned on — never a side effect of any other option. An
+  // explicit `options.lan` (a future CLI flag) wins over the persisted config flag.
+  const lanMode = options.lan ?? lanModeEnabled(projectDir);
+  // Loopback stays the actual bind target unless LAN mode is on; "0.0.0.0" accepts
+  // connections on every IPv4 interface, loopback included, so nothing about the
+  // loopback path changes when LAN mode is off.
+  const bindHost = lanMode ? "0.0.0.0" : host;
+  const lanAddrs = lanMode ? lanAddresses() : [];
+  const lanToken = lanMode ? provisionPairingSecret(projectDir) : "";
   mkdirSync(daemonDir(projectDir), { recursive: true });
   const token = provisionDaemonToken(projectDir);
   // last_indexed_at is stamped when an index CHILD completes (below) — never at
@@ -765,7 +833,12 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   // used to block its own listen() for the whole first index.
   runIndexChild();
 
-  const guardContext = { allowedOrigins: loopbackOrigins(restPort), token };
+  const guardContext = {
+    allowedOrigins: [...loopbackOrigins(restPort), ...(lanMode ? lanOrigins(lanAddrs, restPort) : [])],
+    token,
+    lanHosts: lanMode ? new Set(lanAddrs) : undefined,
+    lanToken: lanMode ? lanToken : undefined,
+  };
   const delegationFeed = createDelegationFeed(projectDir);
   // Every run-changed notification, from every route and the reap timer alike, funnels
   // through this one method — wrapping it here is the single choke point for waking the
@@ -978,7 +1051,7 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     // move — only a fresh `once` listener here, removed the moment listen settles, so
     // a LATER runtime error on the server still crashes the process as before.
     server.once("error", reject);
-    server.listen(requestedRestPort, host, () => {
+    server.listen(requestedRestPort, bindHost, () => {
       server.removeListener("error", reject);
       const address = server.address();
       if (address && typeof address === "object") {
@@ -988,12 +1061,15 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
       // status file and the guard's allowed origins with the port that is actually
       // listening, since ensureAppDaemon polls status.json for it.
       status.rest_port = restPort;
-      guardContext.allowedOrigins = loopbackOrigins(restPort);
+      guardContext.allowedOrigins = [...loopbackOrigins(restPort), ...(lanMode ? lanOrigins(lanAddrs, restPort) : [])];
       writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
       resolve();
     });
   });
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
+  if (lanMode) {
+    console.log(lanPairingMessage(lanAddrs, restPort, lanToken));
+  }
 
   // Persist death on a heartbeat. reapRun existed with no callers, so dead runs held
   // their derived "dropped" forever — concurrency slots included. Startup + every

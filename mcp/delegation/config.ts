@@ -45,6 +45,12 @@ export interface DelegationConfig {
    * here just falls back to "claude" at the call site rather than failing to parse.
    */
   default_agent?: string;
+  /**
+   * Reach the daemon from another device on the local network (a phone), not just this
+   * machine. Off by default — enabling it binds the daemon to the LAN interface as well
+   * as loopback and requires a pairing secret on every request that arrives that way.
+   */
+  lan?: boolean;
 }
 
 export const DEFAULT_DIFF_BUDGET = 400;
@@ -158,4 +164,8 @@ export function maxConcurrent(projectDir: string): number {
 
 export function staticChecksEnabled(projectDir: string): boolean {
   return readDelegationConfig(projectDir).static_checks !== false;
+}
+
+export function lanModeEnabled(projectDir: string): boolean {
+  return readDelegationConfig(projectDir).lan === true;
 }
