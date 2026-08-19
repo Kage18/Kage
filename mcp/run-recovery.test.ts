@@ -97,7 +97,7 @@ test("a stopped run resumes with a raised budget and keeps its id, worktree and 
     return { pid: 424_242 };
   };
 
-  const result = await resumeStoppedRun(project, task.id, 8, () => liveStub, reattach);
+  const result = await resumeStoppedRun(project, task.id, 8, undefined, () => liveStub, reattach);
   assert.equal(result.ok, true, result.message);
   assert.ok(supervised, "resuming a stopped run must reattach a supervisor");
   await supervised!;
@@ -129,12 +129,12 @@ test("a stopped run with no budget raise is refused with a message naming the re
 
   // REVERT CHECK: without the refusal, this call would silently reattach with no budget
   // change and halt again on the very next usage tick.
-  const omitted = await resumeStoppedRun(project, task.id, undefined, adapterByName);
+  const omitted = await resumeStoppedRun(project, task.id, undefined, undefined, adapterByName);
   assert.equal(omitted.ok, false);
   assert.match(omitted.message, /kage resume-run <run-id> --budget-usd <n>/, "the refusal must name the actual resume command");
   assert.equal(readRun(project, task.id).state, "stopped", "a refused resume must not touch run state");
 
-  const tooLow = await resumeStoppedRun(project, task.id, 2, adapterByName);
+  const tooLow = await resumeStoppedRun(project, task.id, 2, undefined, adapterByName);
   assert.equal(tooLow.ok, false, "a budget no higher than the one that stopped it must also be refused");
   assert.match(tooLow.message, /kage resume-run/);
 });
