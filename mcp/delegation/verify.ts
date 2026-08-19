@@ -76,15 +76,20 @@ function runDiffCheck(projectDir: string, runId: string, diff: DiffStats): Check
 
 // Extensions that mark a slash-joined token as an actual source file, as opposed to an
 // identifier pair like "state.room/state.pty" that merely happens to contain dots.
-const KNOWN_FILE_EXTENSIONS = new Set([
+// Exported so the brief compiler can recognize a bare filename ("app-styles.ts", no
+// slash) with the same extension whitelist citedPaths uses for slash-joined ones —
+// one list, not two that can quietly drift apart.
+export const KNOWN_FILE_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "md", "mdx",
   "sh", "yml", "yaml", "toml", "txt", "html", "css", "scss",
   "py", "go", "rs", "rb", "lock",
 ]);
 
 // Top-level directories this repo actually has. A token that starts with one of these is
-// a repo path even without a recognizable extension (e.g. "mcp/delegation").
-const KNOWN_TOP_LEVEL_PREFIXES = ["mcp/", "docs/", "shell/", "evals/", "alias/"];
+// a repo path even without a recognizable extension (e.g. "mcp/delegation"). Exported so
+// the brief compiler can recognize these as structural, not content, words — "mcp" is in
+// the name of nearly every file in this repo and correlates with everything, i.e. nothing.
+export const KNOWN_TOP_LEVEL_PREFIXES = ["mcp/", "docs/", "shell/", "evals/", "alias/"];
 
 // Path-shaped tokens the claim names. A claim that cites a file which does not exist in
 // the work it produced is describing something imaginary — but ordinary prose is full of
