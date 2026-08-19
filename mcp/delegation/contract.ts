@@ -501,6 +501,44 @@ export function listRuns(projectDir: string): RunView[] {
  * Never estimates: absent usage leaves spend untouched rather than inventing zeros
  * that read as "measured free".
  */
+/**
+ * Minutes a run spent WORKING — the sum of its `running` intervals — not wall-clock
+ * since dispatch.
+ *
+ * The distinction is load-bearing, not cosmetic. This used to take the FIRST `running`
+ * entry and subtract it from now, so a run's meter kept climbing while it sat stopped
+ * with no supervisor and no agent. Observed on 2026-08-19: a run read 26.8 min when the
+ * kernel stopped it and 128.0 min after sitting idle for an hour and a half, during
+ * which nothing executed. That made the minutes cap unrecoverable by construction — the
+ * longer a stopped run waited for help, the further past its cap it drifted, so
+ * `kage resume-run` could never rescue the case it exists for. Four consecutive runs
+ * stranded this way, including the one dispatched to fix it.
+ *
+ * Counts the open interval only when the run is running right now, so a stopped run's
+ * meter is frozen at the work it actually did.
+ */
+export function workingMinutes(task: TaskRecord, now: number): number {
+  let total = 0;
+  let startedAt: number | null = null;
+  for (const entry of task.state_history) {
+    const at = new Date(entry.at).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (entry.state === "running") {
+      // Consecutive `running` entries (a reattach re-announcing itself) must not
+      // restart the clock and drop the interval already accumulated.
+      if (startedAt === null) startedAt = at;
+    } else if (startedAt !== null) {
+      total += Math.max(0, at - startedAt);
+      startedAt = null;
+    }
+  }
+  if (startedAt !== null) total += Math.max(0, now - startedAt);
+  // No history at all (a record written before state_history existed) falls back to the
+  // old wall-clock reading rather than reporting a confident zero.
+  if (!task.state_history.length) total = Math.max(0, now - new Date(task.created_at).getTime());
+  return Math.round((total / 60_000) * 10) / 10;
+}
+
 export function recordSpend(
   projectDir: string,
   runId: string,
@@ -508,10 +546,9 @@ export function recordSpend(
 ): void {
   if (!usage || (usage.usd <= 0 && usage.tokens <= 0)) return;
   const task = readRun(projectDir, runId);
-  const started = task.state_history.find((entry) => entry.state === "running")?.at ?? task.created_at;
-  const minutes = Math.max(0, (Date.now() - new Date(started).getTime()) / 60_000);
+  const minutes = workingMinutes(task, Date.now());
   patchRun(projectDir, runId, {
-    spend: { usd_est: Math.round(usage.usd * 10_000) / 10_000, minutes: Math.round(minutes * 10) / 10 },
+    spend: { usd_est: Math.round(usage.usd * 10_000) / 10_000, minutes },
     tokens_used: usage.tokens,
   });
 }
@@ -540,6 +577,9 @@ export interface RunBudgetCheck {
 // (kageResume, prints prior session context for hooks); this one is scoped to a run.
 export const RESUME_STOPPED_RUN_COMMAND = "kage resume-run <run-id> --budget-usd <n>";
 
+/** The same command, for the cap that is measured in minutes rather than dollars. */
+export const RESUME_STOPPED_RUN_MINUTES_COMMAND = "kage resume-run <run-id> --budget-minutes <n>";
+
 export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
   if (spend.usd_est > budgets.usd) {
     return {
@@ -554,8 +594,10 @@ export function checkRunBudget(spend: { usd_est: number; minutes: number }, budg
     return {
       exceeded: true,
       reason:
-        `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget — raise it by setting ` +
-        "`budgets.minutes` in .agent_memory/config.json",
+        `elapsed ${spend.minutes.toFixed(1)} min of work exceeded the ${budgets.minutes} min budget — resume it with ` +
+        `\`${RESUME_STOPPED_RUN_MINUTES_COMMAND}\` (same run, same worktree, higher cap), or set ` +
+        "`budgets.minutes` in .agent_memory/config.json to raise the default for every future run " +
+        "(a running daemon reads config at startup, so restart it for that to take effect)",
     };
   }
   return { exceeded: false };
