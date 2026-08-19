@@ -123,14 +123,14 @@ function userFrame(message: string): string {
  * Returns only if the child exits or is told to stop — a daemon restart never reaches
  * this process at all, since it is spawned detached, exactly like a run's supervisor.
  */
-export async function superviseRoom(projectDir: string, session?: string): Promise<void> {
-  const dir = roomDir(projectDir, session);
-  mkdirSync(dir, { recursive: true });
-  const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
-  const resumeId = readRoomSessionId(projectDir, session);
-
-  const args = [
-    ...(resumeId ? ["--resume", resumeId] : []),
+/**
+ * Pure arg-building for the headless room, pulled out only so it is unit-testable
+ * without spawning a real `claude` process — the array itself is unchanged from before
+ * this extraction, byte for byte.
+ */
+export function buildHeadlessRoomArgs(options: { resumeId?: string; mcpConfigPath: string }): string[] {
+  return [
+    ...(options.resumeId ? ["--resume", options.resumeId] : []),
     "-p",
     "--input-format",
     "stream-json",
@@ -138,7 +138,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
     "stream-json",
     "--verbose",
     "--mcp-config",
-    mcpConfigPath,
+    options.mcpConfigPath,
     "--append-system-prompt",
     MANAGER_CONSTITUTION,
     "--permission-mode",
@@ -153,6 +153,15 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
     "--allowedTools",
     [...MANAGER_ALLOWED_TOOLS, "ToolSearch"].join(","),
   ];
+}
+
+export async function superviseRoom(projectDir: string, session?: string): Promise<void> {
+  const dir = roomDir(projectDir, session);
+  mkdirSync(dir, { recursive: true });
+  const mcpConfigPath = writeRoomMcpConfig(projectDir, session);
+  const resumeId = readRoomSessionId(projectDir, session);
+
+  const args = buildHeadlessRoomArgs({ resumeId, mcpConfigPath });
   const child: ChildProcess = spawn("claude", args, { cwd: projectDir, stdio: ["pipe", "pipe", "pipe"] });
 
   let sessionId: string | undefined = resumeId;
