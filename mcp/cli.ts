@@ -170,7 +170,7 @@ Delegate work (the orchestrator):
   kage runs [--project <dir>]                what every run is doing right now
   kage review --project <dir>                read a finished run's claim and diff
   kage reverify <run-id> --project <dir>     re-check a failed/ready run's existing claim against its worktree — no agent re-run
-  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] --project <dir>   resume a run the kernel stopped on budget — same run, worktree, session
+  kage resume-run <run-id> --budget-usd <n> --project <dir>   resume a run the kernel stopped on budget — same run, worktree, session
   kage adopt <run-id> --project <dir>        verify an orphaned run's worktree when it never got an agent claim
   kage merge <run-id> --project <dir>        land the code and ratify what it learned
 
@@ -309,7 +309,7 @@ Usage:
   kage merge <run-id> [--project <dir>]
   kage reject <run-id> "<reason>" [--project <dir>]
   kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's EXISTING claim against its worktree, no agent re-run — refuses if there is no claim yet (see 'kage adopt')
-  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raised cap
+  kage resume-run <run-id> --budget-usd <n> [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raised budget
   kage adopt <run-id> [--project <dir>]         verify an orphaned run's worktree (supervisor died before an agent claim was written) — refuses while its agent is still alive
   kage orphan-kill <run-id> [--project <dir>]   deliberately kill a live orphaned agent (supervisor dead, agent still working) and show its last recorded spend — never automatic
   kage open <run-id> [--project <dir>]
@@ -2838,11 +2838,7 @@ async function main(): Promise<void> {
     const project = projectArg(args);
     const budgetArg = takeArg(args, "--budget-usd");
     const budgetUsd = budgetArg !== undefined ? Number(budgetArg) : undefined;
-    // Both caps can stop a run, so both must be raisable here. --budget-minutes used to
-    // be accepted and silently discarded, which stranded every run halted on time.
-    const minutesArg = takeArg(args, "--budget-minutes");
-    const budgetMinutes = minutesArg !== undefined ? Number(minutesArg) : undefined;
-    const result = await resumeStoppedRun(project, runId, budgetUsd, adapterByName, undefined, budgetMinutes);
+    const result = await resumeStoppedRun(project, runId, budgetUsd, adapterByName);
     console.log(result.message);
     if (!result.ok) process.exit(2);
     return;

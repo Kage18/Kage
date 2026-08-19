@@ -68,9 +68,6 @@ export async function resumeStoppedRun(
   // here so a test can reattach in-process against a scripted adapter instead of
   // spawning a real `kage supervise` child.
   reattach: (projectDir: string, task: TaskRecord) => { pid: number | undefined } = dispatchDetached,
-  // Trails `reattach` so every existing call site keeps compiling; both caps can stop a
-  // run, so both have to be raisable from here.
-  budgetMinutes?: number,
 ): Promise<ResumeResult> {
   const task = readRun(projectDir, runId);
   if (task.state !== "stopped") {
@@ -80,72 +77,28 @@ export async function resumeStoppedRun(
       message: `${runId} is ${task.state} — resume only makes sense for a run the kernel stopped (state "stopped").`,
     };
   }
-  // Diagnose the cap that ACTUALLY stopped this run and demand a raise for that one.
-  // Reporting the dollar cap for a run halted on minutes sent a real user chasing
-  // `--budget-usd 80` against a $2.78 spend, which could never have helped.
-  const overUsd = task.spend.usd_est > task.budgets.usd;
-  const overMinutes = task.spend.minutes > task.budgets.minutes;
-  const raisedUsd = budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > task.budgets.usd;
-  const raisedMinutes =
-    budgetMinutes !== undefined && Number.isFinite(budgetMinutes) && budgetMinutes > task.budgets.minutes;
-  const unresolved: string[] = [];
-  if (overUsd && !raisedUsd) {
-    unresolved.push(
-      `spend $${task.spend.usd_est.toFixed(2)} is over its $${task.budgets.usd.toFixed(2)} cap — ` +
-        `pass --budget-usd above that, e.g. --budget-usd ${Math.max(task.spend.usd_est + 2, task.budgets.usd * 2).toFixed(2)}`,
-    );
-  }
-  if (overMinutes && !raisedMinutes) {
-    unresolved.push(
-      `${task.spend.minutes.toFixed(1)} min of work is over its ${task.budgets.minutes} min cap — ` +
-        `pass --budget-minutes above that, e.g. --budget-minutes ${Math.max(Math.ceil(task.spend.minutes) + 15, task.budgets.minutes * 2)}`,
-    );
-  }
-  // Neither cap crossed and no raise offered: there is nothing to resume INTO, and
-  // silently reattaching would halt again on the next usage tick.
-  if (!unresolved.length && !raisedUsd && !raisedMinutes) {
-    unresolved.push(
-      `it is stopped but neither cap is crossed ($${task.spend.usd_est.toFixed(2)} of $${task.budgets.usd.toFixed(2)}, ` +
-        `${task.spend.minutes.toFixed(1)} of ${task.budgets.minutes} min) — raise a cap explicitly to resume it anyway`,
-    );
-  }
-  if (unresolved.length) {
+  if (budgetUsd === undefined || !Number.isFinite(budgetUsd) || budgetUsd <= task.budgets.usd) {
     return {
       ok: false,
       task,
-      message: `${runId} cannot resume yet: ${unresolved.join("; and ")}. (${RESUME_STOPPED_RUN_COMMAND})`,
+      message:
+        `${runId} stopped at $${task.spend.usd_est.toFixed(2)} spend against a $${task.budgets.usd.toFixed(2)} budget. ` +
+        `Resume it with a higher budget: ${RESUME_STOPPED_RUN_COMMAND} — e.g. --budget-usd ${Math.max(task.spend.usd_est + 2, task.budgets.usd * 2).toFixed(2)}.`,
     };
   }
-  patchRun(projectDir, runId, {
-    budgets: {
-      ...task.budgets,
-      ...(raisedUsd ? { usd: budgetUsd as number } : {}),
-      ...(raisedMinutes ? { minutes: budgetMinutes as number } : {}),
-    },
-  });
-  // Describe only the caps actually raised, so the sentence never claims a change
-  // that did not happen.
-  const raised = [
-    ...(raisedUsd ? [`$${(budgetUsd as number).toFixed(2)} (was $${task.budgets.usd.toFixed(2)})`] : []),
-    ...(raisedMinutes ? [`${budgetMinutes as number} min (was ${task.budgets.minutes} min)`] : []),
-  ].join(" and ");
-  appendRunLedger(projectDir, {
-    kind: "resumed",
-    run_id: runId,
-    budget_usd: raisedUsd ? budgetUsd : task.budgets.usd,
-    prior_spend_usd: task.spend.usd_est,
-  });
+  patchRun(projectDir, runId, { budgets: { ...task.budgets, usd: budgetUsd } });
+  appendRunLedger(projectDir, { kind: "resumed", run_id: runId, budget_usd: budgetUsd, prior_spend_usd: task.spend.usd_est });
   const steered = await steerRun(
     projectDir,
     runId,
-    `Resuming — your budget was raised to ${raised}. Continue the work from where you left off.`,
+    `Resuming — your budget was raised to $${budgetUsd.toFixed(2)} (it stopped at $${task.spend.usd_est.toFixed(2)} against a $${task.budgets.usd.toFixed(2)} cap). Continue the work from where you left off.`,
     adapterFor,
     reattach,
   );
   return {
     ok: true,
     task: readRun(projectDir, runId),
-    message: `Resumed ${runId} — budget raised to ${raised}. ${steered.message}`,
+    message: `Resumed ${runId} — budget raised to $${budgetUsd.toFixed(2)}. ${steered.message}`,
   };
 }
 

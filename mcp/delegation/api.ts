@@ -1412,16 +1412,7 @@ export async function handleDelegationRoute(
     if (action === "resume-run") {
       const body = await readJsonBody(req);
       const budgetUsd = typeof body.budget_usd === "number" ? body.budget_usd : Number(body.budget_usd);
-      const budgetMinutes =
-        typeof body.budget_minutes === "number" ? body.budget_minutes : Number(body.budget_minutes);
-      const result = await resumeStoppedRun(
-        projectDir,
-        runId,
-        Number.isFinite(budgetUsd) ? budgetUsd : undefined,
-        adapterByName,
-        undefined,
-        Number.isFinite(budgetMinutes) ? budgetMinutes : undefined,
-      );
+      const result = await resumeStoppedRun(projectDir, runId, Number.isFinite(budgetUsd) ? budgetUsd : undefined, adapterByName);
       feed.notify(runId);
       json(res, result.ok ? 200 : 409, { ok: result.ok, detail: result.message, run: result.task });
       return true;
