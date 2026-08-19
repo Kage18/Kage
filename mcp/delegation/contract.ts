@@ -503,6 +503,31 @@ export function recordSpend(
   });
 }
 
+export interface RunBudgetCheck {
+  exceeded: boolean;
+  /** Names both the limit and the actual figure — never just "over budget". */
+  reason?: string;
+}
+
+/**
+ * Whether a run's current estimated spend or elapsed time has already crossed what its
+ * budgets record promised. Pure and side-effect-free so supervisor.ts can call it on
+ * every usage tick to decide whether to halt, and so the decision itself is unit
+ * testable without a live agent process. usd is checked first — it's the figure the
+ * product actually surfaces as a cap elsewhere (goal.ts's checkGoalAcceptsNewRun does
+ * the same comparison for goal-level spend) — then minutes, since either crossing means
+ * the same thing: this run is no longer inside what it was budgeted for.
+ */
+export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
+  if (spend.usd_est > budgets.usd) {
+    return { exceeded: true, reason: `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget` };
+  }
+  if (spend.minutes > budgets.minutes) {
+    return { exceeded: true, reason: `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget` };
+  }
+  return { exceeded: false };
+}
+
 export function patchRun(projectDir: string, runId: string, patch: Partial<TaskRecord>): RunView {
   const task = { ...readRun(projectDir, runId), ...patch, updated_at: nowIso() };
   atomicWriteJson(join(runDir(projectDir, runId), "task.json"), task);

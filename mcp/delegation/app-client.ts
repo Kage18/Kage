@@ -1500,6 +1500,13 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
   var rcost = run ? costLabel(run) : null;
   if (rcost) totalRow("cost", rcost);
   if (run && run.spend && run.spend.minutes) totalRow("time", run.spend.minutes + " min");
+  if (run && run.budgets && run.spend) {
+    if (run.spend.usd_est > run.budgets.usd) {
+      totalRow("budget", "over — $" + run.spend.usd_est.toFixed(2) + " spent against a $" + run.budgets.usd.toFixed(2) + " cap", "hot");
+    } else if (run.spend.minutes > run.budgets.minutes) {
+      totalRow("budget", "over — " + run.spend.minutes.toFixed(1) + " min against a " + run.budgets.minutes + " min cap", "hot");
+    }
+  }
   if (totals.children.length) body.appendChild(totals);
 
   if ((claim.unsure || []).length) {

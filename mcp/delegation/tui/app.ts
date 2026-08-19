@@ -118,6 +118,13 @@ function verboseReceipt(projectDir: string, task: TaskRecord, claim: ClaimRecord
   const finished = task.state_history.find((change) => change.state === "ready" || change.state === "failed")?.at;
   if (started && finished) push(`TOOK       ${formatElapsed(Date.parse(finished) - Date.parse(started))}`);
   push(`BUDGETS    ≤${task.budgets.diff_lines} diff lines · ≤${task.budgets.minutes} min · ≤$${task.budgets.usd}`);
+  if (task.spend.usd_est > 0 || task.spend.minutes > 0) {
+    push(`SPEND      $${task.spend.usd_est.toFixed(2)} · ${task.spend.minutes.toFixed(1)} min`);
+    const overUsd = task.spend.usd_est > task.budgets.usd;
+    const overMinutes = task.spend.minutes > task.budgets.minutes;
+    if (overUsd) push(`           over budget — spent $${task.spend.usd_est.toFixed(2)} against a $${task.budgets.usd.toFixed(2)} cap`);
+    if (overMinutes) push(`           over budget — ran ${task.spend.minutes.toFixed(1)} min against a ${task.budgets.minutes} min cap`);
+  }
   push(`BRIEF BY   ${task.curated_by === "manager" ? "manager (curated)" : "kernel defaults"}`);
   push();
   for (const line of renderJudgment(readJudgment(projectDir, task.id))) push(line);

@@ -25,6 +25,7 @@ import { deliverQueuedSteer, readSteerRecords } from "./dispatch.js";
 import {
   recordSpend,
   buildClaim,
+  checkRunBudget,
   CLAIM_PROTOCOL_VERSION,
   type ClaimRecord,
   RUN_SCHEMA_VERSION,
@@ -96,6 +97,13 @@ interface SupervisorState {
   sessionId?: string;
   finalMessage: string;
   stopped: boolean;
+  /**
+   * Set instead of a generic "stopped by request" note when the kernel itself halted
+   * the run for crossing its budget — names the limit and the actual figure so the
+   * final `stopped` transition (and everything that reads its note) can tell a budget
+   * halt apart from a user-requested stop.
+   */
+  budgetHalted?: string;
 }
 
 /**
@@ -314,6 +322,19 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
             };
             log({ kind: "usage", usd: turnUsage.usd, tokens: turnUsage.tokens });
             recordSpend(projectDir, runId, state.usage);
+            // Enforce the budget the run was DISPATCHED with, not whatever it was
+            // patched to mid-run (budgets aren't mutable in flight, but reading the
+            // original avoids a race with any future editor of this record). Checked
+            // on every turn boundary — the only point this loop has fresh usage at all.
+            if (!state.stopped) {
+              const check = checkRunBudget(readRun(projectDir, runId).spend, task.budgets);
+              if (check.exceeded) {
+                state.stopped = true;
+                state.budgetHalted = check.reason;
+                log({ kind: "budget_halt", reason: check.reason });
+                child.kill("SIGTERM");
+              }
+            }
           }
           const event = progressFromStreamEvent(line);
           if (event) log(event as unknown as Record<string, unknown>);
@@ -428,7 +449,16 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   });
 
   if (state.stopped) {
-    transitionRun(projectDir, runId, "stopped", "user", "stopped by request");
+    // A budget halt is the kernel's own decision, not a user action — and its note
+    // names the limit and the figure that crossed it, so "stopped" never reads as a
+    // generic user-requested stop when it wasn't one.
+    transitionRun(
+      projectDir,
+      runId,
+      "stopped",
+      state.budgetHalted ? "kernel" : "user",
+      state.budgetHalted ?? "stopped by request",
+    );
     return;
   }
 
