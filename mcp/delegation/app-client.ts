@@ -692,10 +692,10 @@ function renderRoom() {
       tl.appendChild(h("span", "", uniq.join(" · ")));
       wrap.appendChild(tl);
     }
-    if (turn.role === "kage" && turn.redactions && turn.redactions.length) {
+    if (turn.role === "kage" && turn.corrections && turn.corrections.length) {
       var meta = h("div", "meta2");
-      meta.appendChild(h("span", "redact", "kernel replaced " + turn.redactions.length + " restated number" +
-        (turn.redactions.length === 1 ? "" : "s") + " — read the card, not the summary"));
+      meta.appendChild(h("span", "redact", "kernel checked " + turn.corrections.length + " restated number" +
+        (turn.corrections.length === 1 ? "" : "s") + " — read the card, not the summary"));
       wrap.appendChild(meta);
     }
     var linked = roomLinkedRuns[index];

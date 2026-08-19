@@ -279,7 +279,7 @@ export interface DelegationApiContext {
   /** Test seam: inject a fake manager so route tests never shell out to a real CLI. */
   askManagerFn?: typeof askManager;
   /** Test seam: replace the whole live-supervisor-or-fallback orchestration below. */
-  askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; redactions?: string[] }>;
+  askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; corrections?: string[] }>;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
   /** Test seam: replace real take-over pty spawning entirely — never a real claude. */
@@ -393,7 +393,7 @@ async function resolveRoomReply(
   message: string,
   historyBefore: RoomHistoryTurn[],
   session?: string,
-): Promise<{ text: string; tools: string[]; redactions?: string[] }> {
+): Promise<{ text: string; tools: string[]; corrections?: string[] }> {
   const { projectDir, feed } = ctx;
   const key = normalizeSessionKey(session);
   // Deltas carry their thread so a client watching thread A never animates typing
@@ -428,7 +428,7 @@ async function resolveRoomReply(
       }
       live = await askRoomSupervisor(projectDir, message, onDelta, key);
     }
-    if (live?.kind === "final") return { text: live.text, tools: live.tools, ...(live.redactions?.length ? { redactions: live.redactions } : {}) };
+    if (live?.kind === "final") return { text: live.text, tools: live.tools, ...(live.corrections?.length ? { corrections: live.corrections } : {}) };
     // live?.kind === "error", or still null after the startup wait — fall through.
   }
 
@@ -439,7 +439,7 @@ async function resolveRoomReply(
     history: historyBefore.map((turn) => ({ role: turn.role, text: turn.text })),
     onEvent: onDelta,
   });
-  return { text: reply.text, tools: reply.tools, ...(reply.redactions?.length ? { redactions: reply.redactions } : {}) };
+  return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}) };
 }
 
 /**
@@ -466,7 +466,7 @@ function queueRoomTurn(
         role: "kage",
         text: reply.text,
         tools: reply.tools,
-        ...(reply.redactions?.length ? { redactions: reply.redactions } : {}),
+        ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
       }, key);
     } catch (error) {
       appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}` }, key);

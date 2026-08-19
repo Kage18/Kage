@@ -26,7 +26,7 @@ import { isProcessAlive, readRun } from "./contract.js";
 import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
-  MANAGER_ALLOWED_TOOLS, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
+  MANAGER_ALLOWED_TOOLS, collectManagerFacts, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import {
@@ -111,7 +111,7 @@ export type RoomControlOp = { op: "ask"; message: string } | { op: "status" } | 
  */
 export type RoomStreamEvent =
   | { kind: "tool" | "text"; text: string }
-  | { kind: "final"; text: string; tools: string[]; redactions?: string[] }
+  | { kind: "final"; text: string; tools: string[]; corrections?: string[] }
   | { kind: "error"; text: string };
 
 function userFrame(message: string): string {
@@ -182,7 +182,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
         const parsed = JSON.parse(line) as { type?: string; result?: unknown };
         if (parsed.type === "result" && activeTurn) {
           const rawText = typeof parsed.result === "string" ? parsed.result : "";
-          const guarded = guardManagerProse(rawText || "(the manager returned nothing)");
+          const guarded = guardManagerProse(rawText || "(the manager returned nothing)", collectManagerFacts(projectDir));
           // Tool names arrived interleaved with "say" text in the tool-push above —
           // separate them back out by re-deriving from the raw lines would duplicate
           // parsing, so keep a dedicated tool list instead of reusing `text` pushes.
@@ -193,7 +193,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
             kind: "final",
             text: guarded.text,
             tools: turn.tools,
-            ...(guarded.redactions.length ? { redactions: guarded.redactions } : {}),
+            ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
           });
           // Now idle: pick up anything the event bridge left pending while this turn
           // was in flight. Self-dials the control socket we are about to listen on
