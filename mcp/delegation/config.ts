@@ -38,6 +38,13 @@ export interface DelegationConfig {
   static_checks?: boolean;
   /** Repo-wide overrides of the per-run budget a hired agent is halted against. */
   budgets?: BudgetsConfig;
+  /**
+   * The worker agent a dispatched run uses when the caller doesn't name one — set from
+   * the app's add-project dialog or `kage projects add --agent`. Plain string, not
+   * AdapterName: config.ts stays independent of adapters/index.ts, and an unknown value
+   * here just falls back to "claude" at the call site rather than failing to parse.
+   */
+  default_agent?: string;
 }
 
 export const DEFAULT_DIFF_BUDGET = 400;

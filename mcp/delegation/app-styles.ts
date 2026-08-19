@@ -818,6 +818,11 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .srow .toggle.on i { left:22px; }
   .settings .sfoot { padding:13px 20px; border-top:1px solid var(--line2); display:flex; gap:10px; align-items:center; }
   .settings .sfoot .msg { font-family:var(--mono); font-size:11px; color:var(--text3); margin-left:auto; }
+  .settings .sfoot .msg.err { color:var(--crimson); }
+  .srow select { width:100%; background:var(--inset); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--r-panel); padding:7px 10px; font-family:var(--mono); font-size:12px; outline:none; }
+  .addproject-candidates { display:flex; flex-direction:column; gap:6px; padding:0 0 13px; }
+  .addproject-cand { display:block; width:100%; text-align:left; font-family:var(--mono); font-size:11.5px; }
 
   /* ---- dispatch modal ---- */
   .overlay { position:fixed; inset:0; background:rgba(10,12,14,.42); display:none; align-items:flex-start;
