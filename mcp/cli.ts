@@ -145,7 +145,7 @@ import { compileBrief, renderBriefCard } from "./delegation/brief.js";
 import { renderClaimCard } from "./delegation/verify.js";
 import { mergeRun, rejectRun, reverifyRun } from "./delegation/ratify.js";
 import { buildReport, markReportRead, renderReport, renderStatusBoard } from "./delegation/report.js";
-import { diffBudget, writeDelegationConfig } from "./delegation/config.js";
+import { diffBudget, readDelegationConfig, writeDelegationConfig } from "./delegation/config.js";
 import { openRoom } from "./delegation/room.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
@@ -294,7 +294,7 @@ Usage:
   kage app [--project <dir>] [--no-open]     the web app: inbox · runs · board (starts the daemon if needed)
   kage ui [--project <dir>]                  full-screen console: board · review · dispatch · memory
   kage room [--project <dir>] [--agent claude|codex]
-  kage dispatch "<intent>" [--agent claude|codex|stub] [--type bugfix|feature|refactor|migration|chore|investigation] [--brief-only]
+  kage dispatch "<intent>" [--agent claude|codex|stub] [--type bugfix|feature|refactor|migration|chore|investigation] [--brief-only] [--budget-usd <n>]
   kage runs [--project <dir>]
   kage status [--watch] [--project <dir>]
   kage task <run-id> [--project <dir>]
@@ -307,7 +307,7 @@ Usage:
   kage stop <run-id> [--project <dir>]
   kage retry <run-id> [--project <dir>]
   kage report [--all] [--project <dir>]
-  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--no-strict] [--no-static-checks] [--project <dir>]
+  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--budget-usd <n>] [--budget-minutes <n>] [--no-strict] [--no-static-checks] [--project <dir>]
 
 Types:
   ${MEMORY_TYPES.join(", ")}`;
@@ -2633,13 +2633,24 @@ async function main(): Promise<void> {
       console.error("No coding agent found on PATH. Install Claude Code or Codex, or dispatch with --agent stub to exercise the loop.");
       process.exit(2);
     }
+    const budgetUsdArg = takeArg(args, "--budget-usd");
+    let budgetUsd: number | undefined;
+    if (budgetUsdArg !== undefined) {
+      budgetUsd = Number(budgetUsdArg);
+      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) {
+        console.error(`--budget-usd must be a positive number, got "${budgetUsdArg}".`);
+        process.exit(2);
+      }
+    }
     const briefOnly = args.includes("--brief-only");
     const dirty = dirtyTreeWarning(project);
     if (dirty) console.log(`  heads up: ${dirty}\n`);
     const adapter = adapterByName(agentName);
     // Compile and SHOW the brief before any work starts — you should be able to read
-    // what was dispatched while the agent is still working on it.
-    const held = await dispatchRun(project, { intent, type: typeArg as RunType, briefOnly: true }, adapter);
+    // what was dispatched while the agent is still working on it. renderBriefCard's
+    // own Budget line is the "surface it at dispatch" half of the contract; the halt
+    // message (checkRunBudget's reason) is the other half, for when it is exceeded.
+    const held = await dispatchRun(project, { intent, type: typeArg as RunType, briefOnly: true, budgetUsd }, adapter);
     console.log(renderBriefCard(held.task, held.plan));
     if (briefOnly) {
       console.log(`\nHeld. Release it with: kage retry ${held.task.id} --project ${project}`);
@@ -2818,9 +2829,21 @@ async function main(): Promise<void> {
     const test = takeArg(args, "--test");
     const setup = takeArg(args, "--setup");
     const budget = takeArg(args, "--diff-budget");
+    const budgetUsd = takeArg(args, "--budget-usd");
+    const budgetMinutes = takeArg(args, "--budget-minutes");
     if (test) patch.test = test;
     if (setup) patch.setup = setup;
     if (budget) patch.diff_budget = Number(budget);
+    if (budgetUsd || budgetMinutes) {
+      // Merge onto whatever budgets are already configured — writeDelegationConfig's
+      // own merge is shallow, so assigning patch.budgets outright would silently drop
+      // a previously-set field this call did not mention.
+      patch.budgets = {
+        ...(readDelegationConfig(project).budgets ?? {}),
+        ...(budgetUsd ? { usd: Number(budgetUsd) } : {}),
+        ...(budgetMinutes ? { minutes: Number(budgetMinutes) } : {}),
+      };
+    }
     if (args.includes("--no-strict")) patch.strict_verify = false;
     if (args.includes("--no-static-checks")) patch.static_checks = false;
     const merged = writeDelegationConfig(project, patch);

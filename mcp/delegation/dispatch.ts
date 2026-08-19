@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import type { Adapter } from "./adapters/types.js";
 import { type BriefPlan, compileBrief, renderBrief } from "./brief.js";
-import { strictVerify } from "./config.js";
+import { effectiveBudgets, strictVerify } from "./config.js";
 import {
   recordSpend,
   CLAIM_PROTOCOL_VERSION,
@@ -60,6 +60,12 @@ export interface DispatchOptions {
    * created a real run.
    */
   goalId?: string;
+  /**
+   * Per-dispatch override of the usd budget, for one task worth more than the repo
+   * default — e.g. `kage dispatch --budget-usd 8`. Always wins over the repo's
+   * configured budgets.usd, which itself wins over DEFAULT_RUN_BUDGETS.usd.
+   */
+  budgetUsd?: number;
 }
 
 // A run branches from HEAD. Uncommitted work is therefore invisible to the agent and
@@ -236,6 +242,10 @@ export async function dispatchRun(projectDir: string, options: DispatchOptions, 
     // The flywheel's forward edge: which packets this brief carries (post-judgment,
     // so a memory the manager dropped is not claimed as briefed).
     briefMemoryIds: plan.memories.map((memory) => memory.id),
+    // Override > repo config > DEFAULT_RUN_BUDGETS (contract.ts's createRun applies the
+    // hardcoded default underneath this, but effectiveBudgets already returns a fully
+    // resolved object, so nothing here is ever partial).
+    budgets: effectiveBudgets(projectDir, options.budgetUsd !== undefined ? { usd: options.budgetUsd } : undefined),
   });
   // Attach to the goal BEFORE the brief is written and long before the agent runs —
   // dispatchRun executes the whole run (agent work plus verification), so attaching

@@ -4,6 +4,20 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+/**
+ * Per-run spend/time/diff-size caps a hired agent is halted against — every field is
+ * optional so a config that sets only `usd` leaves `minutes` and `diff_lines` at their
+ * defaults (see effectiveBudgets). `diff_lines` here and the older top-level
+ * `diff_budget` key name the SAME cap; when both are set, `diff_lines` wins — routing
+ * every reader (diffBudget(), and the RunBudgets a dispatch is created with) through
+ * configuredBudgets() below is what keeps the two from silently drifting apart.
+ */
+export interface BudgetsConfig {
+  usd?: number;
+  minutes?: number;
+  diff_lines?: number;
+}
+
 export interface DelegationConfig {
   /** Command run once in a fresh worktree before the agent starts (e.g. "npm install"). */
   setup?: string;
@@ -22,10 +36,17 @@ export interface DelegationConfig {
    * for a non-TypeScript repo that wants to skip the resolution attempt entirely.
    */
   static_checks?: boolean;
+  /** Repo-wide overrides of the per-run budget a hired agent is halted against. */
+  budgets?: BudgetsConfig;
 }
 
 export const DEFAULT_DIFF_BUDGET = 400;
 export const DEFAULT_MAX_CONCURRENT = 3;
+// Mirrors contract.ts's DEFAULT_RUN_BUDGETS (usd/minutes) — kept here rather than
+// imported so config.ts, the layer contract.ts's kernel is read BY, never depends on
+// the kernel itself. Do not change these without changing DEFAULT_RUN_BUDGETS too.
+export const DEFAULT_RUN_BUDGET_USD = 2;
+export const DEFAULT_RUN_BUDGET_MINUTES = 30;
 
 function configPath(projectDir: string): string {
   return join(projectDir, ".agent_memory", "config.json");
@@ -83,7 +104,41 @@ export function resolveTestCommand(projectDir: string): string | null {
 }
 
 export function diffBudget(projectDir: string): number {
-  return readDelegationConfig(projectDir).diff_budget ?? DEFAULT_DIFF_BUDGET;
+  return configuredBudgets(projectDir).diff_lines;
+}
+
+/**
+ * The repo's configured run budgets, fully defaulted — usd/minutes default from
+ * DEFAULT_RUN_BUDGET_USD/MINUTES, diff_lines from budgets.diff_lines, falling back to
+ * the legacy top-level diff_budget, falling back to DEFAULT_DIFF_BUDGET. This is the
+ * ONLY place that resolves diff_lines vs diff_budget, so every caller (diffBudget()
+ * above, and dispatch's effectiveBudgets() below) always agrees on one number.
+ */
+export function configuredBudgets(projectDir: string): { usd: number; minutes: number; diff_lines: number } {
+  const config = readDelegationConfig(projectDir);
+  const configured = config.budgets ?? {};
+  return {
+    usd: configured.usd ?? DEFAULT_RUN_BUDGET_USD,
+    minutes: configured.minutes ?? DEFAULT_RUN_BUDGET_MINUTES,
+    diff_lines: configured.diff_lines ?? config.diff_budget ?? DEFAULT_DIFF_BUDGET,
+  };
+}
+
+/**
+ * configuredBudgets(), with an explicit per-dispatch override laid on top — an override
+ * always wins over config, which wins over the default. Used at dispatch time to build
+ * the RunBudgets a run is created with (e.g. `kage dispatch --budget-usd`).
+ */
+export function effectiveBudgets(
+  projectDir: string,
+  override?: Partial<{ usd: number; minutes: number; diff_lines: number }>,
+): { usd: number; minutes: number; diff_lines: number } {
+  const configured = configuredBudgets(projectDir);
+  return {
+    usd: override?.usd ?? configured.usd,
+    minutes: override?.minutes ?? configured.minutes,
+    diff_lines: override?.diff_lines ?? configured.diff_lines,
+  };
 }
 
 export function strictVerify(projectDir: string): boolean {
