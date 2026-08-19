@@ -67,6 +67,7 @@ export interface MemoryValue {
 
 export interface MemoryHealth {
   approved: number;
+  /** As of the last `kage refresh`, not live — `kage stale`'s count is the live, actionable one and can differ. */
   stale: number;
   high_signal: number;
   duplicate_pairs: number;
