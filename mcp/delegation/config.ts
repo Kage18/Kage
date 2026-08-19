@@ -38,6 +38,12 @@ export interface DelegationConfig {
   static_checks?: boolean;
   /** Repo-wide overrides of the per-run budget a hired agent is halted against. */
   budgets?: BudgetsConfig;
+  /**
+   * Reach the daemon from another device on the local network (a phone), not just this
+   * machine. Off by default — enabling it binds the daemon to the LAN interface as well
+   * as loopback and requires a pairing secret on every request that arrives that way.
+   */
+  lan?: boolean;
 }
 
 export const DEFAULT_DIFF_BUDGET = 400;
@@ -151,4 +157,8 @@ export function maxConcurrent(projectDir: string): number {
 
 export function staticChecksEnabled(projectDir: string): boolean {
   return readDelegationConfig(projectDir).static_checks !== false;
+}
+
+export function lanModeEnabled(projectDir: string): boolean {
+  return readDelegationConfig(projectDir).lan === true;
 }
