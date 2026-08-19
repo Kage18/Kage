@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { diffBudget } from "./config.js";
-import { type CheckOutcome, type CheckSpec, type ClaimRecord, runEvidenceDir } from "./contract.js";
+import { type CheckOutcome, type CheckSpec, type ClaimRecord, type TaskRecord, runEvidenceDir } from "./contract.js";
 import { type DiffStats, git, stageAndMeasure } from "./git.js";
 import type { ProgressSink } from "./progress.js";
 
@@ -238,14 +238,41 @@ export function claimVerdict(claim: ClaimRecord): { label: string; executed: boo
   return { label: `VERIFIED ${passedCount}/${claim.checks.length}`, executed: true, passed: true };
 }
 
-// The receipt. Verdicts first, diff second — reviewers read evidence, not walls of diff.
-export function renderClaimCard(claim: ClaimRecord, options: { budget: number }): string {
+// Did THIS check actually execute code, or only inspect static facts (diff size, a cited
+// path existing, a kernel analysis)? Both are legitimate evidence, but they are not the
+// same KIND of evidence, and a card that lists them in the same register is the exact
+// ambiguity claimVerdict exists to resolve. Kept as a three-way register rather than a
+// boolean so a command that COULD NOT run (no interpreter, no cmd at all) reads as
+// "not run" rather than lying in either direction.
+function checkRegister(check: CheckOutcome): "ran" | "inspected" | "not run" {
+  if (check.kind !== "command") return "inspected";
+  return check.result === "pass" || check.result === "fail" ? "ran" : "not run";
+}
+
+// The bill, when the caller has it. Cost lives on the TaskRecord (what the run spent),
+// not the ClaimRecord (what was found true) — optional so callers that only have the
+// claim keep compiling unchanged; callers that also hold the task should pass it so cost
+// reads next to the diff it bought, not as metadata looked up somewhere else.
+function formatSpend(task?: TaskRecord): string | undefined {
+  if (!task) return undefined;
+  const usd = task.spend.usd_est > 0 ? `$${task.spend.usd_est.toFixed(2)}` : undefined;
+  const minutes = task.spend.minutes > 0 ? `${task.spend.minutes.toFixed(1)} min` : undefined;
+  return usd || minutes ? [usd, minutes].filter(Boolean).join(" · ") : undefined;
+}
+
+// The receipt — the one artifact competitors do not have. Ranked by what a reader needs
+// next, not by when the kernel computed it: (1) who checked this — the sentence that IS
+// the product, leading the card rather than trailing it in parentheses; (2) what actually
+// ran vs. what was merely inspected, per check; (3) what the agent itself flagged unsure,
+// since that is frequently the most useful sentence on the card; (4) the bill — diff and
+// cost — last, because a reviewer reads evidence before they read what it cost.
+export function renderClaimCard(claim: ClaimRecord, options: { budget: number; task?: TaskRecord }): string {
   const symbolFor = (result: CheckOutcome["result"]): string =>
     result === "pass" ? "✓" : result === "fail" ? "✗" : result === "unverified_no_env" ? "?" : "·";
   const decision = claimVerdict(claim);
   const verdict = decision.label;
   const lines = [
-    `┌ CLAIM · ${claim.run_id} — ${verdict} (checks run by Kage, not the agent)`,
+    `┌ ${verdict} — checks run by Kage, not the agent · ${claim.run_id}`,
     `│ "${claim.statement}"`,
   ];
   if (claim.reverified_at) {
@@ -260,16 +287,19 @@ export function renderClaimCard(claim: ClaimRecord, options: { budget: number })
         : check.cmd
           ? `${check.cmd} → exit ${check.exit_code}`
           : check.expect;
-    lines.push(`│ ${symbolFor(check.result)} ${check.id.padEnd(11)} ${detail}${check.evidence ? `   ${check.evidence}` : ""}`);
+    lines.push(
+      `│ ${symbolFor(check.result)} ${check.id.padEnd(11)} ${checkRegister(check).padEnd(9)} ${detail}${check.evidence ? `   ${check.evidence}` : ""}`,
+    );
     for (const warning of check.warnings ?? []) lines.push(`│     ⚠ ${warning}`);
   }
-  lines.push(`│ · diff        ${claim.diff.files} file(s), ${claim.diff.lines} line(s)`);
   if (!decision.executed) {
     lines.push("│ ! no test     no command ran here — set one with `kage config --test \"<cmd>\"`,");
     lines.push("│               or review this diff yourself before trusting it");
   }
   if (!claim.protocol_ok) lines.push("│ ! protocol    agent skipped the claim fence — statement derived from the diff");
   for (const unsure of claim.unsure) lines.push(`│ ⚠ unsure      ${unsure}`);
+  const spend = formatSpend(options.task);
+  lines.push(`│ · touched     ${claim.diff.files} file(s), ${claim.diff.lines} line(s)${spend ? `  ·  cost ${spend}` : ""}`);
   for (const learning of claim.learnings) lines.push(`│ + learned     ${learning}`);
   lines.push("└────────────────────────────────────────────────────────────────");
   if (claim.diff.lines > options.budget) {

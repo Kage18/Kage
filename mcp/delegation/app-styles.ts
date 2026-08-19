@@ -584,8 +584,12 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .stamp .count { font-family:var(--mono); font-size:13px; letter-spacing:0; align-self:center; }
   .stamp.warn { border-color:var(--amber); color:var(--amber); }
   .stamp.bad { border-color:var(--crimson); color:var(--crimson); }
-  .verdict-sub { font-size:11px; color:color-mix(in srgb, var(--code-text) 55%, transparent);
-    font-family:var(--mono); letter-spacing:.04em; }
+  /* The one sentence that is the whole product: not the smallest text on the card
+     any more — a bordered badge sitting right under the verdict it belongs to. */
+  .verdict-sub { font-size:11.5px; font-weight:700; color:var(--code-text);
+    font-family:var(--mono); letter-spacing:.05em; text-transform:uppercase;
+    border:1px solid color-mix(in srgb, var(--code-text) 35%, transparent);
+    border-radius:20px; padding:3px 12px; }
   .claim-statement { font-size:14px; line-height:1.6; color:var(--code-text);
     text-align:center; margin:0 auto 18px; max-width:46ch;
     border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent);
@@ -593,13 +597,19 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .checks { display:flex; flex-direction:column; margin-bottom:6px;
     border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent);
     padding-top:12px; }
-  .check { display:grid; grid-template-columns:20px 120px 1fr auto; gap:10px; align-items:baseline;
+  .check { display:grid; grid-template-columns:20px 104px 62px 1fr auto; gap:10px; align-items:baseline;
     padding:6px 0; font-size:12.5px; font-family:var(--mono); }
   .check .mark { font-weight:700; text-align:center; }
   .check.pass .mark { color:var(--green); }
   .check.fail .mark { color:var(--crimson); }
   .check.skip .mark { color:var(--amber); }
   .check .name { font-weight:600; color:var(--code-text); }
+  /* ran = a command actually executed and produced an exit code; inspected = a static
+     fact (diff size, a cited path existing) — categorically weaker evidence, and the
+     card must never let the two blend together. */
+  .check .register { font-size:9.5px; text-transform:uppercase; letter-spacing:.08em;
+    color:color-mix(in srgb, var(--code-text) 45%, transparent); }
+  .check .register.ran { color:var(--green); font-weight:700; }
   .check .detail { color:color-mix(in srgb, var(--code-text) 55%, transparent); font-size:11px;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .check .ev { font-size:10.5px; color:color-mix(in srgb, var(--code-text) 55%, transparent); }

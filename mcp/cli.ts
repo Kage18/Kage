@@ -2729,7 +2729,7 @@ async function main(): Promise<void> {
     }
     console.log("");
     const claim = readClaim(project, task.id);
-    if (claim) console.log(renderClaimCard(claim, { budget: diffBudget(project) }));
+    if (claim) console.log(renderClaimCard(claim, { budget: diffBudget(project), task }));
     else console.log(renderRunCard(task));
     return;
   }
@@ -2817,7 +2817,7 @@ async function main(): Promise<void> {
     console.log(`  ${INLINE_RUN_WARNING}\n`);
     const plan = compileBrief(project, task.intent, task.type);
     const result = await executeRun(project, runId, plan, adapterByName(task.agent), { progress: !args.includes("--quiet") });
-    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project) }));
+    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project), task: result.task }));
     else console.log(renderRunCard(result.task));
     return;
   }
@@ -2918,7 +2918,7 @@ async function main(): Promise<void> {
       console.log(`${renderRunCard(task)}\nNo claim yet — this run is ${task.state}.`);
       return;
     }
-    console.log(renderClaimCard(claim, { budget: diffBudget(project) }));
+    console.log(renderClaimCard(claim, { budget: diffBudget(project), task }));
     console.log(`\nDiff:  git -C ${runWorkspacePath(project, task)} diff --cached`);
     console.log(`Take over:  kage open ${runId}`);
     console.log(`Accept:  kage merge ${runId}   ·   Refuse:  kage reject ${runId} "<reason>"`);
