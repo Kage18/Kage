@@ -493,7 +493,45 @@ export function listRuns(projectDir: string): RunView[] {
   return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-/** Merge fields into a run record without touching its state machine. */
+/**
+ * Minutes actually spent RUNNING — the meter this product enforces against, and NOT
+ * wall-clock since dispatch. Sums only the intervals between a "running" entry and
+ * whatever transition ends it (or now, if it is still running), so a run that sits
+ * `stopped` for an hour between a budget halt and a human's `kage resume-run` does not
+ * come back reading an hour more expensive: nothing was running during that hour.
+ * Multiple running intervals (a run stopped and resumed more than once) all count —
+ * this is total WORK time, not time-since-first-dispatch.
+ */
+export function runningMinutesElapsed(history: readonly RunStateChange[], nowMs: number = Date.now()): number {
+  let totalMs = 0;
+  for (let index = 0; index < history.length; index += 1) {
+    if (history[index].state !== "running") continue;
+    const start = new Date(history[index].at).getTime();
+    const next = history[index + 1];
+    const end = next ? new Date(next.at).getTime() : nowMs;
+    totalMs += Math.max(0, end - start);
+  }
+  return totalMs / 60_000;
+}
+
+/**
+ * The milliseconds every "elapsed" DISPLAY (kage status's board, kage ui's run rows)
+ * should show — work time once a run has actually started running, same as
+ * runningMinutesElapsed and for the same reason (idle/stopped time is not elapsed
+ * WORK); real wall-clock-since-created for a run still waiting to start (briefed/
+ * dispatched), since no work has begun yet and "how long has this sat there" is exactly
+ * the honest question at that stage. Both report.ts and tui/app.ts used to hand-roll
+ * `now - Date.parse(first "running" entry ?? created_at)` independently of recordSpend —
+ * the identical wall-clock bug, just duplicated on the READ side: a run stopped for an
+ * hour read an hour more elapsed on every board that showed it, same as its enforced
+ * spend once did before recordSpend was fixed.
+ */
+export function displayElapsedMs(task: Pick<TaskRecord, "state_history" | "created_at">, nowMs: number = Date.now()): number {
+  const hasStartedRunning = task.state_history.some((entry) => entry.state === "running");
+  if (!hasStartedRunning) return Math.max(0, nowMs - new Date(task.created_at).getTime());
+  return runningMinutesElapsed(task.state_history, nowMs) * 60_000;
+}
+
 /**
  * Record what a run actually cost, from the agent CLI's own report. One function,
  * called by BOTH execution paths (dispatch foreground, supervisor detached), because
@@ -508,8 +546,7 @@ export function recordSpend(
 ): void {
   if (!usage || (usage.usd <= 0 && usage.tokens <= 0)) return;
   const task = readRun(projectDir, runId);
-  const started = task.state_history.find((entry) => entry.state === "running")?.at ?? task.created_at;
-  const minutes = Math.max(0, (Date.now() - new Date(started).getTime()) / 60_000);
+  const minutes = runningMinutesElapsed(task.state_history);
   patchRun(projectDir, runId, {
     spend: { usd_est: Math.round(usage.usd * 10_000) / 10_000, minutes: Math.round(minutes * 10) / 10 },
     tokens_used: usage.tokens,
@@ -539,6 +576,12 @@ export interface RunBudgetCheck {
 // Not `kage resume` — that name is already the memory-session-resume command
 // (kageResume, prints prior session context for hooks); this one is scoped to a run.
 export const RESUME_STOPPED_RUN_COMMAND = "kage resume-run <run-id> --budget-usd <n>";
+// A distinct command for the minutes cap — never dollar advice for a minutes stop.
+// Resuming does NOT re-read .agent_memory/config.json (a run's budgets are stamped at
+// dispatch and only ever change via an explicit resume-run flag); config only sets the
+// default for FUTURE runs, which is why both reasons below name resume-run first and
+// config second, never the other way around.
+export const RESUME_STOPPED_RUN_MINUTES_COMMAND = "kage resume-run <run-id> --budget-minutes <n>";
 
 export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
   if (spend.usd_est > budgets.usd) {
@@ -554,13 +597,15 @@ export function checkRunBudget(spend: { usd_est: number; minutes: number }, budg
     return {
       exceeded: true,
       reason:
-        `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget — raise it by setting ` +
-        "`budgets.minutes` in .agent_memory/config.json",
+        `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget — resume it with ` +
+        `\`${RESUME_STOPPED_RUN_MINUTES_COMMAND}\` (same run, same worktree, higher minutes budget), or set ` +
+        "`budgets.minutes` in .agent_memory/config.json to raise the default for every future run",
     };
   }
   return { exceeded: false };
 }
 
+/** Merge fields into a run record without touching its state machine. */
 export function patchRun(projectDir: string, runId: string, patch: Partial<TaskRecord>): RunView {
   const task = { ...readRun(projectDir, runId), ...patch, updated_at: nowIso() };
   atomicWriteJson(join(runDir(projectDir, runId), "task.json"), task);

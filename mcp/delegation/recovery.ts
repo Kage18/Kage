@@ -24,6 +24,7 @@ import {
   type RunState,
   type TaskRecord,
   RESUME_STOPPED_RUN_COMMAND,
+  RESUME_STOPPED_RUN_MINUTES_COMMAND,
   appendRunLedger,
   buildClaim,
   displayState,
@@ -53,16 +54,25 @@ export interface ResumeResult {
 }
 
 /**
- * Resume a run the kernel stopped for crossing its budget, with a raised budget, the
- * SAME run id, worktree and branch, and — reusing steer.ts's reattach machinery — the
- * same agent session, so the agent picks up with its own context intact rather than
- * starting cold. Refuses without a budget strictly higher than the one that stopped it:
- * resuming into the same cap would halt again on the very next usage tick.
+ * Resume a run the kernel stopped for crossing its budget, with whichever cap(s)
+ * actually tripped raised, the SAME run id, worktree and branch, and — reusing
+ * steer.ts's reattach machinery — the same agent session, so the agent picks up with
+ * its own context intact rather than starting cold.
+ *
+ * A run's `spend` is frozen the instant it stops (recordSpend only ever runs on a live
+ * usage tick, never while stopped), so comparing that frozen figure against the run's
+ * OWN budgets — right here, not the stop note's prose — says exactly which cap tripped:
+ * usd, minutes, or both. Only THAT cap is required to be raised before resuming, and the
+ * refusal names only that cap's real numbers and its own fix command — never dollar
+ * advice for a minutes stop, or the reverse. A budget arg the caller supplies for a cap
+ * that did NOT trip is still honoured if it raises that cap (never silently dropped),
+ * it just isn't required to unblock the resume.
  */
 export async function resumeStoppedRun(
   projectDir: string,
   runId: string,
   budgetUsd: number | undefined,
+  budgetMinutes: number | undefined,
   adapterFor: (name: string) => Adapter,
   // Test seam: steerRun itself defaults `reattach` to dispatchDetached; threaded through
   // here so a test can reattach in-process against a scripted adapter instead of
@@ -77,28 +87,63 @@ export async function resumeStoppedRun(
       message: `${runId} is ${task.state} — resume only makes sense for a run the kernel stopped (state "stopped").`,
     };
   }
-  if (budgetUsd === undefined || !Number.isFinite(budgetUsd) || budgetUsd <= task.budgets.usd) {
+
+  const usdExceeded = task.spend.usd_est > task.budgets.usd;
+  const minutesExceeded = task.spend.minutes > task.budgets.minutes;
+  const usdRaised = budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > task.budgets.usd;
+  const minutesRaised = budgetMinutes !== undefined && Number.isFinite(budgetMinutes) && budgetMinutes > task.budgets.minutes;
+
+  if (usdExceeded && !usdRaised) {
     return {
       ok: false,
       task,
       message:
         `${runId} stopped at $${task.spend.usd_est.toFixed(2)} spend against a $${task.budgets.usd.toFixed(2)} budget. ` +
-        `Resume it with a higher budget: ${RESUME_STOPPED_RUN_COMMAND} — e.g. --budget-usd ${Math.max(task.spend.usd_est + 2, task.budgets.usd * 2).toFixed(2)}.`,
+        `Resume it with a higher usd budget: ${RESUME_STOPPED_RUN_COMMAND} — e.g. --budget-usd ${Math.max(task.spend.usd_est + 2, task.budgets.usd * 2).toFixed(2)}.`,
     };
   }
-  patchRun(projectDir, runId, { budgets: { ...task.budgets, usd: budgetUsd } });
-  appendRunLedger(projectDir, { kind: "resumed", run_id: runId, budget_usd: budgetUsd, prior_spend_usd: task.spend.usd_est });
+  if (minutesExceeded && !minutesRaised) {
+    return {
+      ok: false,
+      task,
+      message:
+        `${runId} stopped at ${task.spend.minutes.toFixed(1)} min elapsed against a ${task.budgets.minutes} min budget. ` +
+        `Resume it with a higher minutes budget: ${RESUME_STOPPED_RUN_MINUTES_COMMAND} — e.g. --budget-minutes ${Math.max(Math.ceil(task.spend.minutes) + 15, task.budgets.minutes * 2)}.`,
+    };
+  }
+
+  const nextBudgets = { ...task.budgets };
+  const raises: string[] = [];
+  if (usdRaised) {
+    nextBudgets.usd = budgetUsd as number;
+    raises.push(`$${(budgetUsd as number).toFixed(2)} usd`);
+  }
+  if (minutesRaised) {
+    nextBudgets.minutes = budgetMinutes as number;
+    raises.push(`${budgetMinutes} min`);
+  }
+  const raiseNote = raises.length ? `budget raised (${raises.join(", ")})` : "no budget cap had tripped";
+
+  patchRun(projectDir, runId, { budgets: nextBudgets });
+  appendRunLedger(projectDir, {
+    kind: "resumed",
+    run_id: runId,
+    budget_usd: nextBudgets.usd,
+    budget_minutes: nextBudgets.minutes,
+    prior_spend_usd: task.spend.usd_est,
+    prior_spend_minutes: task.spend.minutes,
+  });
   const steered = await steerRun(
     projectDir,
     runId,
-    `Resuming — your budget was raised to $${budgetUsd.toFixed(2)} (it stopped at $${task.spend.usd_est.toFixed(2)} against a $${task.budgets.usd.toFixed(2)} cap). Continue the work from where you left off.`,
+    `Resuming — ${raiseNote} (it stopped at $${task.spend.usd_est.toFixed(2)} / ${task.spend.minutes.toFixed(1)} min). Continue the work from where you left off.`,
     adapterFor,
     reattach,
   );
   return {
     ok: true,
     task: readRun(projectDir, runId),
-    message: `Resumed ${runId} — budget raised to $${budgetUsd.toFixed(2)}. ${steered.message}`,
+    message: `Resumed ${runId} — ${raiseNote}. ${steered.message}`,
   };
 }
 

@@ -3,8 +3,8 @@
 // the user can act on in two minutes.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Adapter } from "./adapters/types.js";
 import { type BriefPlan, compileBrief, renderBrief } from "./brief.js";
 import { effectiveBudgets, strictVerify } from "./config.js";
@@ -23,6 +23,7 @@ import {
   patchRun,
   readRun,
   runDir,
+  runSupervisorLogPath,
   runTranscriptPath,
   runWorkDir,
   transitionRun,
@@ -384,11 +385,28 @@ export async function executeRun(
 export function dispatchDetached(projectDir: string, task: TaskRecord): { pid: number | undefined } {
   // CommonJS build: __dirname is dist/delegation, so the CLI is one level up.
   const entry = join(__dirname, "..", "cli.js");
-  const child = spawn(process.execPath, [entry, "supervise", task.id, "--project", projectDir], {
-    cwd: projectDir,
-    detached: true,
-    stdio: "ignore",
-  });
+  // A supervisor that dies before it reaches its OWN diagnostic log (contract.ts's
+  // runSupervisorLogPath — normally the first thing superviseRun writes) used to leave
+  // NOTHING: stdio: "ignore" discarded stdout/stderr — including an uncaught exception's
+  // full stack trace — along with everything else. Two real runs lost their supervisor
+  // within seconds of dispatch on 2026-08-19 and left a dead pid, a live orphaned agent,
+  // and no reason anywhere. Point the child's own stdout/stderr at the same log file
+  // instead of discarding it, so the next such death has something to read.
+  const logPath = runSupervisorLogPath(projectDir, task.id);
+  mkdirSync(dirname(logPath), { recursive: true });
+  const logFd = openSync(logPath, "a");
+  let child;
+  try {
+    child = spawn(process.execPath, [entry, "supervise", task.id, "--project", projectDir], {
+      cwd: projectDir,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+  } finally {
+    // The child dup'd its own copy of the fd when spawned; this process's handle to it
+    // is no longer needed.
+    closeSync(logFd);
+  }
   child.unref();
   appendRunLedger(projectDir, { kind: "supervisor_spawned", run_id: task.id, pid: child.pid });
   return { pid: child.pid };

@@ -4,7 +4,7 @@
 // is the ONLY thing that reports — there are no other notifications.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type RunView, listRuns, readClaim, runDir, runTranscriptPath } from "./contract.js";
+import { type RunView, displayElapsedMs, listRuns, readClaim, runDir, runTranscriptPath } from "./contract.js";
 import { formatElapsed, readActivity } from "./progress.js";
 import { renderCurationLine, renderTrustLine } from "./trackrecord.js";
 import { claimVerdict } from "./verify.js";
@@ -106,8 +106,14 @@ export function renderStatusBoard(projectDir: string): string {
   if (!runs.length) return 'No open runs. Dispatch one:  kage dispatch "<intent>"';
   const now = Date.now();
   const rows = runs.map((task) => {
-    const started = Date.parse(task.state_history.find((change) => change.state === "running")?.at ?? task.created_at);
-    const elapsed = Number.isFinite(started) ? formatElapsed(now - started) : "-";
+    // displayElapsedMs, not wall-clock since first "running" — a run stopped for an
+    // hour must not read an hour more elapsed than it actually was (REVERT CHECK: the
+    // old `now - Date.parse(first "running" entry)` formula counted every minute a
+    // stopped run sat idle, defeating `kage resume-run` for the exact runs it exists to
+    // rescue — reproduced live: a run read 26.8m when the kernel stopped it, sat idle
+    // with nothing running, and later read 128.0m with zero work done in between).
+    const elapsedMs = displayElapsedMs(task, now);
+    const elapsed = Number.isFinite(elapsedMs) ? formatElapsed(elapsedMs) : "-";
     const stale = task.display_state === "dropped";
     const badge = stale
       ? "!"

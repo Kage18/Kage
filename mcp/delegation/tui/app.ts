@@ -8,7 +8,7 @@ import { packetProvenance } from "../provenance.js";
 import { adapterByName, detectAgent } from "../adapters/index.js";
 import { compileBrief, renderBrief } from "../brief.js";
 import { diffBudget } from "../config.js";
-import { CLAIM_PROTOCOL_VERSION, type ClaimRecord, type RunView, type TaskRecord, listRuns, readClaim, readRun, runDir, runTranscriptPath } from "../contract.js";
+import { CLAIM_PROTOCOL_VERSION, type ClaimRecord, type RunView, type TaskRecord, displayElapsedMs, listRuns, readClaim, readRun, runDir, runTranscriptPath } from "../contract.js";
 import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "../dispatch.js";
 import { git } from "../git.js";
 import { readJudgment, renderJudgment } from "../manager.js";
@@ -44,7 +44,11 @@ function lastNote(task: TaskRecord): string {
 export function loadRunRows(projectDir: string): RunRow[] {
   const now = Date.now();
   return listRuns(projectDir).map((task) => {
-    const started = Date.parse(task.state_history.find((change) => change.state === "running")?.at ?? task.created_at);
+    // displayElapsedMs, not wall-clock since first "running" — a run stopped for an
+    // hour must not read an hour more elapsed than it actually was (the same idle-time
+    // bug recordSpend had, duplicated here on the read side; see contract.ts's
+    // displayElapsedMs).
+    const elapsedMs = displayElapsedMs(task, now);
     // One derivation for every surface — see contract.ts displayState.
     const stale = task.display_state === "dropped";
     let detail: string;
@@ -72,7 +76,7 @@ export function loadRunRows(projectDir: string): RunRow[] {
       type: task.type,
       agent: task.agent,
       intent: task.intent,
-      elapsed: Number.isFinite(started) ? formatElapsed(now - started) : "-",
+      elapsed: Number.isFinite(elapsedMs) ? formatElapsed(elapsedMs) : "-",
       detail,
       needsYou: task.ownership === "needs_you",
     };

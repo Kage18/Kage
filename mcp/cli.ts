@@ -170,7 +170,7 @@ Delegate work (the orchestrator):
   kage runs [--project <dir>]                what every run is doing right now
   kage review --project <dir>                read a finished run's claim and diff
   kage reverify <run-id> --project <dir>     re-check a failed/ready run's existing claim against its worktree — no agent re-run
-  kage resume-run <run-id> --budget-usd <n> --project <dir>   resume a run the kernel stopped on budget — same run, worktree, session
+  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] --project <dir>   resume a run the kernel stopped on budget — raise whichever cap tripped
   kage adopt <run-id> --project <dir>        verify an orphaned run's worktree when it never got an agent claim
   kage merge <run-id> --project <dir>        land the code and ratify what it learned
 
@@ -309,7 +309,7 @@ Usage:
   kage merge <run-id> [--project <dir>]
   kage reject <run-id> "<reason>" [--project <dir>]
   kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's EXISTING claim against its worktree, no agent re-run — refuses if there is no claim yet (see 'kage adopt')
-  kage resume-run <run-id> --budget-usd <n> [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raised budget
+  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raises whichever cap (usd, minutes, or both) actually tripped
   kage adopt <run-id> [--project <dir>]         verify an orphaned run's worktree (supervisor died before an agent claim was written) — refuses while its agent is still alive
   kage orphan-kill <run-id> [--project <dir>]   deliberately kill a live orphaned agent (supervisor dead, agent still working) and show its last recorded spend — never automatic
   kage open <run-id> [--project <dir>]
@@ -2838,7 +2838,9 @@ async function main(): Promise<void> {
     const project = projectArg(args);
     const budgetArg = takeArg(args, "--budget-usd");
     const budgetUsd = budgetArg !== undefined ? Number(budgetArg) : undefined;
-    const result = await resumeStoppedRun(project, runId, budgetUsd, adapterByName);
+    const budgetMinutesArg = takeArg(args, "--budget-minutes");
+    const budgetMinutes = budgetMinutesArg !== undefined ? Number(budgetMinutesArg) : undefined;
+    const result = await resumeStoppedRun(project, runId, budgetUsd, budgetMinutes, adapterByName);
     console.log(result.message);
     if (!result.ok) process.exit(2);
     return;
@@ -2947,6 +2949,30 @@ async function main(): Promise<void> {
     if (args.includes("--no-static-checks")) patch.static_checks = false;
     const merged = writeDelegationConfig(project, patch);
     console.log(JSON.stringify(merged, null, 2));
+    // config.json itself is read fresh on every dispatch (readDelegationConfig does a
+    // plain readFileSync, no in-memory cache of its own) — but a long-lived `kage daemon`
+    // process for this project may still be holding budgets, MCP config, or a manager
+    // session that was assembled from an earlier read and never revisited. Observed live:
+    // budgets set here took no effect on runs dispatched through a daemon that had been up
+    // for hours, until the daemon itself was restarted. Silently ignoring a setting the
+    // user just changed is its own defect — say so honestly, only when a daemon for this
+    // project is actually running (readDaemonStatus + a real liveness check, never a
+    // blanket warning for a project with no daemon at all).
+    const daemonStatus = readDaemonStatus(project);
+    if (daemonStatus) {
+      let daemonAlive = false;
+      try {
+        process.kill(daemonStatus.pid, 0);
+        daemonAlive = true;
+      } catch {
+        daemonAlive = false;
+      }
+      if (daemonAlive) {
+        console.log(
+          `\nA kage daemon is running for this project (pid ${daemonStatus.pid}) — it may not pick up this change until it restarts: kage daemon stop --project ${project} && kage daemon start --project ${project}`,
+        );
+      }
+    }
     return;
   }
 
