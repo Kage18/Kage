@@ -1482,7 +1482,11 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
     stamp.appendChild(h("span", "count", passed.length + "/" + checks.length));
   }
   head.appendChild(stamp);
-  head.appendChild(h("span", "verdict-sub", "re-run by Kage, not reported by the agent"));
+  // WHO checked this is the single sentence that distinguishes Kage from every
+  // competitor — it used to be grey afterthought text below the stamp. It stays in
+  // the same slot (no taller card) but now reads as a claim in its own right, not a
+  // caption.
+  head.appendChild(h("span", "verdict-sub", "independently checked by Kage — not the agent's self-report"));
   body.appendChild(head);
 
   if (claim.statement) body.appendChild(h("div", "claim-statement", claim.statement));
@@ -1503,17 +1507,38 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
     var list = h("div", "checks");
     checks.forEach(function (c) {
       var state = c.result === "pass" ? "pass" : c.result === "fail" ? "fail" : "skip";
+      // A command that ran and exited is categorically different evidence from a
+      // static check (diff size, citation existence) that inspected without
+      // executing anything — the two used to render in the same visual register.
+      var executed = c.kind === "command" && (c.result === "pass" || c.result === "fail");
       var row = h("div", "check " + state);
       row.appendChild(h("span", "mark", state === "pass" ? "✓" : state === "fail" ? "✕" : "?"));
       row.appendChild(h("span", "name", c.id));
+      row.appendChild(h("span", "register" + (executed ? " ran" : ""), executed ? "ran" : "inspected"));
       row.appendChild(h("span", "detail", state === "skip" ? "could not run here — not counted as passing" : (c.cmd || c.expect || "")));
-      row.appendChild(h("span", "ev", c.exit_code === undefined || c.exit_code === null ? "" : "exit " + c.exit_code));
+      // A check with no exit code (a static check ran no command) is unmeasured, not
+      // zero — showing "" here used to be visually indistinguishable from "exit 0"
+      // once truncated on a narrow screen. An em dash can never be mistaken for a pass.
+      row.appendChild(h("span", "ev", c.exit_code === undefined || c.exit_code === null ? "—" : "exit " + c.exit_code));
       list.appendChild(row);
     });
     body.appendChild(list);
   }
 
-  // The bill: what it touched, what depends on it, what it cost, how long it took.
+  if ((claim.unsure || []).length) {
+    // Ranked ahead of the bill below: what the agent itself flagged as uncertain is
+    // frequently the most useful sentence on the card, not an appendix to it.
+    body.appendChild(h("div", "seclabel-sm", "The agent flagged"));
+    claim.unsure.forEach(function (u) {
+      var row = h("div", "note-row unsure");
+      row.appendChild(h("span", "ic", "⚠"));
+      row.appendChild(h("span", "", u));
+      body.appendChild(row);
+    });
+  }
+
+  // The bill: what it touched, what depends on it, what it cost, how long it took —
+  // read last, as the price of the judgement above it, not as trailing metadata.
   var totals = h("div", "rc-totals");
   function totalRow(label, value, tone) {
     if (value === null || value === undefined || value === "") return;
@@ -1524,7 +1549,7 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
     totals.appendChild(row);
   }
   if (claim.diff) {
-    totalRow("change", claim.diff.files + " file" + (claim.diff.files === 1 ? "" : "s") + " · " +
+    totalRow("touched", claim.diff.files + " file" + (claim.diff.files === 1 ? "" : "s") + " · " +
       claim.diff.lines + " line" + (claim.diff.lines === 1 ? "" : "s"));
   }
   if (run && run.blast) {
@@ -1543,16 +1568,6 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
     }
   }
   if (totals.children.length) body.appendChild(totals);
-
-  if ((claim.unsure || []).length) {
-    body.appendChild(h("div", "seclabel-sm", "The agent flagged"));
-    claim.unsure.forEach(function (u) {
-      var row = h("div", "note-row unsure");
-      row.appendChild(h("span", "ic", "⚠"));
-      row.appendChild(h("span", "", u));
-      body.appendChild(row);
-    });
-  }
 
   // Once ratified, the learnings ARE packets — show them as the memory they became,
   // each row a door into the Memory view. Before merge, show what WILL be learned.

@@ -549,7 +549,7 @@ function runDetail(projectDir: string, runId: string): Record<string, unknown> {
     try {
       const claim = JSON.parse(readFileSync(claimFile, "utf8")) as ClaimRecord;
       detail.claim = claim;
-      detail.receipt = renderClaimCard(claim, { budget: run.budgets.diff_lines });
+      detail.receipt = renderClaimCard(claim, { budget: run.budgets.diff_lines, task: run });
       // The verdict travels WITH the claim, computed by the kernel that ran the checks.
       // A client that re-derives it can disagree with the kernel — caught live: a GUI
       // recomputation showed a green "VERIFIED 2/3" for a run the kernel had already

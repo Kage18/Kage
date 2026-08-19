@@ -1525,7 +1525,9 @@ async function runDelegationTool(
     // old inline path rather than claim a detached run that never actually started, and say
     // plainly that this run is now tied to this process.
     const result = await executeRun(projectDir, held.task.id, held.plan, adapter);
-    const claimCard = result.claim ? renderClaimCard(result.claim, { budget: diffBudget(projectDir) }) : renderRunCard(result.task);
+    const claimCard = result.claim
+      ? renderClaimCard(result.claim, { budget: diffBudget(projectDir), task: result.task })
+      : renderRunCard(result.task);
     return text(`${briefCard}${judgmentBlock}\n\n${INLINE_RUN_WARNING}\n\n${claimCard}${goalWarning}`);
   }
   if (name === "kage_goal_create") {
