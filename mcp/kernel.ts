@@ -9450,6 +9450,19 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   }
   const validation = validateProject(projectDir);
   const metrics = kageMetricsShallow(projectDir, { codeGraph, knowledgeGraph, validation });
+  // The app's Memory-tab health strip reads metrics.json, but until now only `kage gc`
+  // and `kage compact` wrote it — maintenance commands a normal user never runs — so it
+  // froze indefinitely. Write it on every refresh, quiet or not: this is a derived
+  // report, not packet metadata, so freezing it on a feature branch would just
+  // reproduce the bug this fixes. `quality.totals.stale` reuses the staleness pass
+  // already paid for above (refreshPacketStaleness), scoped to approved packets to
+  // match `kage stale`'s scope — it can still read slightly lower than a live `kage
+  // stale` run because it checks kageignore-pruned grounding (see "refresh prunes
+  // kageignore'd grounding" above), which is intentional, not a second bug.
+  writeJson(join(memoryRoot(projectDir), "metrics.json"), {
+    ...metrics,
+    quality: { totals: { stale: stale.findings.filter((finding) => finding.status === "approved").length } },
+  });
   ensureDir(reportsDir(projectDir));
   writeJson(join(reportsDir(projectDir), "context-slots.json"), kageContextSlots(projectDir));
   writeJson(join(reportsDir(projectDir), "handoff.json"), kageMemoryHandoff(projectDir));

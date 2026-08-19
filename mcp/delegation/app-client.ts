@@ -839,16 +839,22 @@ function renderMemory() {
   // tells the user their memory scored nothing, which is a different and false claim.
   var pct = function (value) { return mem.measured ? value + "%" : "—"; };
   var cnt = function (value) { return mem.measured ? num(value) : "—"; };
+  // Labelled "as of last refresh", never bare "stale" — kage stale computes its own
+  // count live, on demand, and the two numbers are allowed to differ (this one is a
+  // snapshot, updated only when kage refresh last ran; kage stale is always current
+  // and is the one to act on). Two tiles both reading "stale" invited exactly the
+  // silent-drift bug this file is part of the fix for.
   var stats = [
-    [num(mem.health.approved), "active", false],
-    [mem.measured ? num(mem.health.stale) : "—", "stale", mem.health.stale > 0],
-    [pct(mem.health.average_quality), "avg quality", false],
-    [pct(mem.health.evidence_coverage_percent), "evidence-backed", false],
-    [cnt(mem.health.hot), "used recently", false],
-    [cnt(mem.health.never_used), "never recalled", false],
+    [num(mem.health.approved), "active", false, null],
+    [mem.measured ? num(mem.health.stale) : "—", "stale (as of last refresh)", mem.health.stale > 0, "Snapshot from the last kage refresh. Run kage stale for the live, actionable count."],
+    [pct(mem.health.average_quality), "avg quality", false, null],
+    [pct(mem.health.evidence_coverage_percent), "evidence-backed", false, null],
+    [cnt(mem.health.hot), "used recently", false, null],
+    [cnt(mem.health.never_used), "never recalled", false, null],
   ];
   stats.forEach(function (row) {
     var stat = h("div", "mem-stat" + (row[2] ? " warn" : ""));
+    if (row[3]) stat.title = row[3];
     stat.appendChild(h("div", "n", row[0]));
     stat.appendChild(h("div", "l", row[1]));
     health.appendChild(stat);
