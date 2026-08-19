@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Kage manages your memory and agents
+## v3.2.0 — Kage manages your memory and agents
 
 Kage was a memory tool with a dispatch command. It is now an orchestrator: you hand
 it work, it briefs and runs agents for you, and it checks their work itself before
@@ -73,9 +73,10 @@ you ever read a diff. The memory is what makes each brief smarter than the last.
   is handed off and follows it; it no longer holds your terminal for the whole run.
 - A goal set to `merge` **will refuse to merge** a run where no command was executed,
   even though every check passed. This is intentional.
-- The per-run budget is **enforced**, not decorative. Until the next release it is not
-  configurable, so an unusually large task may be halted at the default $2 — raise it
-  by editing the default if you need to.
+- The per-run budget is **enforced**, not decorative. A run that crosses it stops, and
+  the default is $2 — so an unusually large task will be halted unless you raise it.
+  Set `budgets` in `.agent_memory/config.json` for the repo, or pass `--budget-usd` on
+  a single dispatch when one task is worth more than the rest.
 
 ## v3.1.0 — cleaner viewer + `kage okf view`
 

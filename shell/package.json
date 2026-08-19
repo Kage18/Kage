@@ -1,8 +1,8 @@
 {
   "name": "kage-shell",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
-  "description": "Kage desktop shell \u2014 a thin Electron frame over the daemon's renderer. Contains zero HTML.",
+  "description": "Kage desktop shell — a thin Electron frame over the daemon's renderer. Contains zero HTML.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
