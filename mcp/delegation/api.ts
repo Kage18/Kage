@@ -46,6 +46,7 @@ import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type
 import { sendControl, isRunLive } from "./control.js";
 import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
+import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./recovery.js";
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
 import { claimVerdict, renderClaimCard } from "./verify.js";
@@ -508,7 +509,11 @@ function withActivity(
       };
     }
   }
-  const inFlight = run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "verifying";
+  const inFlight =
+    run.display_state === "running" ||
+    run.display_state === "dispatched" ||
+    run.display_state === "verifying" ||
+    run.display_state === "orphaned";
   if (!inFlight) return run;
   const activity = readActivity(runTranscriptPath(projectDir, run.id));
   return { ...run, activity };
@@ -1200,7 +1205,9 @@ export async function handleDelegationRoute(
     return false;
   }
 
-  const runMatch = path.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers|takeover|handback))?$/);
+  const runMatch = path.match(
+    /^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers|takeover|handback|resume-run|adopt|orphan-kill))?$/,
+  );
   if (!runMatch) return false;
   const [, runId, action] = runMatch;
 
@@ -1398,6 +1405,28 @@ export async function handleDelegationRoute(
       const result = rejectRun(projectDir, runId, reason);
       feed.notify(runId);
       json(res, result.ok ? 200 : 409, { ok: result.ok, detail: result.message, run: readRun(projectDir, runId) });
+      return true;
+    }
+    // Reachable exactly when a human is not at a terminal: a stranded run needs a
+    // recovery a phone can reach as much as a laptop can.
+    if (action === "resume-run") {
+      const body = await readJsonBody(req);
+      const budgetUsd = typeof body.budget_usd === "number" ? body.budget_usd : Number(body.budget_usd);
+      const result = await resumeStoppedRun(projectDir, runId, Number.isFinite(budgetUsd) ? budgetUsd : undefined, adapterByName);
+      feed.notify(runId);
+      json(res, result.ok ? 200 : 409, { ok: result.ok, detail: result.message, run: result.task });
+      return true;
+    }
+    if (action === "adopt") {
+      const result = adoptOrphanedRun(projectDir, runId);
+      feed.notify(runId);
+      json(res, result.ok ? 200 : 409, { ok: result.ok, detail: result.message, run: readRun(projectDir, runId) });
+      return true;
+    }
+    if (action === "orphan-kill") {
+      const result = killOrphanedAgent(projectDir, runId);
+      feed.notify(runId);
+      json(res, result.ok ? 200 : 409, { ok: result.ok, detail: result.message, run: result.task });
       return true;
     }
   } catch (error) {

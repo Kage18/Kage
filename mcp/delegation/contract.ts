@@ -266,6 +266,19 @@ export function runTranscriptPath(projectDir: string, runId: string): string {
   return join(runDir(projectDir, runId), "transcript.jsonl");
 }
 
+/**
+ * The supervisor's OWN diagnostic trail — plain text, one line per lifecycle step,
+ * distinct from transcript.jsonl (the AGENT's structured stream, which only gets its
+ * first write once the supervisor has already gotten past workspace setup and brief
+ * compilation). A supervisor that dies in those first seconds — reproduced live: dead
+ * within seconds of dispatch, agent left running unsupervised for ~20 minutes — left
+ * transcript.jsonl at zero events and nothing else anywhere to say why. This file exists
+ * so the next such death has a last-known-step to read instead of a silence to guess at.
+ */
+export function runSupervisorLogPath(projectDir: string, runId: string): string {
+  return join(runDir(projectDir, runId), "supervisor.log");
+}
+
 export function runEvidenceDir(projectDir: string, runId: string): string {
   return join(runDir(projectDir, runId), "evidence");
 }
@@ -518,13 +531,23 @@ export interface RunBudgetCheck {
  * the same comparison for goal-level spend) — then minutes, since either crossing means
  * the same thing: this run is no longer inside what it was budgeted for.
  */
+// Named here (not just typed as a literal in the reason string) so recovery.ts's
+// resumeStoppedRun and its refusal message can point at the exact same command a reader
+// was just told to run — the two must never drift apart the way `kage dispatch
+// --budget-usd` (which starts a NEW run, not a resume) once did.
+//
+// Not `kage resume` — that name is already the memory-session-resume command
+// (kageResume, prints prior session context for hooks); this one is scoped to a run.
+export const RESUME_STOPPED_RUN_COMMAND = "kage resume-run <run-id> --budget-usd <n>";
+
 export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
   if (spend.usd_est > budgets.usd) {
     return {
       exceeded: true,
       reason:
-        `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget — raise it with ` +
-        "`kage dispatch --budget-usd <n>` for just this run, or set `budgets.usd` in .agent_memory/config.json for every run",
+        `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget — resume it with ` +
+        `\`${RESUME_STOPPED_RUN_COMMAND}\` (same run, same worktree, higher budget), or set ` +
+        "`budgets.usd` in .agent_memory/config.json to raise the default for every future run",
     };
   }
   if (spend.minutes > budgets.minutes) {
@@ -585,10 +608,33 @@ export function liveState(task: TaskRecord): { state: RunState; stale: boolean }
  * reporting two different truths about the same run, which is the one thing it cannot
  * afford. `readRun`/`listRuns` now attach this, so rendering the raw state is an opt-out.
  */
-export type DisplayState = RunState | "dropped";
+export type DisplayState = RunState | "dropped" | "orphaned";
+
+/**
+ * A run whose SUPERVISOR is dead but whose AGENT is still alive and working —
+ * distinct from "dropped" (both processes gone: reap it, nothing to save) and from a
+ * plain in-flight state (both alive: normal). Nothing is tracking this run's usage,
+ * enforcing its budget, or waiting to write its claim once the agent finishes — real
+ * work is still happening, unsupervised and invisible to every other surface, until a
+ * human adopts the worktree once the agent stops, or kills it outright. Case observed
+ * live: a supervisor died within seconds of dispatch while its agent ran for ~20
+ * minutes producing a real diff, and every board showed it as ordinary "working".
+ */
+export function isOrphaned(task: TaskRecord): boolean {
+  const inFlight = task.state === "running" || task.state === "dispatched" || task.state === "verifying";
+  if (!inFlight) return false;
+  // supervisor_pid undefined is NOT the same as supervisor_pid dead: a run executed
+  // inline (dispatch.ts's executeRun — `kage dispatch` without detaching, `kage retry`)
+  // never records one at all, and that is normal, not orphaned. Only a run whose
+  // supervisor WAS recorded and has since died — a real detached run that lost its
+  // supervisor — is orphaned.
+  return task.supervisor_pid !== undefined && isProcessAlive(task.agent_pid) && !isProcessAlive(task.supervisor_pid);
+}
 
 export function displayState(task: TaskRecord): DisplayState {
-  return liveState(task).stale ? "dropped" : task.state;
+  if (liveState(task).stale) return "dropped";
+  if (isOrphaned(task)) return "orphaned";
+  return task.state;
 }
 
 /** Who owns the next move — the question a board's columns should answer. */
@@ -602,7 +648,18 @@ export function ownership(task: TaskRecord): Ownership {
   // three-door UI hid the contradiction (the inbox never listed it, the run list
   // filed it under Working, the board filed it under Lost); the unified work
   // surface showed all three stories at once and exposed it.
-  if (shown === "ready" || shown === "blocked" || shown === "failed" || shown === "dropped" || shown === "stopped") {
+  //
+  // "orphaned" joins the list for the same reason: nothing is coming back to finish
+  // this run's bookkeeping on its own (its supervisor is gone), even though the agent
+  // itself may still be working unsupervised — a human has to adopt or kill it.
+  if (
+    shown === "ready" ||
+    shown === "blocked" ||
+    shown === "failed" ||
+    shown === "dropped" ||
+    shown === "stopped" ||
+    shown === "orphaned"
+  ) {
     return "needs_you";
   }
   return "working";
@@ -663,7 +720,12 @@ export function toRunView(task: TaskRecord): RunView {
  * failure mode where a fleet silently stops dispatching and nobody knows why.
  */
 export function activeRunCount(projectDir: string): number {
-  return listRuns(projectDir).filter((run) => run.display_state === "running" || run.display_state === "dispatched").length;
+  // "orphaned" is still a live agent process consuming a real slot — before this state
+  // existed it displayed as plain "running" and counted here; carrying it forward keeps
+  // the concurrency gate's behavior unchanged, not just its label.
+  return listRuns(projectDir).filter(
+    (run) => run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "orphaned",
+  ).length;
 }
 
 export class ConcurrencyLimitError extends Error {

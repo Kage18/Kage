@@ -12,7 +12,7 @@ import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { createServer, type Socket } from "node:net";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { adapterByName } from "./adapters/index.js";
 import {
@@ -35,6 +35,7 @@ import {
   readBrief,
   readRun,
   runDir,
+  runSupervisorLogPath,
   runTranscriptPath,
   runWorkDir,
   transitionRun,
@@ -115,10 +116,25 @@ interface SupervisorState {
  * blocked → tell → claim loop gets exercised without a real coding-agent CLI installed.
  */
 export async function superviseRun(projectDir: string, runId: string, adapterOverride?: Adapter): Promise<void> {
-  const task = readRun(projectDir, runId);
-  const plan = compileBrief(projectDir, task.intent, task.type);
   const dir = runDir(projectDir, runId);
   mkdirSync(dir, { recursive: true });
+  // The supervisor's own trail, written synchronously (appendFileSync, not a stream) so
+  // a step is durable on disk the instant it happens — a crash one line later must never
+  // erase the line before it. This is the FIRST thing superviseRun does, ahead of even
+  // reading the run record, so a death during brief compilation or worktree creation
+  // (reproduced live: dead within seconds of dispatch) still leaves a last-known-step.
+  const slog = (label: string): void => {
+    try {
+      appendFileSync(runSupervisorLogPath(projectDir, runId), `${new Date().toISOString()} ${label}\n`, "utf8");
+    } catch {
+      // The diagnostic log must never be why a run fails.
+    }
+  };
+  slog(`supervisor started, pid ${process.pid}`);
+
+  const task = readRun(projectDir, runId);
+  const plan = compileBrief(projectDir, task.intent, task.type);
+  slog("brief compiled");
   // Recorded before anything else: verification (below) runs in THIS process after the
   // hired agent's child has already exited, so liveState needs this pid to know the run
   // is still alive once agent_pid alone goes dead by design.
@@ -132,9 +148,14 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   const workspaceKind = resolveWorkspaceKind(projectDir);
   if (workspaceKind === "worktree") {
     workspace = createWorktree(projectDir, runId, task.branch).path;
+    // Durable before the agent is spawned below — this is the exact fact recovery had to
+    // reconstruct by hand (lsof on a live orphan's cwd) when the record never carried it.
+    patchRun(projectDir, runId, { worktree: workspace });
+    slog(`worktree created and persisted: ${workspace}`);
   } else {
     workspace = runWorkDir(projectDir, runId);
     mkdirSync(workspace, { recursive: true });
+    slog(`sandbox workspace created: ${workspace}`);
   }
 
   const brief = existsSync(join(dir, "brief.md")) ? readBrief(projectDir, runId) : renderBrief(task, plan);
@@ -168,12 +189,20 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
         ...(isResume ? { resumeSessionId: task.agent_session_id } : { sessionId: task.agent_session_id }),
       })
     : null;
+  slog(child ? `agent spawned live, pid ${child.pid}` : "agent has no live spawn — running via one-shot adapter.run()");
 
   if (child) {
+    // Record the pid BEFORE handing the agent anything to do — writing to stdin is the
+    // step that actually starts it working (and spending budget), so persisting the pid
+    // has to happen first or a crash in between leaves a live, spending agent process
+    // with no pid recorded anywhere: worse than the reproduced orphan case, where
+    // agent_pid at least survived because supervisor_pid had already been persisted.
+    // Same ordering principle as the worktree-path fix above: what the supervisor knows
+    // must be durable before the next irreversible step, not after it.
+    patchRun(projectDir, runId, { agent_pid: child.pid });
     // The brief IS the first user message on the open stdin — or, on a reattach, the
     // pending steer the agent is actually waiting on.
     child.stdin?.write(userMessageFrame(firstMessage));
-    patchRun(projectDir, runId, { agent_pid: child.pid });
   } else {
     // No live child to key liveness off; the supervisor process itself is what's
     // "running" for the run's duration, so stand in with its own pid.
@@ -326,6 +355,18 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
             // patched to mid-run (budgets aren't mutable in flight, but reading the
             // original avoids a race with any future editor of this record). Checked
             // on every turn boundary — the only point this loop has fresh usage at all.
+            //
+            // HONESTY, not a defect to silently patch: the check interval is one TURN,
+            // not one tool call or one token — usageFrom only ever has a figure to read
+            // when the agent's own `result` line reports it, and a single turn can run
+            // many tool calls (edits, greps, a full test suite) before it ever yields
+            // one. A run that overshoots by 2-3x in one long turn (observed live: $5.22
+            // against a $2.00 cap) is this granularity working as designed, not failing.
+            // Tightening it below "per turn" would mean asking the agent CLI's own
+            // stream-json protocol for a cost figure it does not emit mid-turn — an
+            // upstream dependency, not something addable here without adding real
+            // per-tool-call overhead (a cost query before every single tool use) for a
+            // guarantee the product does not otherwise need.
             if (!state.stopped) {
               const check = checkRunBudget(readRun(projectDir, runId).spend, task.budgets);
               if (check.exceeded) {
@@ -435,6 +476,8 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     }
   }
 
+  slog(`agent turn ended${state.stopped ? " (stopped)" : ""}${state.budgetHalted ? ` — budget halted: ${state.budgetHalted}` : ""}`);
+
   try {
     server.close();
     rmSync(record.socket, { force: true });
@@ -486,6 +529,7 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   }
 
   transitionRun(projectDir, runId, "verifying", "kernel");
+  slog("verifying");
   const statement = fence?.statement ?? `work delivered — see diff (agent skipped the ${CLAIM_PROTOCOL_VERSION} fence)`;
   // Only the statement is a formal citation — unsure notes and learnings are prose: an
   // unresolvable path there is a warning, never a failure (see verify.ts's CitationText).
@@ -514,4 +558,5 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     passed,
     checks: checks.map((check) => ({ id: check.id, result: check.result })),
   });
+  slog(`claim written, ${ready ? "ready" : "failed"}`);
 }

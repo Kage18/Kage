@@ -145,6 +145,7 @@ import { ADAPTER_NAMES, adapterByName, detectAgent } from "./delegation/adapters
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
 import { renderClaimCard } from "./delegation/verify.js";
 import { mergeRun, rejectRun, reverifyRun } from "./delegation/ratify.js";
+import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./delegation/recovery.js";
 import { buildReport, markReportRead, renderReport, renderStatusBoard } from "./delegation/report.js";
 import { diffBudget, readDelegationConfig, writeDelegationConfig } from "./delegation/config.js";
 import { openRoom } from "./delegation/room.js";
@@ -168,7 +169,9 @@ Delegate work (the orchestrator):
   kage dispatch "<intent>" [--agent claude]  one delegated run, briefed from repo memory
   kage runs [--project <dir>]                what every run is doing right now
   kage review --project <dir>                read a finished run's claim and diff
-  kage reverify <run-id> --project <dir>     re-check a failed/ready run's current worktree — no agent re-run
+  kage reverify <run-id> --project <dir>     re-check a failed/ready run's existing claim against its worktree — no agent re-run
+  kage resume-run <run-id> --budget-usd <n> --project <dir>   resume a run the kernel stopped on budget — same run, worktree, session
+  kage adopt <run-id> --project <dir>        verify an orphaned run's worktree when it never got an agent claim
   kage merge <run-id> --project <dir>        land the code and ratify what it learned
 
 Memory:
@@ -305,7 +308,10 @@ Usage:
   kage review <run-id> [--project <dir>]
   kage merge <run-id> [--project <dir>]
   kage reject <run-id> "<reason>" [--project <dir>]
-  kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's current worktree, no agent re-run
+  kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's EXISTING claim against its worktree, no agent re-run — refuses if there is no claim yet (see 'kage adopt')
+  kage resume-run <run-id> --budget-usd <n> [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raised budget
+  kage adopt <run-id> [--project <dir>]         verify an orphaned run's worktree (supervisor died before an agent claim was written) — refuses while its agent is still alive
+  kage orphan-kill <run-id> [--project <dir>]   deliberately kill a live orphaned agent (supervisor dead, agent still working) and show its last recorded spend — never automatic
   kage open <run-id> [--project <dir>]
   kage tell <run-id> "<message>" [--project <dir>]
   kage stop <run-id> [--project <dir>]
@@ -2819,6 +2825,46 @@ async function main(): Promise<void> {
     const result = await executeRun(project, runId, plan, adapterByName(task.agent), { progress: !args.includes("--quiet") });
     if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project), task: result.task }));
     else console.log(renderRunCard(result.task));
+    return;
+  }
+
+  // Resumes a run the kernel STOPPED for crossing its budget — the same run id,
+  // worktree, branch, and (unlike `kage retry`) agent session, with a raised budget.
+  // `kage retry` starts a fresh agent session from the current brief; this reattaches
+  // to the one already in progress, so the agent keeps its own context.
+  if (command === "resume-run") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const budgetArg = takeArg(args, "--budget-usd");
+    const budgetUsd = budgetArg !== undefined ? Number(budgetArg) : undefined;
+    const result = await resumeStoppedRun(project, runId, budgetUsd, adapterByName);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  // Verifies an orphaned run's worktree when its supervisor died before an agent claim
+  // was ever written — the gap `kage reverify` cannot cross, since reverify re-checks an
+  // EXISTING claim's declared checks and this run never got one.
+  if (command === "adopt") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = adoptOrphanedRun(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  // A DELIBERATE kill of a live orphaned agent (supervisor dead, agent still working) —
+  // never automatic; sweepDeadRuns only ever reaps once BOTH processes are gone. Shows
+  // spend before doing anything irreversible.
+  if (command === "orphan-kill") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = killOrphanedAgent(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
     return;
   }
 
