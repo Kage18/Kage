@@ -5,17 +5,28 @@
 
 ### Kage manages your memory and agents
 
-<img src="docs/assets/kage-viewer-walkthrough.gif" alt="kage viewer: a team's captured decisions, runbooks, and bug fixes mapped to the code they're grounded in, with trust and savings — a live walkthrough" width="760">
+State an intent. Kage's orchestrator briefs a coding agent from your repo's own memory, runs it
+in an isolated git worktree — a single run or a multi-wave goal — and **re-runs the checks
+itself** rather than trusting the agent's report:
 
-<sub>`kage viewer`: your team's decisions, runbooks, and bug fixes (purple), kept in the repo and linked to the code they are about (blue).</sub>
+```
+┌ VERIFIED 3/3 — checks run by Kage, not the agent · build-a-stale-memory-triage-surface-do-n-260818-ec2c
+│ "the stale-memory triage surface is built and wired into the review flow"
+│ ✓ tests       ran       npm test --prefix mcp → exit 0   evidence/tests.log
+│ ✓ diff-size   inspected at most 800 changed lines   evidence/diff-size.log
+│ ✓ citations   inspected every formally cited path exists (directly, or as a unique suffix) in the worktree   evidence/citations.log
+│ · touched     4 file(s), 212 line(s)
+└────────────────────────────────────────────────────────────────
+```
 
-State an intent and **Kage** briefs an agent from your repo's memory, runs it in an isolated
-git worktree — a single run or a multi-wave goal — and re-runs the checks itself rather than
-trusting the agent's report. `kage merge` lands the code and ratifies what it learned, so the
-next brief, yours or a teammate's, starts smarter. That memory is the decisions behind your
-codebase, the runbook for a tricky deploy, the root cause of a gnarly bug — captured as your
-agents work and checked against the actual code, so what gets reused stays true. It's kept as
-plain Markdown files in your repo, conformant to the
+<sub>A real receipt from this repo's own run history. Every row is a command Kage ran or a fact
+it inspected — never a claim the agent made about itself. `kage merge` only lands the code once
+the claim holds, and ratifies what the agent learned, so the next brief, yours or a teammate's,
+starts smarter.</sub>
+
+That memory is the decisions behind your codebase, the runbook for a tricky deploy, the root
+cause of a gnarly bug — captured as your agents work and checked against the actual code, so
+what gets reused stays true. It's kept as plain Markdown files in your repo, conformant to the
 [Google Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 so there's no lock-in, and shared with your whole team through git. No account, no database,
 no API key.
@@ -86,9 +97,40 @@ kage setup verify-agent --agent claude-code --project .
 ```
 </details>
 
+## Delegate work (the orchestrator)
+
+```bash
+kage room --project .                      # talk to Kage; it briefs and hires agents for you
+kage dispatch "<intent>" --agent claude    # one delegated run, briefed from repo memory
+kage runs --project .                      # what every run is doing right now
+kage review --project .                    # read a finished run's claim and diff
+kage merge <run-id> --project .            # land the code and ratify what it learned
+```
+
+Every run works in its own git worktree. The checks that decide the verdict on the receipt
+above — tests, diff size, citations — are commands **Kage** runs itself, never the agent's
+self-report.
+
+- **The app.** `kage app --project <dir>` starts (or reuses) the local daemon and opens the
+  same room, runs board, and memory view in a UI. From a checkout, `npm start --prefix shell`
+  runs it as a native window — a thin Electron shell with no HTML of its own, it just loads the
+  daemon's own page — and `npm run dmg --prefix shell` builds a macOS `.dmg` (arm64 only;
+  Windows/Linux packaging isn't built yet).
+- **From your phone.** The daemon can also bind to your machine's LAN address, gated by a
+  pairing secret required on every request, reads included. Today that means setting
+  `"lan": true` in `.agent_memory/config.json` by hand — there's no `--lan` flag or app toggle
+  yet.
+- **Add a project without a terminal.** `kage projects add <dir> --agent claude` registers
+  another repo the same way the app's "+" button does, then `kage app --project <dir>` opens it.
+
+```bash
+kage app --project <dir>
+kage projects add <dir> --agent claude
+```
+
 ## What is Kage
 
-Kage is a memory layer for coding agents. As your agent works, it captures what it learns
+Kage is an orchestrator for coding agents, built on a memory layer. As your agent works, it captures what it learns
 (decisions, bug fixes, conventions, how the code fits together) as
 [**Open Knowledge Format (OKF)**](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 concept files committed in your repo under `.agent_memory/`. The next session (yours or a
@@ -140,6 +182,14 @@ Once installed, it's ambient. You don't run anything by hand:
 Watch it happen in the **local dashboard** (`kage viewer`): packets, the memory↔code graph,
 trust gates, and live events stream in as the agent works. Wrap anything in
 `<private>…</private>` and it's never stored.
+
+<p align="center">
+<img src="docs/assets/kage-viewer-walkthrough.gif" alt="kage viewer: a team's captured decisions, runbooks, and bug fixes mapped to the code they're grounded in, with trust and savings — a live walkthrough" width="760">
+</p>
+
+<p align="center"><sub>`kage viewer`: the memory engine underneath the orchestrator above — your
+team's decisions, runbooks, and bug fixes (purple), kept in the repo and linked to the code they
+are about (blue).</sub></p>
 
 ## Why Kage
 
