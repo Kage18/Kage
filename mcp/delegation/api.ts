@@ -12,7 +12,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { watch, type FSWatcher } from "node:fs";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import {
   createRun,
@@ -58,6 +58,7 @@ import { askRoomSupervisor, dispatchRoomSupervisor, isRoomSupervisorLive, type R
 import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
+import { addProject, installedAgents, resolveProjectPath, type AddProjectRefused } from "./add-project.js";
 import { ensureAppDaemon } from "./app-daemon.js";
 import { packetFlywheel, packetsTaughtByRun, readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
 import { blastRadiusFor, type BlastRadius } from "./blast-radius.js";
@@ -642,7 +643,58 @@ export async function handleDelegationRoute(
   if (path === "/projects" && method === "GET") {
     // Opening the app for a project is what makes it "known" — no separate add step.
     const projects = rememberProject(projectDir);
-    json(res, 200, { ok: true, projects, current: resolve(projectDir) });
+    // installedAgents rides along here because the add-project dialog needs it before
+    // any project-specific daemon exists to ask — this daemon's own agent detection
+    // answers for the whole machine, not just this repo.
+    json(res, 200, { ok: true, projects, current: resolve(projectDir), agents: installedAgents() });
+    return true;
+  }
+
+  // A read-only probe the add-project dialog calls as the user types — resolves a path
+  // the same way /projects/add will, but never registers or starts anything, so typing
+  // has no side effects until "Create and start" is actually pressed.
+  if (path === "/projects/resolve" && method === "GET") {
+    const raw = url.searchParams.get("path") ?? "";
+    const resolved = resolveProjectPath(raw);
+    json(res, 200, resolved.ok ? { ok: true, dir: resolved.dir, name: basename(resolved.dir) || resolved.dir } : resolved);
+    return true;
+  }
+
+  // Adding a project, honestly: validate the path against the SAME rule a dispatched
+  // run's worktree goes through (resolveWorkspaceKind, via addProject), refuse plainly
+  // when it's not usable, disambiguate a folder that holds several repos instead of
+  // picking one, then start that project's own daemon and hand back its Room URL so
+  // the app can land the user there directly — never back on an empty board.
+  if (path === "/projects/add" && method === "POST") {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      json(res, 400, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    const dir = typeof body.dir === "string" ? body.dir : "";
+    if (!dir) {
+      json(res, 400, { ok: false, error: "dir is required" });
+      return true;
+    }
+    const workerAgent = typeof body.worker_agent === "string" && body.worker_agent ? body.worker_agent : undefined;
+    if (workerAgent && !installedAgents().includes(workerAgent as (typeof ADAPTER_NAMES)[number])) {
+      json(res, 400, { ok: false, error: `${workerAgent} is not installed on this machine.` });
+      return true;
+    }
+    const added = addProject(dir, workerAgent ? { worker_agent: workerAgent as "claude" | "codex" } : {});
+    if (!added.ok) {
+      const refused = added as AddProjectRefused;
+      json(res, refused.reason === "ambiguous" ? 409 : 400, refused);
+      return true;
+    }
+    try {
+      const app = await ensureAppDaemon(added.dir);
+      json(res, 200, { ok: true, dir: added.dir, name: added.name, kind: added.kind, url: app.url, started: app.started });
+    } catch (error) {
+      json(res, 502, { ok: false, error: (error as Error).message });
+    }
     return true;
   }
 
@@ -1055,7 +1107,7 @@ export async function handleDelegationRoute(
       json(res, 400, { ok: false, error: "intent is required" });
       return true;
     }
-    const agent = typeof body.agent === "string" && body.agent ? body.agent : "claude";
+    const agent = typeof body.agent === "string" && body.agent ? body.agent : readDelegationConfig(projectDir).default_agent ?? "claude";
     const type = (typeof body.type === "string" && body.type ? body.type : "chore") as RunType;
     const goalId = typeof body.goal_id === "string" ? body.goal_id.trim() : "";
     try {

@@ -186,6 +186,40 @@ ${APP_STYLES}
     </div>
   </div>
 </div>
+<div class="overlay" id="addproject-overlay">
+  <div class="settings">
+    <div class="sh"><h3>Add a project</h3></div>
+    <div class="sbody" id="addproject-body">
+      <div class="srow">
+        <div>
+          <div class="label">Repo folder</div>
+          <div class="desc">A path to a git repository on this machine.</div>
+        </div>
+        <input id="addproject-path" type="text" placeholder="/Users/you/code/my-repo" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="addproject-candidates" id="addproject-candidates"></div>
+      <div class="srow" id="addproject-agent-row" style="display:none">
+        <div>
+          <div class="label">Worker agent</div>
+          <div class="desc">Runs the work Kage dispatches in this project.</div>
+        </div>
+        <select id="addproject-agent"></select>
+      </div>
+      <div class="srow" id="addproject-orchestrator-row" style="display:none">
+        <div>
+          <div class="label">Orchestrator agent</div>
+          <div class="desc" id="addproject-orchestrator-desc"></div>
+        </div>
+        <span id="addproject-orchestrator-value"></span>
+      </div>
+    </div>
+    <div class="sfoot">
+      <button class="btn primary" id="addproject-go" disabled>Create and start</button>
+      <button class="btn" id="addproject-cancel">Cancel</button>
+      <span class="msg" id="addproject-msg"></span>
+    </div>
+  </div>
+</div>
 <div class="overlay" id="palette-overlay">
   <div class="palette">
     <input id="palette-input" placeholder="Type a command or a run name…" autocomplete="off">

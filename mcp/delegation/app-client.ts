@@ -13,7 +13,7 @@ export const APP_CLIENT = `"use strict";
 var TOKEN = "__KAGE_TOKEN__";
 var state = {
   runs: [], goals: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
-  room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "",
+  room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "", installedAgents: [],
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
   workLayout: "list", dover: false, showAllDone: false, workOrder: [],
@@ -1881,6 +1881,7 @@ function loadProjects() {
     if (!out.ok) return;
     state.projects = out.projects || [];
     state.projectDir = out.current || state.projectDir;
+    state.installedAgents = out.agents || [];
     renderProjects();
   }).catch(function () {});
 }
@@ -1933,10 +1934,126 @@ function openProject(dir, row) {
     showError(out.error || "could not open that project");
   }).catch(function () { renderProjects(); showError("could not open that project"); });
 }
-function addProject() {
-  var dir = window.prompt("Path to a git repo:", state.projectDir || "");
-  if (dir) openProject(dir.trim(), null);
+// AO gets from "+" to a live orchestrator session in four clicks: pick a folder, pick
+// agents, one button. This is that, in Kage's own shape: no workspace concept (Kage
+// has none — a folder holding several repos is disambiguated by listing them, never
+// picked silently), and no native folder picker (the daemon is a plain HTTP server and
+// this is a browser page with no filesystem access) — a validated path input stands in
+// for one, and says exactly what is wrong rather than surfacing raw git output.
+var addProjectState = null;
+var addProjectResolveTimer = null;
+function addProject() { showAddProject(true); }
+function showAddProject(on) {
+  document.getElementById("addproject-overlay").classList.toggle("on", on);
+  if (!on) { addProjectState = null; return; }
+  addProjectState = { path: "", dir: null, name: null, candidates: null, error: "", busy: false };
+  var input = document.getElementById("addproject-path");
+  input.value = "";
+  renderAddProject();
+  setTimeout(function () { input.focus(); }, 0);
 }
+function resolveAddProjectPath(pathValue) {
+  var ap = addProjectState;
+  if (!ap) return;
+  ap.dir = null; ap.name = null; ap.candidates = null;
+  if (!pathValue.trim()) { ap.error = ""; renderAddProject(); return; }
+  api("/projects/resolve?path=" + encodeURIComponent(pathValue)).then(function (out) {
+    // A later keystroke superseded this request — its answer is stale, drop it.
+    if (!addProjectState || addProjectState.path !== pathValue) return;
+    if (out.ok) { ap.dir = out.dir; ap.name = out.name; ap.error = ""; }
+    else if (out.reason === "ambiguous") { ap.candidates = out.candidates || []; ap.error = out.message; }
+    else { ap.error = out.message || "could not use that path"; }
+    renderAddProject();
+  }).catch(function () {
+    if (!addProjectState || addProjectState.path !== pathValue) return;
+    ap.error = "could not reach Kage to check that path";
+    renderAddProject();
+  });
+}
+function renderAddProject() {
+  var ap = addProjectState;
+  if (!ap) return;
+  var candWrap = document.getElementById("addproject-candidates");
+  candWrap.textContent = "";
+  if (ap.candidates) {
+    ap.candidates.forEach(function (dir) {
+      var row = h("button", "btn addproject-cand", dir.replace(/^\\/Users\\/[^/]+/, "~"));
+      row.onclick = function () {
+        ap.path = dir;
+        document.getElementById("addproject-path").value = dir;
+        ap.candidates = null;
+        resolveAddProjectPath(dir);
+      };
+      candWrap.appendChild(row);
+    });
+  }
+  var agentRow = document.getElementById("addproject-agent-row");
+  var orchRow = document.getElementById("addproject-orchestrator-row");
+  var goBtn = document.getElementById("addproject-go");
+  if (ap.dir) {
+    agentRow.style.display = "";
+    orchRow.style.display = "";
+    var agents = (state.installedAgents && state.installedAgents.length) ? state.installedAgents : ["claude"];
+    var sel = document.getElementById("addproject-agent");
+    sel.textContent = "";
+    agents.forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+    var orchVal = document.getElementById("addproject-orchestrator-value");
+    var orchDesc = document.getElementById("addproject-orchestrator-desc");
+    // Only claude's protocol is verified to hold a live, multi-turn Room session
+    // (resolveRoomReply's own comment says so) — offering codex here would be a
+    // picker that quietly does nothing, which is worse than not offering it.
+    if (agents.indexOf("claude") >= 0) {
+      orchVal.textContent = "Claude Code";
+      orchDesc.textContent = "The only agent Kage has verified can hold a live Room session.";
+    } else {
+      orchVal.textContent = "unavailable";
+      orchDesc.textContent = "The live Room needs Claude Code installed. You can still add this project and dispatch runs with " + agents[0] + ".";
+    }
+    goBtn.disabled = Boolean(ap.busy);
+  } else {
+    agentRow.style.display = "none";
+    orchRow.style.display = "none";
+    goBtn.disabled = true;
+  }
+  goBtn.textContent = ap.busy ? "Starting…" : "Create and start";
+  var msg = document.getElementById("addproject-msg");
+  msg.textContent = ap.error || "";
+  msg.className = "msg" + (ap.error ? " err" : "");
+}
+document.getElementById("addproject-path").addEventListener("input", function () {
+  var value = this.value;
+  if (!addProjectState) addProjectState = { path: "", dir: null, name: null, candidates: null, error: "", busy: false };
+  addProjectState.path = value;
+  clearTimeout(addProjectResolveTimer);
+  addProjectResolveTimer = setTimeout(function () { resolveAddProjectPath(value); }, 350);
+});
+document.getElementById("addproject-cancel").onclick = function () { showAddProject(false); };
+document.getElementById("addproject-overlay").onclick = function (ev) {
+  if (ev.target === document.getElementById("addproject-overlay")) showAddProject(false);
+};
+document.getElementById("addproject-go").onclick = function () {
+  var ap = addProjectState;
+  if (!ap || !ap.dir || ap.busy) return;
+  ap.busy = true; ap.error = "";
+  renderAddProject();
+  var agent = document.getElementById("addproject-agent").value;
+  api("/projects/add", { method: "POST", body: { dir: ap.dir, worker_agent: agent } }).then(function (out) {
+    if (out.ok && out.url) { showAddProject(false); window.location.href = out.url; return; }
+    ap.busy = false;
+    ap.error = out.message || out.error || "could not add that project";
+    if (out.reason === "ambiguous") ap.candidates = out.candidates || [];
+    renderAddProject();
+  }).catch(function () {
+    ap.busy = false;
+    ap.error = "could not reach Kage";
+    renderAddProject();
+  });
+};
 
 function render() {
   renderRoom();
@@ -2691,7 +2808,7 @@ document.addEventListener("keydown", function (ev) {
   if ((ev.metaKey || ev.ctrlKey) && ev.key === "n") { ev.preventDefault(); showOverlay(true); return; }
   if (ev.key === "Escape") {
     var hadOverlay = Boolean(document.querySelector(".overlay.on")) || document.getElementById("notif").classList.contains("on");
-    showPalette(false); showOverlay(false); showSettings(false); document.getElementById("notif").classList.remove("on");
+    showPalette(false); showOverlay(false); showSettings(false); showAddProject(false); document.getElementById("notif").classList.remove("on");
     // Only once nothing modal was open does esc mean "close the board's slide-over".
     if (!hadOverlay && state.dover) { state.dover = false; renderWork(); }
     return;

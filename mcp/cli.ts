@@ -137,10 +137,11 @@ import {
   runWorkspacePath,
 } from "./delegation/dispatch.js";
 import { ensureAppDaemon } from "./delegation/app-daemon.js";
-import { rememberProject } from "./delegation/projects.js";
+import { readKnownProjects, rememberProject } from "./delegation/projects.js";
+import { addProject, installedAgents } from "./delegation/add-project.js";
 import { steerRun } from "./delegation/steer.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
-import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
+import { ADAPTER_NAMES, adapterByName, detectAgent } from "./delegation/adapters/index.js";
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
 import { renderClaimCard } from "./delegation/verify.js";
 import { mergeRun, rejectRun, reverifyRun } from "./delegation/ratify.js";
@@ -159,6 +160,7 @@ const CORE_USAGE = `Kage manages your memory and agents
 Start here:
   kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
   kage app [--project <dir>]                 the desktop app — room, runs, board, memory
+  kage projects add <dir> [--agent claude|codex]   register another repo (the app's "+" does this, then opens it)
   kage scan --project <dir>                  60-second truth report on any repo (zero setup)
 
 Delegate work (the orchestrator):
@@ -292,6 +294,8 @@ Usage:
   kage review --project <dir>
   kage validate --project <dir>
   kage app [--project <dir>] [--no-open]     the web app: inbox · runs · board (starts the daemon if needed)
+  kage projects add <dir> [--agent claude|codex] [--json]
+  kage projects list [--json]
   kage ui [--project <dir>]                  full-screen console: board · review · dispatch · memory
   kage room [--project <dir>] [--agent claude|codex]
   kage dispatch "<intent>" [--agent claude|codex|stub] [--type bugfix|feature|refactor|migration|chore|investigation] [--brief-only] [--budget-usd <n>]
@@ -1005,6 +1009,55 @@ async function main(): Promise<void> {
       spawnProcess("open", [url], { detached: true, stdio: "ignore" }).unref();
     }
     return;
+  }
+
+  // Everything the app's add-project dialog does is reachable here too: validate a
+  // path the same way (addProject → resolveWorkspaceKind, refusing plainly rather than
+  // silently sandboxing or leaking raw git output), register it, and record a default
+  // worker agent. The app additionally starts that project's daemon and opens its Room
+  // in a browser tab — `kage app --project <dir>` is that other half from a terminal.
+  if (command === "projects") {
+    const action = args[1];
+    if (action === "add") {
+      const dir = args[2];
+      if (!dir) usage();
+      const agentArg = takeArg(args, "--agent");
+      if (agentArg && !ADAPTER_NAMES.includes(agentArg as (typeof ADAPTER_NAMES)[number])) {
+        console.error(`Unknown --agent ${agentArg}. One of: ${ADAPTER_NAMES.filter((name) => name !== "stub").join(", ")}`);
+        process.exit(2);
+      }
+      const result = addProject(dir, agentArg ? { worker_agent: agentArg as "claude" | "codex" } : {});
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.ok) process.exit(2);
+        return;
+      }
+      if (!result.ok) {
+        console.error(result.message);
+        if (result.reason === "ambiguous" && result.candidates) {
+          console.error("");
+          for (const candidate of result.candidates) console.error(`  ${candidate}`);
+        }
+        process.exit(2);
+      }
+      console.log(`Added ${result.name} (${result.dir})${result.kind === "sandbox" ? " — no commits yet, runs will use a sandbox, not a worktree" : ""}`);
+      console.log(`Start it: kage app --project ${result.dir}`);
+      return;
+    }
+    if (action === "list" || !action) {
+      const known = readKnownProjects();
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({ ok: true, projects: known, agents_installed: installedAgents() }, null, 2));
+        return;
+      }
+      if (!known.length) {
+        console.log("No projects known yet. Add one: kage projects add <dir>");
+        return;
+      }
+      for (const project of known) console.log(`${project.name}  ${project.dir}`);
+      return;
+    }
+    usage();
   }
 
   if (command === "hook") {
