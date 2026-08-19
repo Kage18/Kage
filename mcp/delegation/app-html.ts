@@ -70,7 +70,8 @@ ${APP_STYLES}
     <button data-view="work" id="m-work">Work<span class="k">2</span></button>
     <button data-view="memory" id="m-memory">Memory<span class="k">3</span></button>
   </div>
-  <button class="iconbtn" id="m-new">New run</button>
+  <button class="iconbtn" id="m-new" title="New run"><span class="mnew-ic" aria-hidden="true">＋</span><span class="mnew-lbl">New run</span></button>
+  <button class="iconbtn narrow-only" id="m-palette" title="Switch project, or run a command">⌘</button>
   <button class="iconbtn" id="m-theme" title="light / dark / follow the system">◐</button>
   <button class="iconbtn" id="m-settings" title="project settings">⚙</button>
   <span class="bellwrap"><button class="iconbtn" id="m-bell" title="notify when a run needs you">🔔</button><span class="badge" id="bell-badge" style="display:none">0</span></span>
