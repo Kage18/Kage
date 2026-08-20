@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { isProcessAlive } from "./contract.js";
 import {
+  orchestratorSpawnEnv,
   readRoomSessionMeta,
   readRoomSupervisorRecord,
   resolveRoomResumeId,
@@ -294,7 +295,10 @@ export async function superviseRoomPty(projectDir: string, session?: string): Pr
     cols: 100,
     rows: 30,
     cwd,
-    env: process.env as Record<string, string>,
+    // Without this, the orchestrator silently loses its native transcript whenever
+    // Kage's daemon was itself launched from inside another agent session — see
+    // orchestratorSpawnEnv's own comment in room-supervisor.ts for why.
+    env: orchestratorSpawnEnv(process.env),
   });
 
   const clients = new Set<Socket>();
