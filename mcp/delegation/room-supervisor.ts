@@ -249,6 +249,33 @@ function userFrame(message: string): string {
 }
 
 /**
+ * claude sets CLAUDE_CODE_CHILD_SESSION=1 on every subagent/child process it spawns
+ * (confirmed by inspecting the installed claude CLI). When Kage's own daemon is itself
+ * launched from inside such a child — e.g. an agent session running Kage's dev server —
+ * that marker leaks into every `claude` process Kage spawns in turn, and an INTERACTIVE
+ * one reads it as "I am a nested child, do not persist my own transcript", printing
+ * "Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and never
+ * writing the native jsonl room-transcript.ts (and Chat's has_transcript flag) depend
+ * on. Kage's orchestrator is never actually a subagent of whatever spawned the daemon —
+ * it is its own top-level session — so this must always be scrubbed, and
+ * CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 set as belt-and-suspenders (the same escape
+ * hatch the CLI's own warning names). Used for every `claude` process this module
+ * spawns, interactive or headless: the marker is harmless to strip either way, and a
+ * future claude release could widen which spawn shapes it affects.
+ */
+const CHILD_SESSION_MARKER_VARS = ["CLAUDE_CODE_CHILD_SESSION"];
+
+export function orchestratorSpawnEnv(base: NodeJS.ProcessEnv): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (CHILD_SESSION_MARKER_VARS.includes(key)) continue;
+    if (value !== undefined) next[key] = value;
+  }
+  next.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1";
+  return next;
+}
+
+/**
  * Runs for the life of the room: one child process, held open across every turn.
  * Returns only if the child exits or is told to stop — a daemon restart never reaches
  * this process at all, since it is spawned detached, exactly like a run's supervisor.
@@ -297,7 +324,11 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
   writeRoomSessionMeta(projectDir, { session_id: resumeId, permission_digest: currentDigest }, session);
 
   const args = buildHeadlessRoomArgs({ resumeId, mcpConfigPath });
-  const child: ChildProcess = spawn("claude", args, { cwd: projectDir, stdio: ["pipe", "pipe", "pipe"] });
+  const child: ChildProcess = spawn("claude", args, {
+    cwd: projectDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: orchestratorSpawnEnv(process.env),
+  });
 
   let sessionId: string | undefined = resumeId;
   let busy = false;
