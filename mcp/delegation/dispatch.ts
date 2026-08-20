@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Adapter } from "./adapters/types.js";
+import { reviewerAdapterByName } from "./adapters/index.js";
 import { type BriefPlan, compileBrief, renderBrief } from "./brief.js";
 import { effectiveBudgets, strictVerify } from "./config.js";
 import {
@@ -21,6 +22,7 @@ import {
   concurrencyStatus,
   createRun,
   listRuns,
+  onRunTransition,
   parseReportFence,
   patchRun,
   readRun,
@@ -39,6 +41,7 @@ import { attachRunToGoal, checkGoalAcceptsNewRun } from "./goal.js";
 import { type JudgmentInput, type ManagerJudgment, buildJudgment, writeJudgment } from "./manager.js";
 import { ProgressLine } from "./progress.js";
 import { draftLearnings } from "./ratify.js";
+import { type ReviewRunResult, reviewRun } from "./review.js";
 import type { CitationText } from "./verify.js";
 import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } from "./worktree.js";
 
@@ -416,6 +419,77 @@ export function dispatchDetached(projectDir: string, task: TaskRecord): { pid: n
   appendRunLedger(projectDir, { kind: "supervisor_spawned", run_id: task.id, pid: child.pid });
   return { pid: child.pid };
 }
+
+/**
+ * Run an independent reviewer agent over a run's claim + diff, in THIS process —
+ * review.ts's reviewRun does the actual work (kernel state, the agent-review record);
+ * this just resolves WHICH adapter reviews it. `adapterOverride` is the same test seam
+ * superviseRun's own adapterOverride is: a scripted stub in tests, the real reviewer
+ * adapter for the agent brand the WORK was done under (task.agent) otherwise — a
+ * claude-worked run gets reviewed by claude, a codex-worked one by codex.
+ */
+export async function dispatchReviewer(projectDir: string, runId: string, adapterOverride?: Adapter): Promise<ReviewRunResult> {
+  const task = readRun(projectDir, runId);
+  const adapter = adapterOverride ?? reviewerAdapterByName(task.agent);
+  return reviewRun(projectDir, runId, adapter);
+}
+
+/**
+ * Spawn the reviewer pass DETACHED — mirrors dispatchDetached above, and for the exact
+ * same reason. The process that flips a run to "ready" (this file's own executeRun, or
+ * supervisor.ts's superviseRun) is short-lived and returns to its caller right after;
+ * firing dispatchReviewer as an in-process, un-awaited promise from inside the
+ * onRunTransition hook below would mean the reviewer agent dies the moment that process
+ * exits — the same orphaning dispatchDetached already exists to prevent for a worker's
+ * own run. `kage review-run` (mcp/cli.ts) is this detached child's entire job.
+ */
+export function dispatchReviewerDetached(projectDir: string, runId: string): { pid: number | undefined } {
+  const entry = join(__dirname, "..", "cli.js");
+  const logPath = join(runDir(projectDir, runId), "review-supervisor.log");
+  mkdirSync(dirname(logPath), { recursive: true });
+  const logFd = openSync(logPath, "a");
+  let child;
+  try {
+    child = spawn(process.execPath, [entry, "review-run", runId, "--project", projectDir], {
+      cwd: projectDir,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+  } finally {
+    closeSync(logFd);
+  }
+  child.unref();
+  appendRunLedger(projectDir, { kind: "reviewer_spawned", run_id: runId, pid: child.pid });
+  return { pid: child.pid };
+}
+
+/**
+ * The onRunTransition hook body, exported separately from its registration below so a
+ * test can drive the gating logic (fires only on "ready", only for a run that opted into
+ * review) with a spy in place of a real detached spawn — the same shape reclaimQueuedRuns
+ * below takes an overridable `reattach`, for the same reason: proving the WIRING is
+ * correct must not require actually spawning a child process.
+ */
+export function maybeDispatchReviewer(
+  projectDir: string,
+  runId: string,
+  to: RunState,
+  spawnReviewer: (projectDir: string, runId: string) => { pid: number | undefined } = dispatchReviewerDetached,
+): void {
+  if (to !== "ready") return;
+  const task = readRun(projectDir, runId);
+  if (!task.review_required) return;
+  spawnReviewer(projectDir, runId);
+}
+
+// The opt-in review gate actually firing: a run that set review_required and just
+// reached "ready" gets an independent reviewer agent dispatched automatically — the same
+// hook registry (contract.ts's onRunTransition) and the same fire-on-"ready" moment as
+// ratify.ts's own auto-merge consumer, a different opt-in field deciding whether either
+// one actually does anything. Order between the two hooks does not matter: maybeAutoMerge
+// already bails out for any review_required run at "ready" (it needs "approved", not
+// "ready" — see its own comment), so there is nothing for the two to race over.
+onRunTransition((projectDir, runId, to) => maybeDispatchReviewer(projectDir, runId, to));
 
 /**
  * Re-admit runs that queued at the concurrency cap instead of being spawned —
