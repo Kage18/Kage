@@ -604,14 +604,31 @@ const deadFieldsCache = new Map<string, DeadFields>();
 // ancestor). That is precisely the shape of an orphaned run whose work never got
 // committed: the UI offered both "Adopt" (worktree_adoptable, correctly) and "Close as
 // landed" (branch_landed, wrongly) for the same run, and clicking the latter would
-// reject a record that was never actually landed. A branch only "landed" if its tip is
-// a real commit beyond the merge-base — not merely reachable from HEAD because it never
-// diverged from it.
+// reject a record that was never actually landed.
+//
+// Comparing the branch tip against `git merge-base branch HEAD` does NOT distinguish
+// this — once isBranchLanded's own ancestor check has already passed (which is the only
+// time this function is even called, see computeDeadFields below), branch is BY
+// DEFINITION an ancestor of HEAD, and the merge-base of an ancestor and its descendant
+// is ALWAYS the ancestor itself. That makes tip === merge-base true for EVERY landed
+// branch, real commits or not — comparing against HEAD after a merge is comparing
+// against a value the merge itself already contaminated. Comparing commit TIMESTAMPS
+// against the run's own created_at was tried and dropped too: git's commit-date format
+// is second-precision while created_at is millisecond-precision, so a commit landing in
+// the same wall-clock second as run creation is a genuine race between two different
+// clocks, not a property of the branch.
+//
+// The robust signal instead: the branch's own reflog. `git worktree add -b branch
+// <start>` writes exactly one reflog entry ("branch: Created from ...") when nothing has
+// happened to it since; every real commit on the branch adds another entry on top. This
+// is unaffected by merges elsewhere (a branch's reflog only records updates to ITS OWN
+// ref) and by wall-clock timing entirely — it is git's own record of whether this ref
+// has ever moved.
 function branchHasRealCommits(projectDir: string, branch: string): boolean {
-  const tip = git(projectDir, ["rev-parse", branch]);
-  const mergeBase = git(projectDir, ["merge-base", branch, "HEAD"]);
-  if (!tip.ok || !mergeBase.ok) return false;
-  return tip.stdout !== mergeBase.stdout;
+  const reflog = git(projectDir, ["log", "-g", "--format=%H", branch]);
+  if (!reflog.ok || !reflog.stdout) return false;
+  const entries = reflog.stdout.split("\n").filter(Boolean);
+  return entries.length > 1;
 }
 
 function computeDeadFields(projectDir: string, run: RunView): DeadFields {
