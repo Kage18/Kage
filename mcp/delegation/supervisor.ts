@@ -598,7 +598,7 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
               tokens: (state.usage?.tokens ?? 0) + turnUsage.tokens,
             };
             log({ kind: "usage", usd: turnUsage.usd, tokens: turnUsage.tokens });
-            recordSpend(projectDir, runId, state.usage);
+            recordSpend(projectDir, runId, state.usage, state.sessionId);
             // Enforce the budget the run was DISPATCHED with, not whatever it was
             // patched to mid-run (budgets aren't mutable in flight, but reading the
             // original avoids a race with any future editor of this record). Checked
@@ -719,9 +719,14 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
         ...(isResume ? { resumeSessionId: task.agent_session_id } : { sessionId: task.agent_session_id ?? undefined }),
         onStart: (pid) => {
           if (pid) patchRun(projectDir, runId, { agent_pid: pid });
-      recordSpend(projectDir, runId, outcome.usage);
         },
       });
+      // Moved out of onStart above: onStart fires at spawn time, before `outcome` exists
+      // at all (it fired inside adapter.run()'s own Promise executor, ahead of this
+      // `const outcome = await ...` ever resolving) — referencing outcome.usage there threw
+      // a ReferenceError on every non-live-agent run, caught by the try/catch below and
+      // silently misreported as a spawn_error, so spend was never recorded on this path.
+      recordSpend(projectDir, runId, outcome.usage, outcome.session_id ?? task.agent_session_id);
       state.finalMessage = outcome.final_message;
       if (outcome.waiting) {
         state.waiting = outcome.waiting;
