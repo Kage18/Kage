@@ -291,21 +291,33 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .packet .pf-label { font-size:12px; color:var(--text3); margin-right:2px; }
   .packet .pfoot .msg { font-size:11.5px; color:var(--text3); margin-left:auto; }
 
-  /* goal detail overlay — read-and-navigate: full intent, autonomy in words, each
-     wave's runs, spend, and the relocated Abandon. Overrides the packet body's mono
-     pre-wrap (built for memory text) with the same prose/row register the run detail
-     already uses. */
+  /* goal detail overlay — read-and-navigate: a one-line title, a summary chip row,
+     the full intent behind the same foldrow/rawpane expander run detail uses,
+     autonomy in words, each wave's runs (or its planned runs and dispatch state),
+     spend, and the relocated Abandon. Overrides the packet body's mono pre-wrap
+     (built for memory text) with the same prose/row register run detail already
+     uses. */
+  #goal-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #goal-body { font-family:var(--sans); white-space:normal; }
+  #goal-body .foldrow { margin:0 0 12px; }
   .gd-meta { margin-bottom:10px; }
   .gd-autonomy { margin:0 0 18px; color:var(--text2); }
   .gd-wave-block { margin-bottom:16px; }
+  .gd-wave-head { display:flex; align-items:baseline; gap:8px; margin-bottom:4px; }
   .gd-run-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
     padding:8px 10px; margin:0 -10px; border-radius:var(--r-panel); cursor:pointer; }
   .gd-run-row:hover { background:var(--surface2); }
+  .gd-run-row.gd-planned { cursor:default; }
+  .gd-run-row.gd-planned:hover { background:none; }
   .gd-run-name { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gd-wave-status { font-family:var(--mono); font-size:11.5px; color:var(--text3);
+    padding:4px 10px 2px; }
+  .gd-wave-status.due { color:var(--amber); }
+  .gd-wave-block .btn.sm { margin:2px 10px 0; }
   .gd-foot { display:flex; align-items:center; gap:10px; margin-top:6px;
     padding-top:14px; border-top:1px solid var(--line2); }
   .gd-foot .atom { margin-right:auto; font-family:var(--mono); }
+  .chip.wave-due { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
 
   .view.on { display:flex; flex-direction:column; }
 

@@ -20,6 +20,7 @@ var state = {
   workLayout: "list", dover: false, mobileDetailOpen: false, showAllDone: false, workOrder: [],
   diffView: "unified", collapsedDiff: {}, expandedGroups: {}, detailIntentOpen: false,
   steerQueueMode: false, runTerminalActive: false, runTermRunId: null, diffJumpTarget: null,
+  goalIntentOpen: false, dispatchWaveUnsupported: false,
 };
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
@@ -303,6 +304,24 @@ function runTitle(run) {
 // only for a run recorded before display_name existed on disk.
 function displayName(run) {
   return run.display_name || runTitle(run);
+}
+// The goal overlay header's title: the intent's first sentence only, same
+// sentence-picking rule as runTitle above minus its character cap — the header
+// itself clips to one line with CSS ellipsis (#goal-title), so no second length
+// budget is needed here.
+// Same sentence-picking rule as runTitle above minus its character cap and its
+// run-shaped input — used for the goal overlay's title (clipped to one line by CSS
+// ellipsis instead) and for a wave's planned-run rows, neither of which is a run.
+function firstSentence(text) {
+  var raw = (text || "").trim();
+  if (!raw) return "";
+  var firstLine = raw.split(/\\r?\\n/)[0];
+  var sentenceMatch = firstLine.match(/^[^.!?]*[.!?]/);
+  var picked = sentenceMatch ? sentenceMatch[0] : firstLine;
+  return picked.replace(/\\s+/g, " ").trim().replace(/[.,;:!?]+$/, "").trim();
+}
+function goalTitle(goal) {
+  return firstSentence(goal.intent) || goal.id;
 }
 var STATE_DOT_COLOR = { jade: "var(--jade)", amber: "var(--amber)", crimson: "var(--crimson)", dim: "var(--text3)" };
 // The five AO fields plus one Kage field, shared by every card-shaped surface (sidebar
@@ -723,6 +742,29 @@ function goalSpendLabel(goal) {
   if (!any) return null;
   return total >= 0.995 ? "$" + total.toFixed(2) : "$" + total.toFixed(total < 0.01 ? 3 : 2).replace(/^\$0/, "$0");
 }
+function goalWaveLine(goal) {
+  var waves = goal.plan.waves || [];
+  if (!waves.length) return "no plan yet";
+  var started = waves.filter(function (w) { return w.run_ids.length > 0; }).length;
+  return "wave " + Math.min(started || 1, waves.length) + " of " + waves.length;
+}
+// A wave's dispatch-readiness, read straight from the API's own per-wave status field
+// — never re-derived client-side, since the real gate also checks budgets and
+// files_scope collisions this client cannot see (goal.ts's checkGoalAcceptsNewRun).
+// The goal-continuity backend run that adds this field lands independently of this
+// redesign: absent field means absent opinion, so every wave here reads as neither
+// waiting nor due until it exists — only its planned runs render.
+function waveGateStatus(wave) {
+  return wave && wave.status && typeof wave.status.due === "boolean" ? wave.status : null;
+}
+function dueWaveIndex(goal) {
+  var waves = goal.plan.waves || [];
+  for (var i = 0; i < waves.length; i += 1) {
+    var status = waveGateStatus(waves[i]);
+    if (status && status.due) return i;
+  }
+  return -1;
+}
 function abandonGoalClick(goal) {
   if (!window.confirm("Abandon “" + goal.intent + "”? Its runs are not touched — only the goal stops tracking them.")) return;
   api("/goals/" + goal.id + "/abandon", { method: "POST" }).then(function (out) {
@@ -744,12 +786,14 @@ function fillGoalCard(card, goal) {
   // The setting the user picked must be visible, not just enforced silently — autonomy
   // decided whether a verified run merges itself or waits for a human.
   head.appendChild(h("span", "chip autonomy-" + goal.autonomy, goal.autonomy === "merge" ? "auto-merge" : "recommend"));
+  // Surfaced only when a wave is actually blocked on a human dispatch — never
+  // replaces the state/autonomy chips, just adds to them.
+  var dueIdx = dueWaveIndex(goal);
+  if (dueIdx >= 0) head.appendChild(h("span", "chip wave-due", "wave " + (dueIdx + 1) + " due"));
   card.appendChild(head);
 
   var waves = goal.plan.waves || [];
-  var started = waves.filter(function (w) { return w.run_ids.length > 0; }).length;
-  card.appendChild(h("div", "gwaveline",
-    waves.length ? "wave " + Math.min(started || 1, waves.length) + " of " + waves.length : "no plan yet"));
+  card.appendChild(h("div", "gwaveline", goalWaveLine(goal)));
   waves.forEach(function (wave) {
     var row = h("div", "gwave");
     if (!wave.run_ids.length) row.appendChild(h("span", "gwchip dim", "·"));
@@ -838,17 +882,59 @@ function goalRunRow(runId) {
   };
   return row;
 }
+// The dispatch-wave endpoint ships from a parallel backend run, landing independently
+// of this redesign. daemon.ts's own route-miss fallback returns { ok:false,
+// error:"not_found" } for any unmatched path — that exact body means "the endpoint
+// isn't live here yet", so the button is hidden rather than left showing a confusing
+// 404 forever. Any OTHER refusal (budget, files_scope collision, ...) came from the
+// real gate (goal.ts's checkGoalAcceptsNewRun) and is shown verbatim.
+function dispatchWaveClick(goal, waveIndex, btn) {
+  btn.disabled = true;
+  return api("/goals/" + goal.id + "/dispatch-wave", { method: "POST", body: { wave: waveIndex } }).then(function (out) {
+    if (out && out.error === "not_found") {
+      state.dispatchWaveUnsupported = true;
+      renderGoalDetail();
+      return;
+    }
+    if (!out || !out.ok) {
+      showError((out && out.error) || "could not dispatch the wave");
+      btn.disabled = false;
+      return;
+    }
+    flash("wave dispatched");
+    refresh().then(function () { renderGoalDetail(); });
+  });
+}
 function renderGoalDetail() {
   var goal = (state.goals || []).filter(function (g) { return g.id === state.selectedGoal; })[0];
   if (!goal) { closeGoalDetail(); return; }
-  document.getElementById("goal-title").textContent = goal.intent;
+  document.getElementById("goal-title").textContent = goalTitle(goal);
   var body = document.getElementById("goal-body");
   body.textContent = "";
 
-  var meta = h("div", "chips gd-meta");
-  meta.appendChild(h("span", "chip state-" + goal.state, goal.state));
-  meta.appendChild(h("span", "chip autonomy-" + goal.autonomy, goal.autonomy === "merge" ? "auto-merge" : "recommend"));
-  body.appendChild(meta);
+  // The full intent — often paragraph-length by design — stays one click away
+  // instead of being the header itself. Same foldrow/rawpane pattern run detail
+  // already uses (app-client.ts's renderDetail), same classes, so it reads as the
+  // same disclosure everywhere in the app rather than a bespoke goal-only widget.
+  var intentFold = h("button", "foldrow");
+  intentFold.appendChild(h("span", "tw", state.goalIntentOpen ? "▾" : "▸"));
+  intentFold.appendChild(h("span", "", "Full intent"));
+  intentFold.onclick = function () { state.goalIntentOpen = !state.goalIntentOpen; renderGoalDetail(); };
+  body.appendChild(intentFold);
+  if (state.goalIntentOpen) body.appendChild(h("div", "rawpane", goal.intent));
+
+  var spend = goalSpendLabel(goal);
+  var chips = h("div", "chips gd-meta");
+  chips.appendChild(h("span", "chip state-" + goal.state, goal.state));
+  chips.appendChild(h("span", "chip autonomy-" + goal.autonomy, goal.autonomy === "merge" ? "auto-merge" : "recommend"));
+  chips.appendChild(h("span", "chip", goalWaveLine(goal)));
+  chips.appendChild(h("span", "chip", spend || "no spend yet"));
+  // A plain, non-ticking chip on purpose: ageSpan()'s setAttribute-based live tick
+  // needs a real DOM, and this overlay is exercised directly (renderGoalDetail) by a
+  // minimal fake-element sandbox elsewhere in the test suite that does not implement
+  // it — reopening the overlay already refreshes this, so live-ticking buys little.
+  chips.appendChild(h("span", "chip", ago(goal.created_at) + " ago"));
+  body.appendChild(chips);
   body.appendChild(h("p", "gd-autonomy", autonomyExplain(goal)));
 
   var waves = goal.plan.waves || [];
@@ -857,14 +943,39 @@ function renderGoalDetail() {
   }
   waves.forEach(function (wave, idx) {
     var block = h("div", "gd-wave-block");
-    block.appendChild(h("div", "seclabel-sm", "Wave " + (idx + 1) + " of " + waves.length));
-    if (!wave.run_ids.length) block.appendChild(h("div", "empty", "no runs yet"));
-    wave.run_ids.forEach(function (runId) { block.appendChild(goalRunRow(runId)); });
+    var whead = h("div", "gd-wave-head");
+    whead.appendChild(h("div", "seclabel-sm", "Wave " + (idx + 1) + " of " + waves.length));
+    var status = waveGateStatus(wave);
+    if (status) whead.appendChild(h("span", "atom" + (status.due ? " amber" : " dim"), status.due ? "due" : "waiting"));
+    block.appendChild(whead);
+
+    if (wave.run_ids.length) {
+      wave.run_ids.forEach(function (runId) { block.appendChild(goalRunRow(runId)); });
+    } else {
+      // A wave with no runs yet is never a void: its PLANNED runs are already on the
+      // record (plan.waves[n].runs), known before a single one ever dispatches.
+      (wave.runs || []).forEach(function (spec) {
+        var prow = h("div", "gd-run-row gd-planned");
+        prow.appendChild(h("span", "gd-run-name dim", firstSentence(spec.intent) || "planned run"));
+        prow.appendChild(h("span", "atom dim", "planned"));
+        block.appendChild(prow);
+      });
+      if (status) {
+        var lineText = idx === 0
+          ? (status.due ? "due now" : "waiting")
+          : (status.due ? "due now — wave " + idx + " merged" : "waiting — dispatches after wave " + idx + " merges");
+        block.appendChild(h("div", "gd-wave-status" + (status.due ? " due" : ""), lineText));
+        if (status.due && !state.dispatchWaveUnsupported) {
+          var dispatchBtn = h("button", "btn sm", "Dispatch wave");
+          dispatchBtn.onclick = function () { dispatchWaveClick(goal, idx, dispatchBtn); };
+          block.appendChild(dispatchBtn);
+        }
+      }
+    }
     body.appendChild(block);
   });
 
   var foot = h("div", "gd-foot");
-  var spend = goalSpendLabel(goal);
   foot.appendChild(h("span", "atom", spend || "no spend yet"));
   if (goal.state === "planning" || goal.state === "executing") {
     var abandon = h("button", "btn danger sm", "Abandon");
@@ -876,6 +987,7 @@ function renderGoalDetail() {
 function openGoalDetail(goalId) {
   clearFlash();
   state.selectedGoal = goalId;
+  state.goalIntentOpen = false;
   renderGoalDetail();
   document.getElementById("goal-overlay").classList.add("on");
 }
