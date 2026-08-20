@@ -335,6 +335,89 @@ test("tickAges patches every [data-age] node's text in place and never touches R
   assert.deepEqual(normalize(counts), before, "tickAges must never bump any section's render counter — it is a text patch, not a render");
 });
 
+// --- write-if-changed: the last mile — a rendered-but-unrolled age (or any other
+// periodic text patch) must write NOTHING, not even a same-string textContent set,
+// because a textContent assignment tears down and recreates the Text node even when
+// the string is identical (that node destruction is what a childList MutationObserver
+// sees as churn) --------------------------------------------------------------------
+
+// FAILS ON REVERT: reverting writeIfChanged to a bare `el.textContent = text` makes
+// the "equal string" case below assign nodeValue zero times fail — it would instead
+// go through the textContent setter every call regardless of whether the string
+// changed, which this fake element does not even expose (proving the real function
+// must be doing an equality check before writing anything at all).
+test("writeIfChanged: skips the write when the string is unchanged, writes exactly once when it differs, and patches the existing Text node's nodeValue rather than replacing it", () => {
+  const sandbox = loadSandbox();
+  const writeIfChanged = sandbox.writeIfChanged as (el: unknown, text: string) => void;
+
+  let writes = 0;
+  let value = "17h";
+  const textNode = {
+    nodeType: 3,
+    get nodeValue() { return value; },
+    set nodeValue(v: string) { writes += 1; value = v; },
+  };
+  const span = { firstChild: textNode, lastChild: textNode };
+
+  writeIfChanged(span, "17h");
+  assert.equal(writes, 0, "an equal string must never assign nodeValue — this is the at-rest case: '17h' -> '17h' every tick");
+  assert.equal(value, "17h");
+
+  writeIfChanged(span, "18h");
+  assert.equal(writes, 1, "a differing string must assign nodeValue exactly once");
+  assert.equal(value, "18h", "the new string must actually land");
+  assert.equal(span.firstChild, textNode, "the change must patch the SAME text node, never replace it — a characterData mutation, not childList churn");
+
+  // An element with no existing single-text-child (e.g. freshly created, still empty)
+  // falls back to a guarded textContent set — still write-if-changed, just without a
+  // node to patch nodeValue on yet.
+  let textContentWrites = 0;
+  let textContentValue = "";
+  const empty = {
+    firstChild: null,
+    get textContent() { return textContentValue; },
+    set textContent(v: string) { textContentWrites += 1; textContentValue = v; },
+  };
+  writeIfChanged(empty, "");
+  assert.equal(textContentWrites, 0, "writing the same (empty) string to a childless element must still be skipped");
+  writeIfChanged(empty, "3h");
+  assert.equal(textContentWrites, 1);
+  assert.equal(textContentValue, "3h");
+});
+
+test("the age ticker patches text through writeIfChanged, not a raw unconditional textContent assignment — the fix for the measured ~25/s at-rest SPAN churn", () => {
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  assert.match(script, /function writeIfChanged\(el, text\) \{/, "writeIfChanged must ship in the composed page");
+  const tickAgesStart = script.indexOf("function tickAges() {");
+  assert.ok(tickAgesStart >= 0, "tickAges must be defined in the composed page");
+  const tickAgesEnd = script.indexOf("\n}", tickAgesStart);
+  const tickAgesBody = script.slice(tickAgesStart, tickAgesEnd);
+  assert.match(tickAgesBody, /writeIfChanged\(el, prefix \+ ago\(iso\) \+ suffix\)/,
+    "tickAges' per-node patch must route through writeIfChanged");
+  assert.doesNotMatch(tickAgesBody, /el\.textContent\s*=/,
+    "tickAges must no longer assign textContent unconditionally — that is exactly the childList churn this run removes");
+});
+
+// --- write-if-changed: the sidebar projects rail (#plist / #sidefoot) skips its
+// wholesale clear-and-rebuild on an unchanged poll tick too ---------------------------
+
+test("renderProjects gates its whole rebuild behind revisionChanged(\"projects\", ...) instead of clearing #plist/#sidefoot on every call", () => {
+  const html = delegationAppHtml("tok");
+  const script = html.split("<script>")[1].split("</" + "script>")[0];
+  const start = script.indexOf("function renderProjects() {");
+  assert.ok(start >= 0, "renderProjects must be defined in the composed page");
+  const end = script.indexOf("\nfunction openProject(", start);
+  const body = script.slice(start, end);
+  assert.match(body, /revisionChanged\("projects",/, "renderProjects must gate its rebuild through the same revisionChanged seam every other section uses");
+  assert.match(body, /if \(!changed\) return;/, "an unchanged poll must return before touching #plist or #sidefoot at all");
+  // The failure paths of openProject mutate a row directly (the "starting…" label) —
+  // proof those two call sites still force a rebuild past the gate, or a failed open
+  // would leave the row stuck reading "starting…" forever.
+  const resets = (script.match(/lastRevision\.projects = null;/g) || []).length;
+  assert.equal(resets, 2, "both openProject failure branches must invalidate the cached revision before calling renderProjects() again");
+});
+
 // --- server-side cache + correctness fix (item 6 + the vacuous-ancestor bug) ----------
 
 const TOKEN = "test-token-0123456789abcdef0123456789abcdef";

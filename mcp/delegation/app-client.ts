@@ -63,7 +63,7 @@ function stableStringify(value) {
 
 // One remembered revision per section — a plain object keyed by section name, not a
 // per-caller closure, so every polling refresh path shares the same tiny gate.
-var lastRevision = { runs: null, board: null, sidebar: null, goalRail: null, memory: null };
+var lastRevision = { runs: null, board: null, sidebar: null, goalRail: null, memory: null, projects: null };
 // True (and remembers the new hash) the first time this exact payload is seen for this
 // section; false — meaning "skip the DOM work" — every time after, until the payload
 // actually differs.
@@ -122,9 +122,28 @@ function ageSpan(cls, iso, prefix, suffix) {
   el.textContent = (prefix || "") + ago(iso) + (suffix || "");
   return el;
 }
+// Write-if-changed: skips the write entirely when the computed string already matches
+// what the node holds, and — when a single Text node already lives there — patches its
+// nodeValue directly instead of going through textContent, so a genuine change is a
+// characterData mutation, never childList churn (textContent replacement tears down
+// and recreates the text node even when the string it is replaced WITH is identical).
+// AO-at-rest measurement: this is the one fix that silences the ticker's per-second
+// SPAN churn (~25/s) along with every other periodic label sharing this same node
+// shape — after this, an unrolled age ('17h' -> '17h') writes nothing at all.
+function writeIfChanged(el, text) {
+  var node = el.firstChild;
+  if (node && node.nodeType === 3 && node === el.lastChild) {
+    if (node.nodeValue !== text) node.nodeValue = text;
+    return;
+  }
+  if (el.textContent !== text) el.textContent = text;
+}
 // Patches every live age label's text in place from its own data-age attribute —
 // timers tick without repaints, per the discipline this file exists to enforce. Never
-// calls bumpRenderCount: this is not a section render, just a text-node refresh.
+// calls bumpRenderCount: this is not a section render, just a text-node refresh. Every
+// [data-age] node this walks (the bare ticker labels, qtime, pnl-tl-at, the "label"
+// class on the memory panel's timeline, tm, when) shares the one ageSpan() shape, so
+// gating the write here through writeIfChanged silences all of them at once.
 function tickAges() {
   var nodes = document.querySelectorAll ? document.querySelectorAll("[data-age]") : [];
   for (var i = 0; i < nodes.length; i += 1) {
@@ -133,7 +152,7 @@ function tickAges() {
     if (!iso) continue;
     var prefix = el.getAttribute("data-age-prefix") || "";
     var suffix = el.getAttribute("data-age-suffix") || "";
-    el.textContent = prefix + ago(iso) + suffix;
+    writeIfChanged(el, prefix + ago(iso) + suffix);
   }
 }
 
@@ -2869,9 +2888,22 @@ function renderSidebarFleet() {
 function renderProjects() {
   var list = document.getElementById("plist");
   if (!list) return;
-  list.textContent = "";
   // "needs_you" is the kernel's own word (Ownership = working | needs_you | done).
   var needs = state.runs.filter(function (r) { return r.ownership === "needs_you"; }).length;
+  var open = state.runs.filter(function (r) {
+    return ["merged", "rejected", "dropped"].indexOf(r.display_state) < 0;
+  }).length;
+  // Write-if-changed for the whole rail: a poll tick that carries the identical
+  // project list, active dir, and run states this paints from (the badge, the fleet,
+  // the foot) touches neither #plist nor #sidefoot at all — the wholesale clear-and-
+  // rebuild below only runs when something in that fingerprint actually moved.
+  var changed = revisionChanged("projects", {
+    projects: state.projects, dir: state.projectDir, needs: needs, open: open,
+    live: state.room.live, view: state.view, selected: state.selected,
+    fleet: (state.runs || []).map(function (r) { return { id: r.id, display_state: r.display_state, display_name: r.display_name, intent: r.intent }; }),
+  });
+  if (!changed) return;
+  list.textContent = "";
   (state.projects || []).forEach(function (project) {
     var current = project.dir === state.projectDir;
     var row = h("div", "prow" + (current ? " on" : ""));
@@ -2902,9 +2934,6 @@ function renderProjects() {
   var foot = document.getElementById("sidefoot");
   if (foot) {
     foot.textContent = "";
-    var open = state.runs.filter(function (r) {
-      return ["merged", "rejected", "dropped"].indexOf(r.display_state) < 0;
-    }).length;
     var label = h("span", null, open === 1 ? "1 open run" : open + " open runs");
     foot.appendChild(label);
     if (needs) { foot.appendChild(document.createTextNode(" · ")); foot.appendChild(h("b", null, needs + " need you")); }
@@ -2915,11 +2944,15 @@ function openProject(dir, row) {
   // project's own daemon and going there, never retargeting this one out from under
   // its live runs. A cold start takes seconds, so the row says what it is doing.
   if (row) { row.classList.add("on"); var name = row.querySelector(".pn"); if (name) name.textContent = "starting…"; }
+  // The click above mutated the row directly, outside renderProjects' own write-if-
+  // changed fingerprint (nothing in state changed) — force the next call past that
+  // gate so a failed open actually repaints the row back from "starting…".
   api("/projects/open", { method: "POST", body: { dir: dir } }).then(function (out) {
     if (out.ok && out.url) { window.location.href = out.url; return; }
+    lastRevision.projects = null;
     renderProjects();
     showError(out.error || "could not open that project");
-  }).catch(function () { renderProjects(); showError("could not open that project"); });
+  }).catch(function () { lastRevision.projects = null; renderProjects(); showError("could not open that project"); });
 }
 // AO gets from "+" to a live orchestrator session in four clicks: pick a folder, pick
 // agents, one button. This is that, in Kage's own shape: no workspace concept (Kage
