@@ -58,7 +58,13 @@ export const DEFAULT_MAX_CONCURRENT = 3;
 // Mirrors contract.ts's DEFAULT_RUN_BUDGETS (usd/minutes) — kept here rather than
 // imported so config.ts, the layer contract.ts's kernel is read BY, never depends on
 // the kernel itself. Do not change these without changing DEFAULT_RUN_BUDGETS too.
-export const DEFAULT_RUN_BUDGET_USD = 2;
+//
+// usd is a circuit breaker for pathology (a looping/thrashing agent), not a per-task
+// allowance — real merged runs cost $5-25 routinely, so a $2 cap stopped only good
+// work, never a runaway. minutes is measured and shown everywhere but no longer stops
+// anything (see contract.ts's checkRunBudget); the stall detector in supervisor.ts is
+// what actually catches a looping agent now.
+export const DEFAULT_RUN_BUDGET_USD = 50;
 export const DEFAULT_RUN_BUDGET_MINUTES = 30;
 
 function configPath(projectDir: string): string {

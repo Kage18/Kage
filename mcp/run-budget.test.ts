@@ -55,11 +55,13 @@ test("checkRunBudget: usd over the cap names both the limit and the actual figur
   assert.match(result.reason ?? "", /\$2\.00/);
 });
 
-test("checkRunBudget: minutes over the cap (usd still fine) also names both figures", () => {
+// UPDATED 2026-08-20: minutes stopped being a stopping condition — see
+// mcp/resume-budgets.test.ts's header for the full reasoning (a minutes cap stopped
+// nothing bad in a full day of real use, while halting five legitimate runs).
+test("checkRunBudget: minutes over the cap (usd still fine) is untouched — minutes never stops a run", () => {
   const result = checkRunBudget({ usd_est: 0.5, minutes: 45 }, { usd: 2, minutes: 30, diff_lines: 400 });
-  assert.equal(result.exceeded, true);
-  assert.match(result.reason ?? "", /45\.0 min/);
-  assert.match(result.reason ?? "", /30 min/);
+  assert.equal(result.exceeded, false);
+  assert.equal(result.reason, undefined);
 });
 
 // --- supervisor.ts: enforcement on a live, streaming run --------------------------

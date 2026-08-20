@@ -1571,7 +1571,10 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
     if (run.spend.usd_est > run.budgets.usd) {
       totalRow("budget", "over — $" + run.spend.usd_est.toFixed(2) + " spent against a $" + run.budgets.usd.toFixed(2) + " cap", "hot");
     } else if (run.spend.minutes > run.budgets.minutes) {
-      totalRow("budget", "over — " + run.spend.minutes.toFixed(1) + " min against a " + run.budgets.minutes + " min cap", "hot");
+      // Informational only, never an alarm: minutes is measured and shown everywhere but
+      // does not stop a run any more (usd is the only cap that does) — a "hot" row here
+      // used to read as a problem when it was not one.
+      totalRow("budget", run.spend.minutes.toFixed(1) + " min elapsed (" + run.budgets.minutes + " min shown as a guide, not a stop)");
     }
   }
   if (totals.children.length) body.appendChild(totals);

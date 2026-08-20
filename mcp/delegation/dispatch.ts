@@ -18,7 +18,9 @@ import {
   RUN_SCHEMA_VERSION,
   type TaskRecord,
   appendRunLedger,
+  concurrencyStatus,
   createRun,
+  listRuns,
   parseReportFence,
   patchRun,
   readRun,
@@ -410,6 +412,38 @@ export function dispatchDetached(projectDir: string, task: TaskRecord): { pid: n
   child.unref();
   appendRunLedger(projectDir, { kind: "supervisor_spawned", run_id: task.id, pid: child.pid });
   return { pid: child.pid };
+}
+
+/**
+ * Re-admit runs that queued at the concurrency cap instead of being spawned —
+ * supervisor.ts's own pre-spawn admission gate leaves a queued run exactly where it
+ * was (typically "briefed"), marked with `waiting_on.needs === "a free run slot"`, and
+ * returns without ever touching a worktree or an agent process. Nothing else was going
+ * to come back for it, so this is the other half of that fix: called from the daemon's
+ * existing reap timer on the same cadence as sweepDeadRuns (idempotent, cheap — one
+ * listRuns pass), it re-dispatches each queued run, oldest first, up to whatever room
+ * is actually free right now. A plain `--brief-only` dispatch is never mistaken for one
+ * of these — it never sets this specific marker.
+ */
+export function reclaimQueuedRuns(
+  projectDir: string,
+  // Test seam, same pattern as recovery.ts's resumeStoppedRun: defaults to the real
+  // detached spawn; a test overrides it to reattach in-process against a scripted
+  // adapter instead of spawning a real `kage supervise` child.
+  reattach: (projectDir: string, task: TaskRecord) => { pid: number | undefined } = dispatchDetached,
+): RunView[] {
+  const queued = listRuns(projectDir)
+    .filter((run) => run.state === "briefed" && run.waiting_on?.needs === "a free run slot")
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const admitted: RunView[] = [];
+  for (const run of queued) {
+    if (!concurrencyStatus(projectDir).admits) break;
+    patchRun(projectDir, run.id, { waiting_on: undefined });
+    appendRunLedger(projectDir, { kind: "reclaimed_from_queue", run_id: run.id });
+    reattach(projectDir, run);
+    admitted.push(readRun(projectDir, run.id));
+  }
+  return admitted;
 }
 
 // A run still executed by the calling process — no supervisor, no owning pid recorded
