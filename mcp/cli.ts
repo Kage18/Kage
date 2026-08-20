@@ -30,6 +30,7 @@ import {
   buildStructuralIndex,
   capture,
   changelog,
+  countIndexableFiles,
   createReviewArtifact,
   createPublicCandidate,
   distillSession,
@@ -103,6 +104,7 @@ import {
   refreshProject,
   rejectPending,
   registryRecommendations,
+  scaleGuardMessage,
   setupAgent,
   generatePluginHooks,
   VALUE_DOLLARS_PER_MILLION_TOKENS,
@@ -589,6 +591,8 @@ async function main(): Promise<void> {
     }
     console.log(`Kage Truth Report — ${result.project_dir}`);
     console.log(`Scanned ${result.totals.files_scanned} files, ${result.totals.symbols_scanned} symbols${result.totals.docs_scanned ? `, ${result.totals.docs_scanned} doc file(s)` : ""}\n`);
+    const scanScaleWarning = scaleGuardMessage(result.totals.files_scanned);
+    if (scanScaleWarning) console.log(`${scanScaleWarning}\n`);
     console.log(result.headline ? `  ${result.headline}\n` : "");
     const sections: Array<{ kind: string; heading: string; clean: string; count: number }> = [
       { kind: "knowledge_void", heading: "KNOWLEDGE VOID — high churn, zero memory", clean: "no undocumented hot files", count: result.totals.knowledge_voids },
@@ -822,6 +826,8 @@ async function main(): Promise<void> {
     console.log("  Memory      .agent_memory/ created — packets are plain files, reviewable in git");
     console.log(`  Indexes     ${init.index.indexes.length} built (code graph, recall, structure)`);
     console.log(`  Policy      AGENTS.md + CLAUDE.md ${policy.created ? "written" : policy.updated ? "updated" : "current"} — commit these so every teammate's agent uses Kage`);
+    const installScaleWarning = scaleGuardMessage(countIndexableFiles(project));
+    if (installScaleWarning) console.log(`  Scale       ${installScaleWarning}`);
     if (skipAgents) {
       console.log("  Agents      skipped (--no-agents)");
     } else if (!wired.length) {

@@ -6225,6 +6225,43 @@ function scanStructuralFiles(projectDir: string): { files: string[]; ignoredSumm
   };
 }
 
+// ---------------------------------------------------------------------------
+// § SCALE GUARD (docs/design/MEMORY_STORE.md, "(f) A scale guard, now" / M4)
+//
+// 10,000 is NOT the point where cold index gets painful on this machine --
+// measured (docs/BENCHMARKS.md's M4 section), cold index and warm refresh
+// both stay in the single-to-tens-of-seconds range even at 10,000 files, on
+// both backends. It is instead (a) the largest size this doc's benchmarks
+// actually ran, so this is a promise backed by a real measurement, not an
+// extrapolation past it, and (b) the size at which recall latency -- the
+// query a session pays on every single kage_context call, not once per
+// refresh -- has already drifted roughly 10x past a feels-instant budget
+// (measured ~0.8-1.1s at 10,000 files, both backends). See BENCHMARKS.md's
+// M4 section for the full numbers and reasoning this threshold is drawn
+// from. `kage scan` and `kage install` (mcp/cli.ts) are the only two call
+// sites that print scaleGuardMessage()'s result -- neither `kage refresh`
+// nor recall/graph queries are wired to it, which is what keeps the warning
+// from repeating on every command: it only ever fires from the two commands
+// a person runs to first learn what Kage thinks of their repo, once each,
+// never in a loop.
+export const SCALE_GUARD_FILE_THRESHOLD = 10000;
+
+/** Cheap indexable-file count -- the same walk buildStructuralIndex uses to discover files, without any parsing. Safe to call before a full index/refresh. */
+export function countIndexableFiles(projectDir: string): number {
+  return scanStructuralFiles(projectDir).files.length;
+}
+
+/**
+ * Plain-language scale warning, or null when `fileCount` is within the
+ * envelope docs/BENCHMARKS.md's measurements support. Never blocks --
+ * callers (mcp/cli.ts's `scan`/`install` commands) print this alongside
+ * their normal output, they never exit non-zero because of it.
+ */
+export function scaleGuardMessage(fileCount: number, threshold = SCALE_GUARD_FILE_THRESHOLD): string | null {
+  if (fileCount <= threshold) return null;
+  return `This repo is ~${fileCount.toLocaleString("en-US")} files; Kage is tuned for repos under ~${threshold.toLocaleString("en-US")} today (see docs/BENCHMARKS.md). Expect slower \`kage refresh\` and a larger \`.agent_memory/\` until the store benchmarks there are updated past this size.`;
+}
+
 function countBufferLines(buffer: Buffer): number {
   if (buffer.length === 0) return 0;
   // Count newline bytes (matches `wc -l` for newline-terminated files) and add one for a
