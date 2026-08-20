@@ -164,6 +164,15 @@ function ago(iso) {
   return Math.floor(s / 86400) + "d";
 }
 function shortBranch(branch) { return branch.replace(/^kage\\//, "⎇ "); }
+// CSS direction/bidi tricks for middle-truncation are fragile across browsers, so the
+// split happens here: keep the first head chars and last tail chars (leading words plus
+// the trailing -YYMMDD-serial a run slug always ends in) and collapse the middle into
+// one ellipsis. A no-op when the text already fits within head + 1 + tail chars.
+function midTruncate(text, head, tail) {
+  var cap = head + 1 + tail;
+  if (text.length <= cap) return text;
+  return text.slice(0, head) + "…" + text.slice(text.length - tail);
+}
 function api(path, opts) {
   opts = opts || {};
   var headers = { "content-type": "application/json" };
@@ -2677,17 +2686,24 @@ function boardCardHash(run) {
   return stableStringify({ display_state: run.display_state, branch: run.branch, updated_at: run.updated_at,
     tokens_used: run.tokens_used, verdict_label: run.verdict_label, display_name: run.display_name, intent: run.intent });
 }
+// The three rows below are siblings of .acard itself, each full card width, per
+// docs/design/SESSIONS_SURFACE.md §5 — row 1 (name) and row 3 (meta) used to share
+// .acard's 1fr grid column and the name lost, crushed down to a ~5-char sliver. Row 2
+// (the branch/slug chip) is middle-truncated via midTruncate — 18 leading chars, 12
+// trailing — so the run's serial suffix stays legible instead of just wrapping full
+// width under the name. cardCoreAtoms(run) still returns [branch, state, tokens?]
+// (the shared five-field shape List also reads) but row 2 replaces its branch atom
+// with the truncated slug, so only the state/tokens atoms feed row 3.
 function fillBoardCard(card, run) {
   card.textContent = "";
-  var mid = h("div");
-  mid.appendChild(h("div", "at", displayName(run)));
+  card.appendChild(h("div", "at", displayName(run)));
+  card.appendChild(h("div", "aslug", midTruncate(shortBranch(run.branch), 18, 12)));
   var arow = h("div", "arow");
-  cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
+  cardCoreAtoms(run).slice(1).forEach(function (el) { arow.appendChild(el); });
+  arow.appendChild(ageSpan("tm", run.updated_at));
   var boardVerdict = verdictChipFor(run);
   if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
-  arow.appendChild(ageSpan("tm", run.updated_at));
-  mid.appendChild(arow);
-  card.appendChild(mid);
+  card.appendChild(arow);
 }
 function getOrPatchBoardCard(run) {
   var cached = boardCardCache[run.id];

@@ -826,26 +826,24 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .bh i { width:7px; height:7px; border-radius:50%; display:block; }
   .bh .sep { opacity:.4; margin:0 2px; }
   .bh .n { margin-left:auto; font-variant-numeric:tabular-nums; }
+  /* Three stacked rows, each the card's full width — name, slug, meta — so the name
+     never again shares horizontal space with the meta cluster. .acard used to be a
+     26px/1fr grid built for an avatar column that no renderer ever filled; the single
+     content div it DID get defaulted into that 26px column instead of the 1fr one,
+     which is what crushed display_name down to a ~5-character sliver. */
   .acard { border:1px solid var(--line); border-radius:var(--r-card); background:var(--surface);
-    padding:11px 12px; margin-bottom:8px; display:grid; grid-template-columns:26px 1fr; gap:10px;
-    cursor:pointer; box-shadow:var(--shadow-sm); transition:border-color .12s, box-shadow .12s; }
+    padding:11px 12px; margin-bottom:8px; display:flex; flex-direction:column; gap:5px;
+    min-width:0; cursor:pointer; box-shadow:var(--shadow-sm); transition:border-color .12s, box-shadow .12s; }
   .acard:hover { border-color:var(--text3); box-shadow:var(--shadow-md); }
   .acard.sel { border-color:var(--green); }
   .acard:focus-visible { outline:none; border-color:var(--green); }
-  /* A grid item defaults to min-width:auto, so the nowrap branch slug inside forced
-     the card to its full text width — which widened the column, which pushed the
-     fourth column off the right edge of the board entirely. */
-  .acard > div { min-width:0; }
-  .av { width:24px; height:24px; border-radius:var(--r-panel); display:flex; align-items:center; justify-content:center;
-    font-family:var(--mono); font-size:9.5px; font-weight:700; background:var(--surface2);
-    border:1px solid var(--line); color:var(--text2); }
-  .av.claude { color:var(--seal); border-color:color-mix(in srgb, var(--seal) 40%, var(--line));
-    background:color-mix(in srgb, var(--seal) 10%, var(--surface2)); }
-  .av.codex { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line));
-    background:color-mix(in srgb, var(--jade) 10%, var(--surface2)); }
-  .acard .at { font-size:12.5px; font-weight:550; line-height:1.4;
+  .acard .at { font-size:12.5px; font-weight:550; line-height:1.4; min-width:0;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-  .acard .arow { display:flex; gap:10px; margin-top:7px; align-items:baseline; }
+  /* Row 2: the branch/slug chip. Middle-truncated in JS (midTruncate in app-client.ts)
+     so a nowrap+ellipsis here is only a safety net, never the primary truncation. */
+  .acard .aslug { font-family:var(--mono); font-size:10.5px; color:var(--text3); min-width:0;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .acard .arow { display:flex; gap:10px; align-items:baseline; min-width:0; }
   .acard .tm { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3); }
 
   /* ---- persistent error surface + offline state ----
