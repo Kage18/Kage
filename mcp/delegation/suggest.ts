@@ -26,3 +26,23 @@ export function suggestedNextPrompt(
   if (task.state === "blocked" && task.waiting_on?.detail) return task.waiting_on.detail;
   return null;
 }
+
+// The Room composer's ghost text (docs/design/SESSIONS_SURFACE.md §4, §6): a room is
+// not a TaskRecord, so it has no state/waiting_on of its own — but a manager pauses a
+// goal by putting one of its DISPATCHED RUNS into "blocked" (dispatch.ts's plan-approval
+// path, supervisor.ts's own blocked transitions), the exact same "blocked" rule
+// suggestedNextPrompt already encodes. This wrapper is the room-shaped door onto that
+// one rule: no new suggestion text, no new pattern-matching — a run not in "blocked"
+// contributes nothing (suggestedNextPrompt's other branches all need a claim, e.g. a
+// failed check's command, which a room-wide sweep does not carry), so passing `null`
+// for claim on every candidate is safe and never produces a wrong answer, only a
+// missed "review the receipt"/"stalled" one — appropriate, since those are per-run
+// facts, not something the room as a whole is "waiting on" from the user.
+export function suggestedNextForRoom(runs: Pick<TaskRecord, "state" | "state_history" | "waiting_on">[]): string | null {
+  for (const run of runs) {
+    if (run.state !== "blocked") continue;
+    const suggestion = suggestedNextPrompt(run, null);
+    if (suggestion) return suggestion;
+  }
+  return null;
+}

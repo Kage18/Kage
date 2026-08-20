@@ -50,7 +50,7 @@ import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./recover
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
 import { claimVerdict, renderClaimCard } from "./verify.js";
-import { suggestedNextPrompt } from "./suggest.js";
+import { suggestedNextForRoom, suggestedNextPrompt } from "./suggest.js";
 import { readActivity } from "./progress.js";
 import { currentBranch, diffFileTree, git, type DiffFileEntry } from "./git.js";
 import { worktreePath } from "./worktree.js";
@@ -88,6 +88,7 @@ import {
   createRoomSession,
   listRoomSessions,
   normalizeSessionKey,
+  readActiveGoal,
   renameRoomSession,
   setActiveGoal,
 } from "./room-sessions.js";
@@ -578,6 +579,12 @@ function queueRoomTurn(
   });
 }
 
+// Finished states a card's verdict chip can show — the same four the client's own
+// VERDICT_CARD_STATES lists (app-client.ts), since a merged/rejected run keeps the
+// claim.json it was decided from just as much as a ready/failed one still awaiting
+// that decision.
+const VERDICT_LIST_STATES = new Set<RunView["display_state"]>(["ready", "failed", "merged", "rejected"]);
+
 /**
  * "What is it doing right now" — computed from the transcript the adapters already
  * write, never asserted by the agent. Attached only to in-flight runs so the list
@@ -586,26 +593,37 @@ function queueRoomTurn(
 function withActivity(
   projectDir: string,
   run: RunView,
-): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string; blast?: BlastRadius } {
-  // A run awaiting a decision carries the one fact needed to make it: how much
-  // changed, and whether the kernel's checks passed. Without it the inbox could only
-  // repeat the intent back, so every decision meant opening the run to find out.
-  if (run.display_state === "ready" || run.display_state === "failed") {
+): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string; blast?: BlastRadius; verdict_label?: string } {
+  if (VERDICT_LIST_STATES.has(run.display_state)) {
     const claim = readClaim(projectDir, run.id);
     if (claim) {
-      const passed = claim.checks.filter((check) => check.result === "pass").length;
-      const files = claim.diff?.files ?? 0;
-      const lines = claim.diff?.lines ?? 0;
-      const change = files ? `${files} file${files === 1 ? "" : "s"} · ${lines} line${lines === 1 ? "" : "s"}` : "no changes";
-      // The code graph's one sentence at the decision point: how load-bearing is what
-      // changed? Omitted entirely when the index or the claim's paths are missing —
-      // "0 dependents" invented from a missing index would reassure falsely.
-      const blast = blastRadiusFor(projectDir, claim.diff?.paths ?? []);
-      return {
-        ...run,
-        claim_summary: `${change} · ${passed}/${claim.checks.length} checks`,
-        ...(blast ? { blast } : {}),
-      };
+      // The verdict chip's own label, read verbatim from the SAME claimVerdict() the
+      // receipt and the per-run detail route already use — never re-derived client
+      // side (the exact bug this product exists to prevent: a client recount showing
+      // VERIFIED for a run the kernel had already failed). Absent entirely when there
+      // is no claim, same "absence means absent" convention as claim_summary below.
+      const verdictLabel = claimVerdict(claim).label;
+      // A run awaiting a decision carries the one fact needed to make it: how much
+      // changed, and whether the kernel's checks passed. Without it the inbox could
+      // only repeat the intent back, so every decision meant opening the run to find
+      // out.
+      if (run.display_state === "ready" || run.display_state === "failed") {
+        const passed = claim.checks.filter((check) => check.result === "pass").length;
+        const files = claim.diff?.files ?? 0;
+        const lines = claim.diff?.lines ?? 0;
+        const change = files ? `${files} file${files === 1 ? "" : "s"} · ${lines} line${lines === 1 ? "" : "s"}` : "no changes";
+        // The code graph's one sentence at the decision point: how load-bearing is what
+        // changed? Omitted entirely when the index or the claim's paths are missing —
+        // "0 dependents" invented from a missing index would reassure falsely.
+        const blast = blastRadiusFor(projectDir, claim.diff?.paths ?? []);
+        return {
+          ...run,
+          verdict_label: verdictLabel,
+          claim_summary: `${change} · ${passed}/${claim.checks.length} checks`,
+          ...(blast ? { blast } : {}),
+        };
+      }
+      return { ...run, verdict_label: verdictLabel };
     }
   }
   const inFlight =
@@ -693,6 +711,36 @@ export async function orchestratorPresence(projectDir: string, session?: string)
     live: supervisorLive || ptyLive,
     activity_at: lastTurnAt ?? supervisorRecord?.started_at ?? ptyRecord?.started_at ?? null,
   };
+}
+
+/**
+ * The Room composer's ghost text (docs/design/SESSIONS_SURFACE.md §4/§6). A thread's
+ * "state" is borrowed from whichever runs its active goal (room-sessions.ts's
+ * `active_goal_id`) has dispatched — a thread with no active goal, or a goal with no
+ * run currently blocked, has nothing honest to suggest and returns null, same
+ * "absence means absent" rule suggestedNextPrompt itself follows. Reuses
+ * suggestedNextForRoom's one rule (suggest.ts) rather than inventing a room-specific one.
+ */
+function roomSuggestedNext(projectDir: string, session: string): string | null {
+  const goalId = readActiveGoal(projectDir, session);
+  if (!goalId) return null;
+  let runIds: string[];
+  try {
+    runIds = readGoal(projectDir, goalId).plan.waves.flatMap((wave) => wave.run_ids);
+  } catch {
+    // The active goal pointer outlived the goal record itself (e.g. hand-deleted) —
+    // nothing honest to suggest, not a 500.
+    return null;
+  }
+  const runs: RunView[] = [];
+  for (const runId of runIds) {
+    try {
+      runs.push(readRun(projectDir, runId));
+    } catch {
+      // A run_id the goal still lists but whose own file is gone contributes nothing.
+    }
+  }
+  return suggestedNextForRoom(runs);
 }
 
 function runDetail(projectDir: string, runId: string): Record<string, unknown> {
@@ -978,6 +1026,13 @@ export async function handleDelegationRoute(
     // The presence banner's data (docs/design/SESSIONS_SURFACE.md §6): whether an
     // orchestrator session is live for this project, and when it last did anything.
     const presence = await orchestratorPresence(projectDir, key);
+    // Whether claude's own native transcript exists for this thread's pty session, so
+    // Chat can say WHY it fell back to /room's own (paraphrased) history instead of the
+    // client guessing from an empty page — the SAME meta.native_transcript_path
+    // /room/transcript itself reads (room-supervisor.ts), read here too rather than
+    // duplicated logic.
+    const meta = readRoomSessionMeta(projectDir, key);
+    const transcript = meta.native_transcript_path ? readNativeTranscriptPage(meta.native_transcript_path, { limit: 1 }) : null;
     json(res, 200, {
       ok: true,
       session: key,
@@ -986,6 +1041,9 @@ export async function handleDelegationRoute(
       busy: roomStateFor(ctx, key).pending > 0,
       orchestrator_live: presence.live,
       orchestrator_activity_at: presence.activity_at,
+      has_transcript: Boolean(transcript && transcript.total > 0),
+      transcript_turns: transcript ? transcript.total : 0,
+      suggested_next: roomSuggestedNext(projectDir, key),
     });
     return true;
   }

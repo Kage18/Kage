@@ -13,7 +13,7 @@ export const APP_CLIENT = `"use strict";
 var TOKEN = "__KAGE_TOKEN__";
 var state = {
   runs: [], goals: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
-  room: { turns: [], busy: false, live: false, activity_at: null }, transcript: null, roomStreaming: [],
+  room: { turns: [], busy: false, live: false, activity_at: null, has_transcript: false }, transcript: null, roomStreaming: [],
   projects: [], projectDir: "", installedAgents: [],
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
@@ -21,13 +21,6 @@ var state = {
   diffView: "unified", collapsedDiff: {}, expandedGroups: {}, detailIntentOpen: false,
   steerQueueMode: false, runTerminalActive: false, runTermRunId: null, diffJumpTarget: null,
 };
-// Lazily-fetched verdict labels for finished runs shown on a CARD (sidebar/board/list)
-// rather than the selected run's own detail. Never re-derived: each entry is read
-// verbatim from GET /runs/:id's own verdict.label (claimVerdict, computed server-side
-// by verify.ts) the same way the receipt already reads it — a card only asks once per
-// run id, then caches the answer, since a finished run's claim never changes in place.
-var verdictCache = {};
-var verdictFetching = {};
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
 
@@ -83,25 +76,13 @@ function isPlanApproval(run) {
 }
 // A card's VERIFIED n/n chip (docs/design/SESSIONS_SURFACE.md §5) reads claimVerdict's
 // own label — never a re-derived guess (that exact bug shipped once: a client-side
-// recount showed VERIFIED for a run the kernel had already failed). The list endpoint
-// a card renders from carries no verdict field, only the per-run detail route does, so
-// a finished card fetches its own detail once, caches the verdict verbatim, and repaints.
+// recount showed VERIFIED for a run the kernel had already failed). The list/board
+// endpoint now carries it verbatim as run.verdict_label (withActivity, api.ts), so a
+// card reads it directly — no per-card detail fetch, no cache to invalidate.
 var VERDICT_CARD_STATES = ["ready", "merged", "failed", "rejected"];
-function verdictChipFor(run, onReady) {
+function verdictChipFor(run) {
   if (VERDICT_CARD_STATES.indexOf(run.display_state) < 0) return null;
-  var cached = verdictCache[run.id];
-  if (cached) return cached;
-  if (!verdictFetching[run.id]) {
-    verdictFetching[run.id] = true;
-    api("/runs/" + run.id).then(function (detail) {
-      delete verdictFetching[run.id];
-      if (detail && detail.ok && detail.verdict && detail.verdict.label) {
-        verdictCache[run.id] = detail.verdict;
-        if (onReady) onReady();
-      }
-    });
-  }
-  return null;
+  return run.verdict_label ? { label: run.verdict_label } : null;
 }
 function verdictChipEl(verdict) {
   var cls = verdict.label.indexOf("UNVERIFIED") >= 0 ? "amber" : verdict.label.indexOf("NOT") >= 0 ? "hot" : "jade";
@@ -235,7 +216,7 @@ function workRow(run) {
   // row's own age already lives in .qtime on the right, so it is not repeated here.
   var atoms = h("div", "qatoms");
   cardCoreAtoms(run).forEach(function (el) { atoms.appendChild(el); });
-  var verdict = verdictChipFor(run, function () { renderWork(); });
+  var verdict = verdictChipFor(run);
   if (verdict) atoms.appendChild(verdictChipEl(verdict));
   mid.appendChild(atoms);
   // The question answers where it is asked. Delivery is reported with the kernel's
@@ -707,6 +688,18 @@ function turnRunCard(run) {
 // /room/transcript carries nothing yet (a thread the pty has never answered): a
 // headless-only conversation must still read as a real conversation, not a blank pane.
 function renderHistoryTurns(turnsEl, turns) {
+  // Say WHY this is the manager's paraphrase and not the live session, instead of
+  // leaving a reader to guess: state.room.has_transcript (GET /room, authoritative —
+  // the same meta.native_transcript_path room-transcript.js reads) distinguishes "no
+  // pty session has ever answered this thread" from "the real transcript just hasn't
+  // loaded yet". Read off state directly rather than threaded through as a parameter,
+  // so this call site's signature stays exactly what piece 2's own regression test
+  // (sessions-ui.test.ts) already locks down.
+  if (turns.length) {
+    turnsEl.appendChild(h("div", "meta2", state.room.has_transcript
+      ? "showing the manager's summary — the live session transcript hasn't loaded yet"
+      : "showing the manager's summary — no live session transcript for this thread"));
+  }
   turns.forEach(function (turn, index) {
     // Close the previous exchange with a rule + elapsed time, so a long thread reads
     // as a sequence of completed turns rather than one undifferentiated column.
@@ -825,7 +818,7 @@ function renderRoom() {
   // thread shimmered continuously. Skip the rebuild entirely when nothing moved.
   var signature = (useTranscript ? "t" : "h") + turns.length + "|" +
     (last ? String(last.text || "").length + ":" + (last.tools ? last.tools.length : 0) : 0) + "|" +
-    (state.room.busy ? "1" : "0") + "|" + linkedCount + "|" + (state.room.live ? "1" : "0");
+    (state.room.busy ? "1" : "0") + "|" + linkedCount + "|" + (state.room.live ? "1" : "0") + "|" + (state.room.has_transcript ? "1" : "0");
 
   updateRoomTyping();
   renderPresenceBanner();
@@ -858,8 +851,15 @@ function refreshRoom() {
     // orchestrator_live/orchestrator_activity_at (docs/design/SESSIONS_SURFACE.md §6)
     // are the presence banner's and the sidebar fleet's one shared source — sourced
     // server-side from the SAME liveness probes both the pty and headless paths trust.
-    state.room = { turns: out.turns || [], busy: Boolean(out.busy), live: Boolean(out.orchestrator_live), activity_at: out.orchestrator_activity_at || null };
+    state.room = {
+      turns: out.turns || [], busy: Boolean(out.busy), live: Boolean(out.orchestrator_live), activity_at: out.orchestrator_activity_at || null,
+      has_transcript: Boolean(out.has_transcript),
+    };
     if (!out.busy) state.roomStreaming = [];
+    // The Room composer's ghost text (docs/design/SESSIONS_SURFACE.md §4/§6), read
+    // verbatim from GET /room's own suggested_next — same applyGhostSuggestion the run
+    // composer already uses (d.suggested_next below), never a client-derived guess.
+    applyGhostSuggestion(roomInput, out.suggested_next || null, "Message Kage…");
     var turns = state.room.turns;
     var last = turns[turns.length - 1];
     var justArrived = !out.busy && turns.length > prevLen && last && last.role === "kage";
@@ -1150,7 +1150,7 @@ function switchThread(key) {
   state.session = key;
   // Each thread has its own transcript and its own terminal screen; carrying either
   // across the switch would show one conversation's words under another's name.
-  state.room = { turns: [], busy: false, live: false, activity_at: null };
+  state.room = { turns: [], busy: false, live: false, activity_at: null, has_transcript: false };
   state.transcript = null;
   state.roomStreaming = [];
   state.threadBusy[key] = false;
@@ -2177,7 +2177,7 @@ function renderBoard() {
       mid.appendChild(h("div", "at", displayName(run)));
       var arow = h("div", "arow");
       cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
-      var boardVerdict = verdictChipFor(run, function () { renderWork(); });
+      var boardVerdict = verdictChipFor(run);
       if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
       arow.appendChild(h("span", "tm", ago(run.updated_at)));
       mid.appendChild(arow);
