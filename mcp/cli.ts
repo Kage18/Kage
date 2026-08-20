@@ -170,7 +170,7 @@ Delegate work (the orchestrator):
   kage runs [--project <dir>]                what every run is doing right now
   kage review --project <dir>                read a finished run's claim and diff
   kage reverify <run-id> --project <dir>     re-check a failed/ready run's existing claim against its worktree — no agent re-run
-  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] --project <dir>   resume a run the kernel stopped on budget — raise whichever cap tripped
+  kage resume-run <run-id> [--budget-usd <n>] --project <dir>   resume a run stopped on its usd budget (raise it) or one that appeared stalled (resumes as-is, no flags needed)
   kage adopt <run-id> --project <dir>        verify an orphaned run's worktree when it never got an agent claim
   kage merge <run-id> --project <dir>        land the code and ratify what it learned
 
@@ -309,7 +309,7 @@ Usage:
   kage merge <run-id> [--project <dir>]
   kage reject <run-id> "<reason>" [--project <dir>]
   kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's EXISTING claim against its worktree, no agent re-run — refuses if there is no claim yet (see 'kage adopt')
-  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] [--project <dir>]   resume a run the kernel stopped on budget: same run id, worktree, branch and agent session, raises whichever cap (usd, minutes, or both) actually tripped
+  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] [--project <dir>]   resume a stopped run with the SAME run id, worktree, branch and agent session — a usd-stopped run requires --budget-usd to raise the cap; a stalled run (kernel-detected loop, no forward progress) resumes as-is with no flags required; --budget-minutes is always accepted as a harmless extra raise, never required
   kage adopt <run-id> [--project <dir>]         verify an orphaned run's worktree (supervisor died before an agent claim was written) — refuses while its agent is still alive
   kage orphan-kill <run-id> [--project <dir>]   deliberately kill a live orphaned agent (supervisor dead, agent still working) and show its last recorded spend — never automatic
   kage open <run-id> [--project <dir>]
@@ -2949,28 +2949,36 @@ async function main(): Promise<void> {
     if (args.includes("--no-static-checks")) patch.static_checks = false;
     const merged = writeDelegationConfig(project, patch);
     console.log(JSON.stringify(merged, null, 2));
-    // config.json itself is read fresh on every dispatch (readDelegationConfig does a
-    // plain readFileSync, no in-memory cache of its own) — but a long-lived `kage daemon`
-    // process for this project may still be holding budgets, MCP config, or a manager
-    // session that was assembled from an earlier read and never revisited. Observed live:
-    // budgets set here took no effect on runs dispatched through a daemon that had been up
-    // for hours, until the daemon itself was restarted. Silently ignoring a setting the
-    // user just changed is its own defect — say so honestly, only when a daemon for this
-    // project is actually running (readDaemonStatus + a real liveness check, never a
-    // blanket warning for a project with no daemon at all).
-    const daemonStatus = readDaemonStatus(project);
-    if (daemonStatus) {
-      let daemonAlive = false;
-      try {
-        process.kill(daemonStatus.pid, 0);
-        daemonAlive = true;
-      } catch {
-        daemonAlive = false;
-      }
-      if (daemonAlive) {
-        console.log(
-          `\nA kage daemon is running for this project (pid ${daemonStatus.pid}) — it may not pick up this change until it restarts: kage daemon stop --project ${project} && kage daemon start --project ${project}`,
-        );
+    // Budgets specifically are NOT subject to the daemon-restart caveat below: every run
+    // is created through contract.ts's createRun, which reads configuredBudgets(project)
+    // — itself a plain readFileSync with no cache — at the moment the run is stamped, not
+    // at daemon startup. A run created through a daemon that has been up for hours still
+    // gets today's config.json. (What actually stranded a run on the old $2 default was a
+    // DIFFERENT bug — api.ts's createRun call never consulted config at all, restart or
+    // not — now fixed at the source, so there is nothing here left to warn about for a
+    // budgets-only change.)
+    //
+    // Other settings (test, diff-budget, strict/static-checks) have not been re-verified
+    // as part of this change, so the warning still names them honestly, only when a
+    // daemon for this project is actually running (readDaemonStatus + a real liveness
+    // check, never a blanket warning for a project with no daemon at all) and only when
+    // this call actually touched one of them.
+    const touchedNonBudgetSetting = Boolean(test || setup || budget || args.includes("--no-strict") || args.includes("--no-static-checks"));
+    if (touchedNonBudgetSetting) {
+      const daemonStatus = readDaemonStatus(project);
+      if (daemonStatus) {
+        let daemonAlive = false;
+        try {
+          process.kill(daemonStatus.pid, 0);
+          daemonAlive = true;
+        } catch {
+          daemonAlive = false;
+        }
+        if (daemonAlive) {
+          console.log(
+            `\nA kage daemon is running for this project (pid ${daemonStatus.pid}) — it may not pick up this change until it restarts: kage daemon stop --project ${project} && kage daemon start --project ${project}`,
+          );
+        }
       }
     }
     return;

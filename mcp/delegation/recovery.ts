@@ -24,7 +24,6 @@ import {
   type RunState,
   type TaskRecord,
   RESUME_STOPPED_RUN_COMMAND,
-  RESUME_STOPPED_RUN_MINUTES_COMMAND,
   appendRunLedger,
   buildClaim,
   displayState,
@@ -54,19 +53,25 @@ export interface ResumeResult {
 }
 
 /**
- * Resume a run the kernel stopped for crossing its budget, with whichever cap(s)
- * actually tripped raised, the SAME run id, worktree and branch, and — reusing
- * steer.ts's reattach machinery — the same agent session, so the agent picks up with
- * its own context intact rather than starting cold.
+ * Resume a run the kernel stopped, either for crossing its usd budget (raised before
+ * resuming) or for appearing stalled (resumed as-is — see below), with the SAME run id,
+ * worktree and branch, and — reusing steer.ts's reattach machinery — the same agent
+ * session, so the agent picks up with its own context intact rather than starting cold.
  *
- * A run's `spend` is frozen the instant it stops (recordSpend only ever runs on a live
- * usage tick, never while stopped), so comparing that frozen figure against the run's
- * OWN budgets — right here, not the stop note's prose — says exactly which cap tripped:
- * usd, minutes, or both. Only THAT cap is required to be raised before resuming, and the
- * refusal names only that cap's real numbers and its own fix command — never dollar
- * advice for a minutes stop, or the reverse. A budget arg the caller supplies for a cap
- * that did NOT trip is still honoured if it raises that cap (never silently dropped),
- * it just isn't required to unblock the resume.
+ * usd is the only cap that still gates a resume: a run's `spend` is frozen the instant
+ * it stops (recordSpend only ever runs on a live usage tick, never while stopped), so
+ * comparing that frozen figure against the run's own usd budget — right here, not the
+ * stop note's prose — says whether it needs raising. minutes never stops a run any more
+ * (contract.ts's checkRunBudget), so it never blocks a resume either; a caller-supplied
+ * budgetMinutes is still honoured if given (a harmless raise, never silently dropped),
+ * it just isn't required.
+ *
+ * A run the STALL DETECTOR stopped (supervisor.ts) is a different shape entirely: its
+ * note begins "stalled:" and names the evidence (a repeating failing command, or turns
+ * of no worktree change) — not a spend figure, because a stall is not a cost overrun.
+ * No budget raise can fix a loop, so this resumes it unconditionally, with a steer
+ * message that quotes the evidence back to the agent so it changes approach instead of
+ * repeating exactly what caused the stall.
  */
 export async function resumeStoppedRun(
   projectDir: string,
@@ -88,27 +93,20 @@ export async function resumeStoppedRun(
     };
   }
 
+  const lastStopNote = [...task.state_history].reverse().find((change) => change.note)?.note ?? "";
+  const stalled = lastStopNote.startsWith("stalled:");
+
   const usdExceeded = task.spend.usd_est > task.budgets.usd;
-  const minutesExceeded = task.spend.minutes > task.budgets.minutes;
   const usdRaised = budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > task.budgets.usd;
   const minutesRaised = budgetMinutes !== undefined && Number.isFinite(budgetMinutes) && budgetMinutes > task.budgets.minutes;
 
-  if (usdExceeded && !usdRaised) {
+  if (!stalled && usdExceeded && !usdRaised) {
     return {
       ok: false,
       task,
       message:
         `${runId} stopped at $${task.spend.usd_est.toFixed(2)} spend against a $${task.budgets.usd.toFixed(2)} budget. ` +
         `Resume it with a higher usd budget: ${RESUME_STOPPED_RUN_COMMAND} — e.g. --budget-usd ${Math.max(task.spend.usd_est + 2, task.budgets.usd * 2).toFixed(2)}.`,
-    };
-  }
-  if (minutesExceeded && !minutesRaised) {
-    return {
-      ok: false,
-      task,
-      message:
-        `${runId} stopped at ${task.spend.minutes.toFixed(1)} min elapsed against a ${task.budgets.minutes} min budget. ` +
-        `Resume it with a higher minutes budget: ${RESUME_STOPPED_RUN_MINUTES_COMMAND} — e.g. --budget-minutes ${Math.max(Math.ceil(task.spend.minutes) + 15, task.budgets.minutes * 2)}.`,
     };
   }
 
@@ -132,18 +130,17 @@ export async function resumeStoppedRun(
     budget_minutes: nextBudgets.minutes,
     prior_spend_usd: task.spend.usd_est,
     prior_spend_minutes: task.spend.minutes,
+    ...(stalled ? { stalled: true } : {}),
   });
-  const steered = await steerRun(
-    projectDir,
-    runId,
-    `Resuming — ${raiseNote} (it stopped at $${task.spend.usd_est.toFixed(2)} / ${task.spend.minutes.toFixed(1)} min). Continue the work from where you left off.`,
-    adapterFor,
-    reattach,
-  );
+  const steerMessage = stalled
+    ? `Resuming — this run appeared stalled and was stopped: ${lastStopNote.slice("stalled:".length).trim()}. ` +
+      "Try a genuinely different approach instead of repeating whatever caused the stall."
+    : `Resuming — ${raiseNote} (it stopped at $${task.spend.usd_est.toFixed(2)} / ${task.spend.minutes.toFixed(1)} min). Continue the work from where you left off.`;
+  const steered = await steerRun(projectDir, runId, steerMessage, adapterFor, reattach);
   return {
     ok: true,
     task: readRun(projectDir, runId),
-    message: `Resumed ${runId} — ${raiseNote}. ${steered.message}`,
+    message: `Resumed ${runId} — ${stalled ? "was stalled, no budget change needed" : raiseNote}. ${steered.message}`,
   };
 }
 

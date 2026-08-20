@@ -8,6 +8,14 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+// config.ts never imports contract.ts (it is the layer the kernel is read BY), so the
+// kernel importing config.ts here is one-directional, not a cycle: createRun needs the
+// repo's configured budgets, not just the hardcoded default, or any caller that skips
+// dispatch.ts's own effectiveBudgets() call (api.ts's direct createRun does) silently
+// stamps every run with DEFAULT_RUN_BUDGETS regardless of what .agent_memory/config.json
+// says — reproduced live: a run stamped $2/30m by a freshly restarted daemon while
+// config.json said usd 40 / minutes 240, because createRun never consulted it at all.
+import { configuredBudgets } from "./config.js";
 
 export const RUN_SCHEMA_VERSION = 1;
 
@@ -162,7 +170,9 @@ export interface ClaimRecord {
   reverified_at?: string;
 }
 
-export const DEFAULT_RUN_BUDGETS: RunBudgets = { usd: 2, minutes: 30, diff_lines: 400 };
+// usd 50, not 2: a circuit breaker for a looping/thrashing agent, not a per-task
+// allowance — see config.ts's DEFAULT_RUN_BUDGET_USD (must stay in sync with this).
+export const DEFAULT_RUN_BUDGETS: RunBudgets = { usd: 50, minutes: 30, diff_lines: 400 };
 
 // ---------------------------------------------------------------------------
 // Reporting protocol: how a hired agent ends its work. Embedded verbatim in every
@@ -456,7 +466,11 @@ export function createRun(projectDir: string, input: CreateRunInput): RunView {
     agent: input.agent,
     worktree: null,
     branch: `kage/${id}`,
-    budgets: { ...DEFAULT_RUN_BUDGETS, ...(input.budgets ?? {}) },
+    // configuredBudgets(projectDir) already falls back to DEFAULT_RUN_BUDGETS' own
+    // values when .agent_memory/config.json sets nothing — so every caller, not just
+    // dispatch.ts's own effectiveBudgets() precomputation, gets the repo's configured
+    // budgets underneath any explicit per-run override.
+    budgets: { ...configuredBudgets(projectDir), ...(input.budgets ?? {}) },
     spend: { usd_est: 0, minutes: 0 },
     confidence: input.confidence ?? { band: "low", basis: "no track record yet" },
     curated_by: input.curatedBy ?? "kernel",
@@ -560,13 +574,17 @@ export interface RunBudgetCheck {
 }
 
 /**
- * Whether a run's current estimated spend or elapsed time has already crossed what its
- * budgets record promised. Pure and side-effect-free so supervisor.ts can call it on
- * every usage tick to decide whether to halt, and so the decision itself is unit
- * testable without a live agent process. usd is checked first — it's the figure the
- * product actually surfaces as a cap elsewhere (goal.ts's checkGoalAcceptsNewRun does
- * the same comparison for goal-level spend) — then minutes, since either crossing means
- * the same thing: this run is no longer inside what it was budgeted for.
+ * Whether a run's current estimated spend has already crossed what its budgets record
+ * promised. Pure and side-effect-free so supervisor.ts can call it on every usage tick
+ * to decide whether to halt, and so the decision itself is unit testable without a live
+ * agent process.
+ *
+ * usd is the ONLY cap this halts on. minutes is measured and shown everywhere (see
+ * runningMinutesElapsed/displayElapsedMs) but never stops a run: five runs stopped for
+ * crossing a minutes cap in one day, all of them legitimate work that later merged
+ * clean — the hazard budgets exist for (a looping, thrashing agent) is caught by the
+ * stall detector in supervisor.ts instead, which looks at what the agent is actually
+ * doing rather than how long it has been doing it.
  */
 // Named here (not just typed as a literal in the reason string) so recovery.ts's
 // resumeStoppedRun and its refusal message can point at the exact same command a reader
@@ -576,11 +594,8 @@ export interface RunBudgetCheck {
 // Not `kage resume` — that name is already the memory-session-resume command
 // (kageResume, prints prior session context for hooks); this one is scoped to a run.
 export const RESUME_STOPPED_RUN_COMMAND = "kage resume-run <run-id> --budget-usd <n>";
-// A distinct command for the minutes cap — never dollar advice for a minutes stop.
-// Resuming does NOT re-read .agent_memory/config.json (a run's budgets are stamped at
-// dispatch and only ever change via an explicit resume-run flag); config only sets the
-// default for FUTURE runs, which is why both reasons below name resume-run first and
-// config second, never the other way around.
+// Nothing requires raising this any more (minutes never stops a run) — kept only
+// because `kage resume-run --budget-minutes` still accepts it as a harmless raise.
 export const RESUME_STOPPED_RUN_MINUTES_COMMAND = "kage resume-run <run-id> --budget-minutes <n>";
 
 export function checkRunBudget(spend: { usd_est: number; minutes: number }, budgets: RunBudgets): RunBudgetCheck {
@@ -591,15 +606,6 @@ export function checkRunBudget(spend: { usd_est: number; minutes: number }, budg
         `estimated spend $${spend.usd_est.toFixed(2)} exceeded the $${budgets.usd.toFixed(2)} budget — resume it with ` +
         `\`${RESUME_STOPPED_RUN_COMMAND}\` (same run, same worktree, higher budget), or set ` +
         "`budgets.usd` in .agent_memory/config.json to raise the default for every future run",
-    };
-  }
-  if (spend.minutes > budgets.minutes) {
-    return {
-      exceeded: true,
-      reason:
-        `elapsed ${spend.minutes.toFixed(1)} min exceeded the ${budgets.minutes} min budget — resume it with ` +
-        `\`${RESUME_STOPPED_RUN_MINUTES_COMMAND}\` (same run, same worktree, higher minutes budget), or set ` +
-        "`budgets.minutes` in .agent_memory/config.json to raise the default for every future run",
     };
   }
   return { exceeded: false };
@@ -763,13 +769,22 @@ export function toRunView(task: TaskRecord): RunView {
  * How many runs are genuinely in flight. Counted from the records themselves, because a
  * "running" record whose process is gone must not hold a concurrency slot forever — the
  * failure mode where a fleet silently stops dispatching and nobody knows why.
+ *
+ * excludeRunId: a run deciding whether ITS OWN admission may proceed must count every
+ * OTHER in-flight run, never itself. Reproduced live at max_concurrent 3: two runs
+ * genuinely running plus the THIRD run's own "dispatched" record (already written by
+ * the time its own "dispatched"→"running" transition was checked) read as 3 active — a
+ * cap of 3 behaving as a cap of 2 plus a guaranteed-orphaned agent on every third
+ * dispatch, however high the configured limit.
  */
-export function activeRunCount(projectDir: string): number {
+export function activeRunCount(projectDir: string, excludeRunId?: string): number {
   // "orphaned" is still a live agent process consuming a real slot — before this state
   // existed it displayed as plain "running" and counted here; carrying it forward keeps
   // the concurrency gate's behavior unchanged, not just its label.
   return listRuns(projectDir).filter(
-    (run) => run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "orphaned",
+    (run) =>
+      run.id !== excludeRunId &&
+      (run.display_state === "running" || run.display_state === "dispatched" || run.display_state === "orphaned"),
   ).length;
 }
 
@@ -778,6 +793,29 @@ export class ConcurrencyLimitError extends Error {
     super(`${limit} run(s) already in flight — this is the configured limit (kage config --max-concurrent N to change it)`);
     this.name = "ConcurrencyLimitError";
   }
+}
+
+export interface ConcurrencyStatus {
+  admits: boolean;
+  limit: number;
+  active: number;
+}
+
+/**
+ * A non-throwing read of the same admission decision assertConcurrencyAllows enforces —
+ * so a caller that wants to check BEFORE committing any resources (supervisor.ts's
+ * pre-spawn gate, dispatch.ts's reclaimQueuedRuns) can ask without catching an exception
+ * for a perfectly ordinary "not right now".
+ *
+ * excludeRunId: pass the run asking the question. Its own record must never count
+ * against its own admission — see activeRunCount's own note for the reproduced bug this
+ * prevents. Omit only when the question genuinely isn't about one specific run (a
+ * caller checking "is there room at all" before it has even created a run yet).
+ */
+export function concurrencyStatus(projectDir: string, excludeRunId?: string): ConcurrencyStatus {
+  const limit = readMaxConcurrent(projectDir);
+  const active = activeRunCount(projectDir, excludeRunId);
+  return { admits: limit <= 0 || active < limit, limit, active };
 }
 
 /**
@@ -792,12 +830,18 @@ function assertConcurrencyAllows(projectDir: string, task: TaskRecord, to: RunSt
   // Resuming a blocked/stopped run is not new work — it is finishing existing work, and
   // refusing it would strand the very runs that need a human most.
   if (task.state === "blocked" || task.state === "stopped" || task.state === "failed") return;
-  const limit = readMaxConcurrent(projectDir);
-  if (limit <= 0) return;
-  if (activeRunCount(projectDir) >= limit) throw new ConcurrencyLimitError(limit);
+  // Exclude the run itself: by the time this fires (a later transitionRun call in the
+  // SAME briefed→dispatched→running sequence), THIS run's own prior transition may
+  // already be on disk as "dispatched" — its own record must never count against its
+  // own admission.
+  const status = concurrencyStatus(projectDir, task.id);
+  if (!status.admits) throw new ConcurrencyLimitError(status.limit);
 }
 
-// Read the limit without importing config.ts (which imports this module).
+// Duplicates config.ts's own max_concurrent parsing rather than calling it directly —
+// contract.ts importing config.ts (see configuredBudgets above) is safe and one-directional,
+// so this could call config.ts's maxConcurrent() instead; left as its own reader only to
+// keep this change's diff smaller, not because of any real cycle.
 function readMaxConcurrent(projectDir: string): number {
   try {
     const raw = JSON.parse(readFileSync(join(projectDir, ".agent_memory", "config.json"), "utf8")) as {
@@ -829,13 +873,27 @@ export function onRunTransition(hook: RunTransitionHook): void {
   runTransitionHooks.push(hook);
 }
 
-export function transitionRun(projectDir: string, runId: string, to: RunState, by: RunActor, note?: string): RunView {
+export function transitionRun(
+  projectDir: string,
+  runId: string,
+  to: RunState,
+  by: RunActor,
+  note?: string,
+  // skipConcurrencyCheck: for a transition recording work that has ALREADY started —
+  // supervisor.ts's own briefed→dispatched→running bookkeeping happens after its agent
+  // child is already spawned, and its own admission gate has already run BEFORE that
+  // spawn (see superviseRun). Letting THIS transition still throw on a concurrency race
+  // is exactly the defect that orphaned every run that hit a full slate: the child would
+  // already be live, working, and unrecorded the instant this call died. Never used to
+  // skip the gate for a genuinely NEW admission decision — only to record one already made.
+  options?: { skipConcurrencyCheck?: boolean },
+): RunView {
   const task = readRun(projectDir, runId);
   const legal = LEGAL_TRANSITIONS[task.state] ?? [];
   if (!legal.includes(to)) {
     throw new Error(`Illegal transition for ${runId}: ${task.state} → ${to} (legal: ${legal.join(", ") || "none — terminal state"})`);
   }
-  assertConcurrencyAllows(projectDir, task, to);
+  if (!options?.skipConcurrencyCheck) assertConcurrencyAllows(projectDir, task, to);
   const at = nowIso();
   const change: RunStateChange = { state: to, at, by, ...(note ? { note } : {}) };
   const from = task.state;

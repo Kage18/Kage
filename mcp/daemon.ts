@@ -57,6 +57,7 @@ import { lanModeEnabled } from "./delegation/config.js";
 import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
 import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
 import { readRun, sweepDeadRuns } from "./delegation/contract.js";
+import { reclaimQueuedRuns } from "./delegation/dispatch.js";
 import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 
 export interface DaemonStatus {
@@ -1074,8 +1075,14 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   // Persist death on a heartbeat. reapRun existed with no callers, so dead runs held
   // their derived "dropped" forever — concurrency slots included. Startup + every
   // minute; sweepDeadRuns is idempotent and one cheap listRuns pass.
+  //
+  // reclaimQueuedRuns rides the same timer: a run that queued at the concurrency cap
+  // (supervisor.ts's pre-spawn admission gate — never even got a worktree or an agent
+  // child) has nothing else coming back for it, same as a dead run has nothing reaping
+  // it without this timer. Both are maintenance, not a dependency of daemon startup.
   try {
     sweepDeadRuns(projectDir);
+    reclaimQueuedRuns(projectDir);
   } catch {
     // Never let a sweep failure stop the daemon.
   }
@@ -1083,6 +1090,8 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     try {
       const reaped = sweepDeadRuns(projectDir);
       for (const run of reaped) delegationFeed.notify(run.id);
+      const admitted = reclaimQueuedRuns(projectDir);
+      for (const run of admitted) delegationFeed.notify(run.id);
     } catch {
       // Same: sweeping is maintenance, not a dependency.
     }

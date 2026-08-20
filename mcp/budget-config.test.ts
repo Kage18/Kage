@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkRunBudget, DEFAULT_RUN_BUDGETS } from "./delegation/contract.js";
+import { checkRunBudget, createRun, DEFAULT_RUN_BUDGETS } from "./delegation/contract.js";
 import { configuredBudgets, diffBudget, effectiveBudgets, writeDelegationConfig } from "./delegation/config.js";
 import { dispatchRun } from "./delegation/dispatch.js";
 import { stubAdapter } from "./delegation/adapters/stub.js";
@@ -77,6 +77,44 @@ test("dispatchRun with no override picks up the repo's configured budget, not th
   assert.equal(held.task.budgets.usd, 5);
 });
 
+// --- createRun: defaults from repo config directly, not only through dispatchRun's
+// own effectiveBudgets() precomputation ------------------------------------------
+//
+// Found live 2026-08-20: a run dispatched through api.ts (the app's ⌘N / room path,
+// NOT kage dispatch) was stamped budgets $2/30m by a daemon that had been restarted
+// SECONDS earlier, while .agent_memory/config.json said usd 40 / minutes 240. The
+// "daemon caches config" theory from the day before was wrong — api.ts's createRun call
+// never passes a `budgets` option at all, so it fell straight through to whatever
+// createRun defaulted to internally, regardless of daemon age. dispatchRun (kage
+// dispatch, tested above) was never affected — it always precomputes effectiveBudgets()
+// itself — but any OTHER caller that skips that step silently got DEFAULT_RUN_BUDGETS
+// forever. Fixed at the source: createRun itself now defaults from configuredBudgets(),
+// so every caller gets the repo's configured budgets even if it never asks for them.
+
+test("createRun with no budgets option picks up the repo's configured usd, with no dispatchRun involved", () => {
+  const project = tempProject();
+  writeDelegationConfig(project, { budgets: { usd: 7 } });
+  // REVERT CHECK: if createRun goes back to `{ ...DEFAULT_RUN_BUDGETS, ...input.budgets }`,
+  // this reads 50 (or 2, pre-this-change) — never the configured 7 — because createRun
+  // itself never consulted config.json at all.
+  const run = createRun(project, { intent: "app-path dispatch, no explicit budgets", type: "chore", agent: "stub" });
+  assert.equal(run.budgets.usd, 7, "createRun must read config directly, not rely on a caller to precompute it");
+});
+
+test("createRun with no config and no budgets option carries the new $50 default", () => {
+  const project = tempProject();
+  const run = createRun(project, { intent: "no config at all", type: "chore", agent: "stub" });
+  assert.equal(run.budgets.usd, 50);
+  assert.deepEqual(run.budgets, DEFAULT_RUN_BUDGETS);
+});
+
+test("createRun's explicit budgets option still wins over repo config", () => {
+  const project = tempProject();
+  writeDelegationConfig(project, { budgets: { usd: 7 } });
+  const run = createRun(project, { intent: "explicit override", type: "chore", agent: "stub", budgets: { usd: 99 } });
+  assert.equal(run.budgets.usd, 99, "an explicit per-run override must still beat config");
+});
+
 // --- the halt message must tell the operator how to raise the limit ---------------
 
 test("checkRunBudget's usd-exceeded reason names the CLI flag and the config key", () => {
@@ -85,9 +123,15 @@ test("checkRunBudget's usd-exceeded reason names the CLI flag and the config key
   assert.match(result.reason ?? "", /budgets\.usd/, "must name the config key");
 });
 
-test("checkRunBudget's minutes-exceeded reason names the config key", () => {
-  const result = checkRunBudget({ usd_est: 0, minutes: 45 }, { usd: 2, minutes: 30, diff_lines: 400 });
-  assert.match(result.reason ?? "", /budgets\.minutes/, "must name the config key that raises this cap");
+// UPDATED 2026-08-20: minutes stopped being a stopping condition at all — budgets are a
+// circuit breaker for a looping agent, not a per-task allowance, and a minutes cap
+// stopped nothing bad in a full day of real use while halting five legitimate runs.
+// See mcp/resume-budgets.test.ts for the full "minutes never stops" coverage and
+// mcp/stall-detector.test.ts for what actually catches a looping agent now.
+test("checkRunBudget never flags minutes as exceeded, however far over its cap it runs", () => {
+  const result = checkRunBudget({ usd_est: 0, minutes: 999 }, { usd: 2, minutes: 30, diff_lines: 400 });
+  assert.equal(result.exceeded, false);
+  assert.equal(result.reason, undefined);
 });
 
 // --- diff_lines vs the legacy diff_budget key: one number, never two --------------

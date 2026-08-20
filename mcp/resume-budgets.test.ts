@@ -38,6 +38,17 @@
 // Deliberately its own file — mcp/delegation.test.ts is off-limits (a known merge-conflict
 // hotspot other runs collide in), and run-recovery.test.ts already covers the usd-cap path
 // this brief does not change.
+//
+// UPDATED 2026-08-20: minutes no longer stops a run AT ALL (contract.ts's checkRunBudget
+// checks usd only) — five runs stopped on budget in one day, all legitimate work that
+// later merged clean, zero runaways caught, and minutes was the worse offender (it
+// stopped nothing bad even before the idle-time bug above was fixed). The "a minutes cap
+// tripped" tests below are updated to their new shape: checkRunBudget never flags minutes
+// as exceeded, and resumeStoppedRun no longer requires (or even accepts) a minutes-only
+// refusal — the stall detector in supervisor.ts (mcp/stall-detector.test.ts) is what
+// actually catches a looping agent now. The meter itself (runningMinutesElapsed,
+// displayElapsedMs) is untouched below — it still measures and displays correctly, it
+// simply no longer gates anything.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -125,26 +136,33 @@ test("runningMinutesElapsed: a run that never stopped is unaffected — still pl
   assert.equal(runningMinutesElapsed(history, t0 + 15 * 60_000), 15);
 });
 
-// --- checkRunBudget: the stop note must name the cap that actually tripped ---------
+// --- checkRunBudget: minutes never stops a run any more ---------------------------
 
-test("checkRunBudget's minutes-exceeded reason names the minutes resume command, never the usd one", () => {
-  const result = checkRunBudget({ usd_est: 0.1, minutes: 45 }, { usd: 2, minutes: 30, diff_lines: 400 });
-  assert.equal(result.exceeded, true);
-  // REVERT CHECK: before this fix the minutes branch named only `budgets.minutes` in
-  // config.json — advice that cannot actually resume an already-stopped run.
-  assert.match(result.reason ?? "", /kage resume-run <run-id> --budget-minutes <n>/, "must name the command that actually fixes THIS run");
-  assert.doesNotMatch(result.reason ?? "", /--budget-usd/, "a minutes stop must never carry dollar advice");
+test("checkRunBudget never exceeds on minutes, no matter how far over the cap it runs", () => {
+  // REVERT CHECK: before this fix, spend.minutes 999 against a 30-minute cap reported
+  // exceeded: true (and named `kage resume-run <run-id> --budget-minutes <n>`) — the
+  // exact behavior this change deliberately removes.
+  const result = checkRunBudget({ usd_est: 0, minutes: 999 }, { usd: 2, minutes: 30, diff_lines: 400 });
+  assert.equal(result.exceeded, false, "minutes must never be a stopping condition");
+  assert.equal(result.reason, undefined);
 });
 
-// --- resumeStoppedRun: names and fixes only the cap that actually tripped ---------
+test("checkRunBudget still stops on usd even when minutes is also over its cap", () => {
+  const result = checkRunBudget({ usd_est: 3, minutes: 999 }, { usd: 2, minutes: 30, diff_lines: 400 });
+  assert.equal(result.exceeded, true);
+  assert.match(result.reason ?? "", /--budget-usd/, "usd is still the one cap that halts a run");
+  assert.doesNotMatch(result.reason ?? "", /--budget-minutes/, "minutes must never appear in a stop reason any more");
+});
 
-test("a minutes-stopped run is refused for --budget-usd and resumes once --budget-minutes is raised", async () => {
+// --- resumeStoppedRun: --budget-minutes is a harmless raise, never required ------
+
+test("--budget-minutes resumes a stopped run as a harmless raise when nothing actually tripped", async () => {
   const project = tempGitProject({ testCommand: "true" });
   const task = createRun(project, {
-    intent: "long-running layout sweep",
+    intent: "user-requested stop, well under every cap",
     type: "bugfix",
     agent: "stub",
-    budgets: { usd: 2, minutes: 30, diff_lines: 400 },
+    budgets: { usd: 50, minutes: 30, diff_lines: 400 },
   });
   transitionRun(project, task.id, "briefed", "kernel");
   transitionRun(project, task.id, "dispatched", "kernel");
@@ -153,25 +171,9 @@ test("a minutes-stopped run is refused for --budget-usd and resumes once --budge
   patchRun(project, task.id, {
     worktree: worktree.path,
     agent_session_id: "orig-session",
-    // Well under the usd cap, well OVER the minutes cap — the common shape, not the
-    // usd-overrun shape run-recovery.test.ts already covers.
-    spend: { usd_est: 0.42, minutes: 59.8 },
+    spend: { usd_est: 0.42, minutes: 5 },
   });
-  transitionRun(
-    project,
-    task.id,
-    "stopped",
-    "kernel",
-    "elapsed 59.8 min exceeded the 30 min budget — resume it with `kage resume-run <run-id> --budget-minutes <n>`",
-  );
-
-  // REVERT CHECK: raising only usd (the field the original signature actually had) must
-  // still be refused — the cap that tripped is minutes, and dollar advice cannot fix it.
-  const usdOnly = await resumeStoppedRun(project, task.id, 999, undefined, adapterByName);
-  assert.equal(usdOnly.ok, false, "raising the wrong cap must not unblock a resume");
-  assert.match(usdOnly.message, /--budget-minutes/, "the refusal must point at the minutes flag");
-  assert.doesNotMatch(usdOnly.message, /\$/, "a minutes-only stop must carry no dollar figure in its refusal");
-  assert.equal(readRun(project, task.id).state, "stopped", "a refused resume must not touch run state");
+  transitionRun(project, task.id, "stopped", "user", "stopped by request");
 
   const liveStub = stubAdapter({ live: { question: "n/a", firstResult: "claim" }, statement: "continued and finished" });
   let supervised: Promise<void> | null = null;
@@ -180,42 +182,39 @@ test("a minutes-stopped run is refused for --budget-usd and resumes once --budge
     return { pid: 424_242 };
   };
 
-  // --budget-minutes actually threaded through: this is the flag the original signature
-  // dropped entirely (mcp/cli.ts only ever read --budget-usd for this command).
+  // REVERT CHECK: if resumeStoppedRun stopped threading budgetMinutes through at all,
+  // finished.budgets.minutes would still read 30 here, not 240.
   const result = await resumeStoppedRun(project, task.id, undefined, 240, () => liveStub, reattach);
   assert.equal(result.ok, true, result.message);
-  assert.ok(supervised, "resuming a minutes-stopped run must reattach a supervisor");
+  assert.ok(supervised, "resuming must reattach a supervisor");
   await supervised!;
 
   const finished = readRun(project, task.id);
-  assert.equal(finished.budgets.minutes, 240, "the minutes budget must actually be raised, not silently dropped");
-  assert.equal(finished.budgets.usd, 2, "an untouched cap must stay exactly as configured");
-  assert.equal(finished.state, "ready", "the reattached supervisor's claim must actually be collected");
+  assert.equal(finished.budgets.minutes, 240, "an explicit --budget-minutes must still raise the minutes budget, harmlessly");
+  assert.equal(finished.budgets.usd, 50, "an untouched cap must stay exactly as configured");
+  assert.equal(finished.state, "ready");
 });
 
-// --- CLI: --budget-minutes must reach resumeStoppedRun, not just be parsed and dropped --
+// --- CLI: --budget-minutes still reaches resumeStoppedRun as an optional raise ---
 
-test("kage resume-run --budget-minutes actually raises the run's minutes budget over the CLI", async () => {
+test("kage resume-run --budget-minutes over the CLI still raises the minutes budget, without being required", async () => {
   const project = tempGitProject({ testCommand: "true" });
   const task = createRun(project, {
     intent: "cli minutes wiring check",
     type: "bugfix",
     agent: "stub",
-    budgets: { usd: 2, minutes: 30, diff_lines: 400 },
+    budgets: { usd: 50, minutes: 30, diff_lines: 400 },
   });
   transitionRun(project, task.id, "briefed", "kernel");
   transitionRun(project, task.id, "dispatched", "kernel");
   transitionRun(project, task.id, "running", "kernel");
-  patchRun(project, task.id, { agent_session_id: "orig-session", spend: { usd_est: 0.1, minutes: 61 } });
-  transitionRun(project, task.id, "stopped", "kernel", "elapsed 61.0 min exceeded the 30 min budget");
+  patchRun(project, task.id, { agent_session_id: "orig-session", spend: { usd_est: 0.1, minutes: 5 } });
+  transitionRun(project, task.id, "stopped", "user", "stopped by request");
 
-  // REVERT CHECK: before mcp/cli.ts threaded --budget-minutes into resumeStoppedRun, this
-  // exact invocation printed the (wrong, usd-shaped) refusal and exited 2, and
-  // task.budgets.minutes never moved off 30.
   const out = execFileSync(process.execPath, [CLI, "resume-run", task.id, "--budget-minutes", "240", "--project", project], {
     encoding: "utf8",
   });
-  assert.doesNotMatch(out, /budget-usd <n>/, "must not refuse a minutes stop by asking for a usd raise");
+  assert.doesNotMatch(out, /budget-usd <n>/, "a resume that needed no usd raise must not print a usd refusal");
 
   await waitFor(() => {
     const state = readRun(project, task.id).state;
@@ -300,44 +299,71 @@ test("kage status (renderStatusBoard) shows work time for a stopped run, not wal
 });
 
 // --- kage config: warn about a LIVE daemon, never a project with no daemon at all -
+//
+// UPDATED: the original diagnosis behind this warning ("a live daemon holds a stale
+// in-memory copy of config.json") was itself wrong for budgets specifically — verified
+// live on 2026-08-20 by dispatching a real run through a daemon restarted seconds
+// earlier: it still stamped $2/30m while config.json said usd 40/minutes 240. The real
+// bug was that api.ts's createRun call never consulted configuredBudgets() at ALL,
+// restart or not (contract.ts's createRun now defaults every run's budgets from
+// configuredBudgets(projectDir), fixing this at the source — see budget-config.test.ts).
+// So a budgets-only `kage config` change never needs a daemon restart and must never
+// claim it does; a change to any OTHER setting (test/diff-budget/strict/static-checks)
+// still gets the honest live-daemon warning, since those paths were not re-verified here.
 
-test("kage config warns to restart a LIVE daemon, and stays silent when no daemon is running for the project", async () => {
+function spawnLiveDaemonStatus(project: string): { pid: number | undefined; kill: () => void } {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  const daemonDir = join(project, ".agent_memory", "daemon");
+  mkdirSync(daemonDir, { recursive: true });
+  writeFileSync(
+    join(daemonDir, "status.json"),
+    JSON.stringify({
+      ok: true,
+      project_dir: project,
+      pid: child.pid,
+      host: "127.0.0.1",
+      rest_port: 3111,
+      viewer_port: 3113,
+      started_at: new Date().toISOString(),
+      status_path: join(daemonDir, "status.json"),
+      index_watch: false,
+      last_indexed_at: "",
+    }),
+    "utf8",
+  );
+  return { pid: child.pid, kill: () => child.kill() };
+}
+
+test("kage config --budget-minutes never warns about a live daemon — budgets apply fresh on every new run", async () => {
   const project = tempGitProject({ testCommand: "true" });
 
   const quiet = execFileSync(process.execPath, [CLI, "config", "--budget-minutes", "240", "--project", project], { encoding: "utf8" });
   assert.doesNotMatch(quiet, /daemon is running/i, "no daemon status file exists at all — must never warn about one");
 
-  // A real, killable child process stands in for a live daemon — its pid recorded in
-  // daemon/status.json exactly the shape daemon.ts's startDaemon itself writes.
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-  await new Promise((resolve) => child.once("spawn", resolve));
+  const daemon = spawnLiveDaemonStatus(project);
   try {
-    const daemonDir = join(project, ".agent_memory", "daemon");
-    mkdirSync(daemonDir, { recursive: true });
-    writeFileSync(
-      join(daemonDir, "status.json"),
-      JSON.stringify({
-        ok: true,
-        project_dir: project,
-        pid: child.pid,
-        host: "127.0.0.1",
-        rest_port: 3111,
-        viewer_port: 3113,
-        started_at: new Date().toISOString(),
-        status_path: join(daemonDir, "status.json"),
-        index_watch: false,
-        last_indexed_at: "",
-      }),
-      "utf8",
-    );
+    // REVERT CHECK: before this fix, ANY `kage config` flag (including a bare
+    // --budget-minutes) triggered the daemon-restart warning — false advice, since
+    // budgets were never actually stale on a live daemon in the first place.
+    const stillQuiet = execFileSync(process.execPath, [CLI, "config", "--budget-minutes", "300", "--project", project], { encoding: "utf8" });
+    assert.doesNotMatch(stillQuiet, /daemon is running/i, "a budgets-only change must never claim a restart is needed");
+  } finally {
+    daemon.kill();
+  }
+});
 
-    // REVERT CHECK: before this fix, `kage config` never checked for a live daemon at
-    // all, so a budget raised here silently had no effect on runs a live daemon
-    // dispatched — exactly what stranded the run created to fix this very trap.
-    const warned = execFileSync(process.execPath, [CLI, "config", "--budget-minutes", "300", "--project", project], { encoding: "utf8" });
-    assert.match(warned, /daemon is running/i, "a real live daemon pid must trigger the restart warning");
+test("kage config --test still warns about a LIVE daemon, and stays silent when no daemon is running", async () => {
+  const project = tempGitProject({ testCommand: "true" });
+
+  const quiet = execFileSync(process.execPath, [CLI, "config", "--test", "npm run check", "--project", project], { encoding: "utf8" });
+  assert.doesNotMatch(quiet, /daemon is running/i, "no daemon status file exists at all — must never warn about one");
+
+  const daemon = spawnLiveDaemonStatus(project);
+  try {
+    const warned = execFileSync(process.execPath, [CLI, "config", "--test", "npm run check2", "--project", project], { encoding: "utf8" });
+    assert.match(warned, /daemon is running/i, "a real live daemon pid must trigger the restart warning for a non-budget setting");
     assert.match(warned, /kage daemon stop --project/, "must name the actual fix command, not just note the problem");
   } finally {
-    child.kill();
+    daemon.kill();
   }
 });

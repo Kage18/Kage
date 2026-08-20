@@ -22,6 +22,7 @@ import { compileBrief, renderBrief } from "./brief.js";
 import { runAllChecks } from "./checks.js";
 import { strictVerify } from "./config.js";
 import { deliverQueuedSteer, readSteerRecords } from "./dispatch.js";
+import { git } from "./git.js";
 import {
   recordSpend,
   buildClaim,
@@ -30,6 +31,7 @@ import {
   type ClaimRecord,
   RUN_SCHEMA_VERSION,
   appendRunLedger,
+  concurrencyStatus,
   parseReportFence,
   patchRun,
   readBrief,
@@ -92,6 +94,175 @@ export function interruptFrame(requestId = "kage-interrupt"): string {
   return `${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "interrupt" } })}\n`;
 }
 
+// ---------------------------------------------------------------------------
+// Stall detection — the hazard per-run budgets were actually standing in for. Five
+// runs stopped on budget in one day; all five were legitimate work that later merged
+// clean, and zero runaways were ever caught. The real hazard at max_concurrent 3,
+// unattended, is an agent LOOPING: retrying the same failing command, or grinding with
+// no forward progress at all. Cost is a bad proxy for that — this looks at what the
+// agent is actually doing instead.
+//
+// Evaluated once per TURN (a stream `result` event), never per tool call: a long single
+// turn that runs many commands is exactly the shape of real, productive work and must
+// never trip this on its own. Two independent triggers, both conservative on purpose:
+//
+//   (a) the SAME command fails with the SAME exit code STALL_SAME_COMMAND_STREAK turns
+//       in a row — a classic retry loop. Broken by any turn without that failure.
+//   (b) STALL_NO_DIFF_STREAK consecutive turns produce no change to the worktree's
+//       `git diff --stat` — no forward progress at all. Six, not fewer: a legitimate
+//       research/exploration phase (reading code, running different read-only commands,
+//       no edits yet) must survive, so this needs a genuinely long run of turns with
+//       truly nothing changing before it fires.
+export const STALL_SAME_COMMAND_STREAK = 3;
+export const STALL_NO_DIFF_STREAK = 6;
+// A real shell exit code is never negative in practice; this sentinel means "the turn's
+// tool result reported failure but no numeric code could be found in it" — still a
+// valid signal for streak-counting (it is only ever compared for equality against the
+// SAME command's own prior code), just never printed as if it were a real number.
+const STALL_UNKNOWN_EXIT_CODE = -1;
+
+export interface TurnCommandResult {
+  command: string;
+  exitCode: number;
+  failed: boolean;
+}
+
+export interface StallTurnSummary {
+  commands: TurnCommandResult[];
+  /** sha256 of `git diff --stat` in the worktree at the end of this turn, or null when
+   * there is no worktree to diff (a sandbox run) — never counted toward (b) either way. */
+  diffHash: string | null;
+}
+
+export interface StallState {
+  lastFailingCommand: string | null;
+  lastFailingExitCode: number | null;
+  sameCommandStreak: number;
+  lastDiffHash: string | null;
+  noDiffStreak: number;
+}
+
+export function initialStallState(): StallState {
+  return { lastFailingCommand: null, lastFailingExitCode: null, sameCommandStreak: 0, lastDiffHash: null, noDiffStreak: 0 };
+}
+
+export interface StallTrigger {
+  /** Leads with "stalled:" and names the exact evidence — never a generic "stopped". */
+  reason: string;
+}
+
+/**
+ * Pure state transition: one turn in, the next detector state and a trigger (if either
+ * threshold was just crossed) out. Pure and side-effect-free so it is unit-testable
+ * without a live agent process, same reasoning as contract.ts's checkRunBudget.
+ */
+export function evaluateStallTurn(
+  state: StallState,
+  turn: StallTurnSummary,
+): { state: StallState; trigger: StallTrigger | null } {
+  // (a) same failing command streak. Only the LAST failing command in the turn stands
+  // for it — a turn with several different failures still ends on whatever the agent
+  // most recently tried.
+  const failing = [...turn.commands].reverse().find((c) => c.failed);
+  let sameCommandStreak = 0;
+  let lastFailingCommand: string | null = null;
+  let lastFailingExitCode: number | null = null;
+  let trigger: StallTrigger | null = null;
+
+  if (failing) {
+    const continuesStreak = failing.command === state.lastFailingCommand && failing.exitCode === state.lastFailingExitCode;
+    sameCommandStreak = continuesStreak ? state.sameCommandStreak + 1 : 1;
+    lastFailingCommand = failing.command;
+    lastFailingExitCode = failing.exitCode;
+    if (sameCommandStreak >= STALL_SAME_COMMAND_STREAK) {
+      trigger = {
+        reason:
+          failing.exitCode === STALL_UNKNOWN_EXIT_CODE
+            ? `stalled: \`${failing.command}\` failed on ${sameCommandStreak} consecutive turns`
+            : `stalled: \`${failing.command}\` failed with exit ${failing.exitCode} on ${sameCommandStreak} consecutive turns`,
+      };
+    }
+  }
+  // A turn with no failing command breaks the streak — only CONSECUTIVE failures count.
+
+  // (b) no-diff streak — independent of (a); either alone can trigger. The very first
+  // turn (state.lastDiffHash === null) can never count as "unchanged": there is no prior
+  // turn to compare against yet.
+  const noDiffStreak =
+    turn.diffHash !== null && state.lastDiffHash !== null && turn.diffHash === state.lastDiffHash ? state.noDiffStreak + 1 : 0;
+  if (!trigger && noDiffStreak >= STALL_NO_DIFF_STREAK) {
+    trigger = { reason: `stalled: ${noDiffStreak} consecutive turns produced no change to the worktree diff` };
+  }
+
+  return {
+    state: {
+      lastFailingCommand,
+      lastFailingExitCode,
+      sameCommandStreak,
+      lastDiffHash: turn.diffHash ?? state.lastDiffHash,
+      noDiffStreak,
+    },
+    trigger,
+  };
+}
+
+/** `git -C <worktree> diff --stat`, hashed — one shell-out per turn, never more. */
+function diffStatHash(worktree: string): string | null {
+  const result = git(worktree, ["diff", "--stat"]);
+  if (!result.ok) return null;
+  return createHash("sha256").update(result.stdout).digest("hex");
+}
+
+/** Tracks Bash tool_use blocks awaiting their tool_result, keyed by tool_use_id. */
+function recordBashToolUse(line: string, pending: Map<string, string>): void {
+  let event: { message?: { content?: Array<{ type?: string; id?: string; name?: string; input?: Record<string, unknown> }> } };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return;
+  }
+  for (const block of event.message?.content ?? []) {
+    if (block.type !== "tool_use" || block.name !== "Bash" || typeof block.id !== "string") continue;
+    const command = block.input?.command;
+    if (typeof command === "string") pending.set(block.id, command);
+  }
+}
+
+function flattenToolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : ""))
+      .join("\n");
+  }
+  return "";
+}
+
+function extractExitCode(text: string): number | null {
+  const match = text.match(/exit\s*(?:code|status)\s*:?\s*(-?\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+/** Resolves a Bash tool_result against its recorded tool_use, if this line is one. */
+function bashResultFromStreamEvent(line: string, pending: Map<string, string>): TurnCommandResult | null {
+  let event: { message?: { content?: Array<{ type?: string; tool_use_id?: string; is_error?: boolean; content?: unknown }> } };
+  try {
+    event = JSON.parse(line) as typeof event;
+  } catch {
+    return null;
+  }
+  for (const block of event.message?.content ?? []) {
+    if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+    const command = pending.get(block.tool_use_id);
+    if (!command) continue;
+    pending.delete(block.tool_use_id);
+    if (block.is_error !== true) return { command, exitCode: 0, failed: false };
+    const exitCode = extractExitCode(flattenToolResultText(block.content)) ?? STALL_UNKNOWN_EXIT_CODE;
+    return { command, exitCode, failed: true };
+  }
+  return null;
+}
+
 interface SupervisorState {
   usage?: { usd: number; tokens: number };
   waiting?: { detail: string; needs: string };
@@ -105,6 +276,12 @@ interface SupervisorState {
    * halt apart from a user-requested stop.
    */
   budgetHalted?: string;
+  /**
+   * Set instead of a generic "stopped by request" note when the STALL DETECTOR halted
+   * the run — names the exact evidence (a repeating failing command, or turns of no
+   * worktree change), never a spend figure, because a stall is not a cost overrun.
+   */
+  stallHalted?: string;
 }
 
 /**
@@ -133,6 +310,41 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   slog(`supervisor started, pid ${process.pid}`);
 
   const task = readRun(projectDir, runId);
+
+  // Concurrency admission — BEFORE any resource is committed (worktree, agent child),
+  // not after. The gate used to live only in transitionRun's own briefed→dispatched→
+  // running bookkeeping, which this function only reaches AFTER spawning the agent
+  // child: admit at dispatch, spawn, THEN check, then die on a full slate — orphaning a
+  // live, already-working agent that nothing was left tracking, budgeting, or waiting to
+  // collect a claim from. Reproduced live: every orphan traced back to a full slate at
+  // exactly this moment. A resume (blocked/stopped/failed) is exempt, same as
+  // assertConcurrencyAllows below — it is finishing existing work, not new work, and the
+  // run it would strand is the one that most needs a human already.
+  const isResuming = task.state === "blocked" || task.state === "stopped" || task.state === "failed";
+  if (!isResuming) {
+    // Exclude runId itself — see contract.ts's activeRunCount for the reproduced bug: a
+    // run counting its OWN record turns a configured cap of N into an effective N-1 plus
+    // an orphaned agent on every Nth dispatch.
+    const status = concurrencyStatus(projectDir, runId);
+    if (!status.admits) {
+      slog(`queued — ${status.active}/${status.limit} run(s) already in flight; waiting for a free slot, no agent spawned`);
+      // Left exactly where it was (typically "briefed") rather than transitioned or
+      // failed — a legal, resumable state. waiting_on names why, the same field a
+      // blocked run uses, so any surface that already renders it shows this too.
+      // dispatch.ts's reclaimQueuedRuns is what re-admits it: the daemon's existing
+      // reap timer calls it on the same cadence as sweepDeadRuns, and it re-dispatches
+      // any run carrying exactly this marker once a slot frees up.
+      patchRun(projectDir, runId, {
+        waiting_on: {
+          needs: "a free run slot",
+          detail: `${status.limit} run(s) already in flight — the configured limit (kage config --max-concurrent N to change it)`,
+        },
+      });
+      appendRunLedger(projectDir, { kind: "queued_at_cap", run_id: runId, limit: status.limit, active: status.active });
+      return;
+    }
+  }
+
   const plan = compileBrief(projectDir, task.intent, task.type);
   slog("brief compiled");
   // Recorded before anything else: verification (below) runs in THIS process after the
@@ -210,17 +422,35 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   }
   // The run is genuinely in flight now — a supervisor that never moved the state left
   // every surface reporting "briefed" while an agent worked (found on the first live run).
-  if (readRun(projectDir, runId).state === "briefed") transitionRun(projectDir, runId, "dispatched", "kernel");
+  //
+  // skipConcurrencyCheck on both: the admission DECISION already happened above, before
+  // the worktree existed or the agent child was spawned. These two calls only RECORD
+  // that a decision already made — a live child by now genuinely exists (or this run is
+  // sandboxed), and letting either throw here would orphan it exactly the way the old
+  // post-spawn gate did.
+  if (readRun(projectDir, runId).state === "briefed") {
+    transitionRun(projectDir, runId, "dispatched", "kernel", undefined, { skipConcurrencyCheck: true });
+  }
   if (readRun(projectDir, runId).state === "dispatched") {
-    transitionRun(projectDir, runId, "running", "kernel", workspaceKind === "sandbox" ? "no git worktree — running in a sandbox" : undefined);
+    transitionRun(
+      projectDir,
+      runId,
+      "running",
+      "kernel",
+      workspaceKind === "sandbox" ? "no git worktree — running in a sandbox" : undefined,
+      { skipConcurrencyCheck: true },
+    );
   }
   // A reattach starts from blocked/stopped/failed, never briefed/dispatched — bring it
   // into running the same way a fresh dispatch does, so no surface is left reporting a
-  // state the agent has already moved past.
+  // state the agent has already moved past. Already exempt via assertConcurrencyAllows'
+  // own state check, but skipConcurrencyCheck is passed here too for the same reason as
+  // above: the child already exists by this point, so this call must never be the one
+  // that throws.
   if (isResume) {
     const resumedFrom = readRun(projectDir, runId).state;
     if (resumedFrom === "blocked" || resumedFrom === "stopped" || resumedFrom === "failed") {
-      transitionRun(projectDir, runId, "running", "kernel", "resumed — a supervisor reattached to answer it");
+      transitionRun(projectDir, runId, "running", "kernel", "resumed — a supervisor reattached to answer it", { skipConcurrencyCheck: true });
     }
   }
   const record: SupervisorRecord = {
@@ -323,6 +553,12 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   }
 
   if (child) {
+    // Stall-detector bookkeeping: lives for the whole held-stdin session, not per line —
+    // a command's tool_use and its tool_result usually land on different lines, and the
+    // streak state must survive across turns to count CONSECUTIVE ones.
+    const pendingBashCalls = new Map<string, string>();
+    let turnCommands: TurnCommandResult[] = [];
+    let stallState = initialStallState();
     await new Promise<void>((resolve) => {
       let pending = "";
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -338,7 +574,19 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
             log({ kind: "waiting", ...signal });
           }
           const id = sessionIdFrom(line);
-          if (id) state.sessionId = id;
+          // Persisted the FIRST time the stream reports it, not only in the exit
+          // cleanup block below — Take Over (run-pty.ts's takeOverRun) needs this field
+          // live for the run's ENTIRE working life, and it used to be null the whole
+          // time a run was visibly streaming (reproduced live: "Take Over" refused a
+          // run mid-stream with "no agent session recorded"). The exit-time write below
+          // stays too, as belt-and-braces for a run that ends before this ever fires.
+          if (id && id !== state.sessionId) {
+            state.sessionId = id;
+            patchRun(projectDir, runId, { agent_session_id: id });
+          }
+          const bashResult = bashResultFromStreamEvent(line, pendingBashCalls);
+          if (bashResult) turnCommands.push(bashResult);
+          else recordBashToolUse(line, pendingBashCalls);
           // THIRD stream consumer, third chance to drop data. Cost capture went into
           // cli-agent.run first and a real held-stdin run still recorded zero, because
           // this loop parses the same result event independently. Every consumer of
@@ -392,6 +640,22 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
             // a live, answerable session instead of a process a later steer has to restart
             // from scratch (found live: a finished blocked turn closed stdin same as a
             // claim, killing the very session `kage tell` needed to answer).
+            if (parsed.type === "result" && !state.stopped) {
+              // Stall check: once per turn boundary, ahead of the fence handling below —
+              // a stall halt overrides whatever the turn itself reported (a claim, a
+              // block, a plan), the same way a budget halt already does.
+              const commandsThisTurn = turnCommands;
+              turnCommands = [];
+              const diffHash = workspaceKind === "worktree" ? diffStatHash(workspace) : null;
+              const evaluated = evaluateStallTurn(stallState, { commands: commandsThisTurn, diffHash });
+              stallState = evaluated.state;
+              if (evaluated.trigger) {
+                state.stopped = true;
+                state.stallHalted = evaluated.trigger.reason;
+                log({ kind: "stall_halt", reason: evaluated.trigger.reason });
+                child.kill("SIGTERM");
+              }
+            }
             if (parsed.type === "result" && !state.stopped) {
               const fence = parseReportFence(state.finalMessage);
               if (fence?.kind === "plan") {
@@ -476,7 +740,11 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     }
   }
 
-  slog(`agent turn ended${state.stopped ? " (stopped)" : ""}${state.budgetHalted ? ` — budget halted: ${state.budgetHalted}` : ""}`);
+  slog(
+    `agent turn ended${state.stopped ? " (stopped)" : ""}` +
+      `${state.budgetHalted ? ` — budget halted: ${state.budgetHalted}` : ""}` +
+      `${state.stallHalted ? ` — ${state.stallHalted}` : ""}`,
+  );
 
   try {
     server.close();
@@ -492,16 +760,13 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
   });
 
   if (state.stopped) {
-    // A budget halt is the kernel's own decision, not a user action — and its note
-    // names the limit and the figure that crossed it, so "stopped" never reads as a
-    // generic user-requested stop when it wasn't one.
-    transitionRun(
-      projectDir,
-      runId,
-      "stopped",
-      state.budgetHalted ? "kernel" : "user",
-      state.budgetHalted ?? "stopped by request",
-    );
+    // A budget or stall halt is the kernel's own decision, not a user action — and its
+    // note names either the limit and the figure that crossed it, or the stall's exact
+    // evidence, so "stopped" never reads as a generic user-requested stop when it wasn't
+    // one. budgetHalted and stallHalted are mutually exclusive (whichever check fires
+    // first sets state.stopped, and both checks bail out once it's already true).
+    const haltNote = state.budgetHalted ?? state.stallHalted;
+    transitionRun(projectDir, runId, "stopped", haltNote ? "kernel" : "user", haltNote ?? "stopped by request");
     return;
   }
 

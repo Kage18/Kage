@@ -124,10 +124,11 @@ function verboseReceipt(projectDir: string, task: TaskRecord, claim: ClaimRecord
   push(`BUDGETS    ≤${task.budgets.diff_lines} diff lines · ≤${task.budgets.minutes} min · ≤$${task.budgets.usd}`);
   if (task.spend.usd_est > 0 || task.spend.minutes > 0) {
     push(`SPEND      $${task.spend.usd_est.toFixed(2)} · ${task.spend.minutes.toFixed(1)} min`);
+    // usd is the only cap that stops a run, so it is the only one that gets an alarm
+    // line here — minutes past its budget is informational (already shown above),
+    // never a problem to flag, since it never halted anything.
     const overUsd = task.spend.usd_est > task.budgets.usd;
-    const overMinutes = task.spend.minutes > task.budgets.minutes;
     if (overUsd) push(`           over budget — spent $${task.spend.usd_est.toFixed(2)} against a $${task.budgets.usd.toFixed(2)} cap`);
-    if (overMinutes) push(`           over budget — ran ${task.spend.minutes.toFixed(1)} min against a ${task.budgets.minutes} min cap`);
   }
   push(`BRIEF BY   ${task.curated_by === "manager" ? "manager (curated)" : "kernel defaults"}`);
   push();
