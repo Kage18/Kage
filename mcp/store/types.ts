@@ -64,10 +64,16 @@ export interface PacketSymbolRow {
 // --- Docs FTS ----------------------------------------------------------------
 
 export interface DocsFtsDoc {
-  id: string; // stable id for this chunk, e.g. `${doc_path}#${anchor}`
+  id: string; // stable id for this chunk, e.g. `${doc_path}#${anchor}#${index}`
   docPath: string;
   heading: string;
   body: string;
+  // Heading anchor and source line the chunk starts at. Optional so the M1
+  // fixture literals that predate these fields keep compiling; a caller that
+  // cares about byte-for-byte docs-index.json output or line-accurate search
+  // results (M2's docs port) always sets both. Missing => "" / 0.
+  anchor?: string;
+  line?: number;
 }
 
 export interface DocsFtsHit {
@@ -75,6 +81,8 @@ export interface DocsFtsHit {
   docPath: string;
   heading: string;
   body: string;
+  anchor: string;
+  line: number;
 }
 
 // --- Vectors -------------------------------------------------------------
@@ -89,6 +97,12 @@ export interface VectorCandidate {
   packetId: string;
   term: string;
   weight: number;
+  // The L2 norm of packetId's FULL term vector (every term, not just this
+  // candidate's), needed for cosine scoring -- a document's norm depends on
+  // terms the query never asked about, so it cannot be derived from the
+  // candidate rows alone. Same value repeated across every candidate row for
+  // a given packetId.
+  norm: number;
 }
 
 // --- Knowledge graph -------------------------------------------------------
@@ -235,6 +249,25 @@ export interface StoreBackend {
    * exactly").
    */
   queryDocsFts(term: string, scope?: string): DocsFtsHit[];
+  /**
+   * Returns every indexed chunk, unranked, optionally restricted to a
+   * path-prefix scope on `docPath`. BM25 (mcp/kernel.ts's scoreDocsBm25)
+   * needs the full corpus -- document frequency and average length are
+   * corpus-wide stats, not just the chunks a single term happens to match
+   * -- so this is a distinct read shape from queryDocsFts, the same way
+   * listPackets/listFiles sit alongside their query*-by-something siblings.
+   */
+  listDocsFtsDocs(scope?: string): DocsFtsHit[];
+  /**
+   * Replaces the ENTIRE docs FTS corpus in one call: every existing chunk
+   * is dropped and `docs` becomes the whole index. This is the bulk form
+   * a full `kage refresh`-driven docs-index rebuild needs -- looping
+   * upsertDocsFtsDoc once per chunk would cost the JSON backend one
+   * whole-file rewrite per chunk (its upsert contract is read-modify-
+   * write-the-whole-file, by design, see mcp/store/json.ts), which is
+   * fine for a single upsert but quadratic across a full rebuild.
+   */
+  replaceDocsFtsDocs(docs: DocsFtsDoc[]): void;
 
   // -- vectors ---------------------------------------------------------------
 
@@ -244,9 +277,30 @@ export interface StoreBackend {
    * Returns every (packetId, term, weight) row whose term is one of
    * `terms`, optionally restricted to a path-prefix scope resolved via
    * `packet_paths`. Callers combine these into a dot product / cosine
-   * score themselves — this is retrieval, not ranking.
+   * score themselves — this is retrieval, not ranking. Every row's `norm`
+   * is packetId's full-document L2 norm (see VectorCandidate).
    */
   queryVectorCandidates(terms: string[], scope?: string): VectorCandidate[];
+  /**
+   * Returns every distinct packetId that has at least one vector row —
+   * a cheap existence/freshness signal (no term hydration) a caller can
+   * diff against the current approved-packet id set to decide whether
+   * the persisted vector index still covers today's packets, the same
+   * role the old vector-local.json's packet_count/generated_from_updated_at
+   * fields played before the store existed.
+   */
+  listVectorPacketIds(): string[];
+  /**
+   * Replaces the ENTIRE vector index in one call, for the same bulk-
+   * rewrite reason replaceDocsFtsDocs exists: a full packet re-index
+   * upserting one packet's terms at a time would cost the JSON backend
+   * one whole-file rewrite per packet. `generatedFromUpdatedAt` is
+   * persisted by the JSON backend (it's part of vector-local.json's own
+   * header, preserved for byte compatibility); the SQLite backend has no
+   * single-file header to carry it in and ignores it, since its own
+   * freshness signal is listVectorPacketIds(), not a stored timestamp.
+   */
+  replaceVectorDocuments(documents: Array<{ packetId: string; terms: VectorChunkRow[] }>, opts?: { generatedFromUpdatedAt?: string | null }): void;
 
   // -- knowledge graph ---------------------------------------------------------
 

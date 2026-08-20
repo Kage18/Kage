@@ -110,6 +110,7 @@ interface DocsChunkLike extends Record<string, unknown> {
   heading: string;
   anchor: string;
   text: string;
+  line: number;
 }
 
 interface DocsIndexArtifactLike {
@@ -442,7 +443,7 @@ export class JsonStoreBackend implements StoreBackend {
     const path = indexesPath(this.dir(), "docs-index.json");
     const existing = readJsonFile<DocsIndexArtifactLike>(path, emptyDocsIndex());
     const byId = new Map(existing.chunks.map((chunk) => [docsChunkId(chunk), chunk]));
-    byId.set(doc.id, { doc_path: doc.docPath, heading: doc.heading, anchor: doc.id, text: doc.body, line: 0 });
+    byId.set(doc.id, docToChunk(doc));
     const chunks = [...byId.values()];
     writeJsonFile(path, {
       ...existing,
@@ -459,7 +460,25 @@ export class JsonStoreBackend implements StoreBackend {
     return artifact.chunks
       .filter((chunk) => !scope || chunk.doc_path.startsWith(scope))
       .filter((chunk) => chunk.heading.toLowerCase().includes(needle) || chunk.text.toLowerCase().includes(needle))
-      .map((chunk) => ({ id: docsChunkId(chunk), docPath: chunk.doc_path, heading: chunk.heading, body: chunk.text }));
+      .map(chunkToHit);
+  }
+
+  listDocsFtsDocs(scope?: string): DocsFtsHit[] {
+    const artifact = readJsonFile<DocsIndexArtifactLike>(indexesPath(this.dir(), "docs-index.json"), emptyDocsIndex());
+    return artifact.chunks.filter((chunk) => !scope || chunk.doc_path.startsWith(scope)).map(chunkToHit);
+  }
+
+  replaceDocsFtsDocs(docs: DocsFtsDoc[]): void {
+    const path = indexesPath(this.dir(), "docs-index.json");
+    const chunks = docs.map(docToChunk);
+    writeJsonFile(path, {
+      schema_version: 1,
+      generated_at: new Date().toISOString(),
+      source: "repo-docs",
+      doc_count: new Set(chunks.map((chunk) => chunk.doc_path)).size,
+      chunk_count: chunks.length,
+      chunks,
+    });
   }
 
   // -- vectors -----------------------------------------------------------------
@@ -482,10 +501,30 @@ export class JsonStoreBackend implements StoreBackend {
     for (const document of index.documents) {
       if (scopedPacketIds && !scopedPacketIds.has(document.packet_id)) continue;
       for (const [term, weight] of document.terms) {
-        if (wanted.has(term)) candidates.push({ packetId: document.packet_id, term, weight });
+        if (wanted.has(term)) candidates.push({ packetId: document.packet_id, term, weight, norm: document.norm });
       }
     }
     return candidates;
+  }
+
+  listVectorPacketIds(): string[] {
+    return readJsonFile<SparseVectorIndexLike>(indexesPath(this.dir(), "vector-local.json"), emptyVectorIndex()).documents.map((document) => document.packet_id);
+  }
+
+  replaceVectorDocuments(documents: Array<{ packetId: string; terms: VectorChunkRow[] }>, opts: { generatedFromUpdatedAt?: string | null } = {}): void {
+    const path = indexesPath(this.dir(), "vector-local.json");
+    const built: SparseVectorDocumentLike[] = documents
+      .map((document) => {
+        const norm = Number(Math.sqrt(document.terms.reduce((sum, term) => sum + term.weight * term.weight, 0)).toFixed(6));
+        return { packet_id: document.packetId, terms: document.terms.map((term): [string, number] => [term.term, term.weight]), norm };
+      })
+      .sort((a, b) => a.packet_id.localeCompare(b.packet_id));
+    writeJsonFile(path, {
+      schema_version: 1,
+      generated_from_updated_at: opts.generatedFromUpdatedAt ?? null,
+      packet_count: built.length,
+      documents: built,
+    });
   }
 
   // -- knowledge graph -----------------------------------------------------------
@@ -570,6 +609,14 @@ export class JsonStoreBackend implements StoreBackend {
 
 function docsChunkId(chunk: DocsChunkLike): string {
   return `${chunk.doc_path}#${chunk.anchor}`;
+}
+
+function docToChunk(doc: DocsFtsDoc): DocsChunkLike {
+  return { doc_path: doc.docPath, heading: doc.heading, anchor: doc.anchor ?? "", text: doc.body, line: doc.line ?? 0 };
+}
+
+function chunkToHit(chunk: DocsChunkLike): DocsFtsHit {
+  return { id: docsChunkId(chunk), docPath: chunk.doc_path, heading: chunk.heading, body: chunk.text, anchor: chunk.anchor, line: chunk.line };
 }
 
 function structuralFileToRow(entry: StructuralFileFactLike): FileRow {

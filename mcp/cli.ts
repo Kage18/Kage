@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 import { execFileSync, spawn as spawnProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { daemonDoctor, readDaemonStatus, startDaemon, startViewer, stopDaemon } from "./daemon.js";
+import { openStore } from "./store/manifest.js";
+import { rebuildStore } from "./store/rebuild.js";
+import { detect as detectSqliteStore, sqliteStorePath, SCHEMA_VERSION as SQLITE_STORE_SCHEMA_VERSION } from "./store/sqlite.js";
+import { SCHEMA_VERSION as JSON_STORE_SCHEMA_VERSION } from "./store/json.js";
+import type { BackendKind } from "./store/types.js";
 import {
   SETUP_AGENTS,
   auditClaudeMemStore,
@@ -186,6 +191,8 @@ Keep it healthy:
   kage doctor --project <dir>                health check
   kage repair --project <dir>                fix what doctor finds (indexes, broken packets, wiring)
   kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+  kage store status --project <dir>          which memory-store backend is active, and its size
+  kage store rebuild --project <dir>         regenerate the store from packets + today's indexes
 
 Run 'kage help --all' for every command (lifecycle, CI, benchmarks, daemon, workspace).`;
 
@@ -213,6 +220,8 @@ Usage:
   kage hook status --project <dir> [--json]
   kage hook uninstall --project <dir> [--json]
   kage refresh --project <dir> [--full] [--force] [--json]
+  kage store status --project <dir> [--json]
+  kage store rebuild --project <dir> [--backend json|sqlite] [--json]
   kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
   kage gc --project <dir> [--dry-run] [--force] [--json]
   kage compact --project <dir> [--dry-run] [--json]
@@ -349,6 +358,48 @@ function takeArg(args: string[], name: string): string | undefined {
 
 function listArg(value: string | undefined): string[] {
   return value ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function formatStoreBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// The on-disk artifacts each backend owns -- the sqlite backend is one file;
+// the JSON backend is every derived-cache file mcp/store/json.ts reads and
+// writes (docs/design/MEMORY_STORE.md's Problem-section table, minus the
+// structural/knowledge-graph files M3 still owns directly).
+const JSON_STORE_FILES = [
+  "structural/files.json",
+  "structural/symbols.json",
+  "structural/imports.json",
+  "structural/call-edges.json",
+  "indexes/catalog.json",
+  "indexes/packet-paths.json",
+  "indexes/packet-symbols.json",
+  "indexes/docs-index.json",
+  "indexes/vector-local.json",
+  "graph/entities.json",
+  "graph/edges.json",
+  "graph/episodes.json",
+];
+
+function storeOnDiskBytes(projectDir: string, kind: BackendKind): { files: number; bytes: number } {
+  if (kind === "sqlite") {
+    const path = sqliteStorePath(projectDir);
+    if (!existsSync(path)) return { files: 0, bytes: 0 };
+    return { files: 1, bytes: statSync(path).size };
+  }
+  let files = 0;
+  let bytes = 0;
+  for (const relative of JSON_STORE_FILES) {
+    const path = join(projectDir, ".agent_memory", relative);
+    if (!existsSync(path)) continue;
+    files += 1;
+    bytes += statSync(path).size;
+  }
+  return { files, bytes };
 }
 
 function projectArg(args: string[]): string {
@@ -1210,6 +1261,57 @@ async function main(): Promise<void> {
     console.log(`Next actions:\n${result.next_actions.map((action) => `  - ${action}`).join("\n")}`);
     if (!result.ok) process.exit(2);
     return;
+  }
+
+  if (command === "store") {
+    const action = args[1];
+    const projectDir = projectArg(args);
+
+    if (action === "status") {
+      const { backend, manifest } = openStore(projectDir);
+      const counts = backend.counts();
+      backend.close();
+      const disk = storeOnDiskBytes(projectDir, manifest.active_backend);
+      const schemaVersion = manifest.active_backend === "sqlite" ? SQLITE_STORE_SCHEMA_VERSION : JSON_STORE_SCHEMA_VERSION;
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({ project_dir: projectDir, active_backend: manifest.active_backend, forced_backend: manifest.forced_backend, schema_version: schemaVersion, counts, files: disk.files, bytes: disk.bytes, last_rebuild_at: manifest.last_rebuild_at }, null, 2));
+        return;
+      }
+      console.log(`Store status for ${projectDir}`);
+      console.log(`Active backend: ${manifest.active_backend}${manifest.forced_backend ? ` (forced: ${manifest.forced_backend})` : ""}`);
+      console.log(`Schema version: ${schemaVersion}`);
+      console.log(`On disk: ${disk.files} file(s), ${formatStoreBytes(disk.bytes)}`);
+      console.log(`Last rebuild: ${manifest.last_rebuild_at ?? "never (kage store rebuild has not run)"}`);
+      console.log("Table counts:");
+      for (const [table, count] of Object.entries(counts).sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${table}: ${count}`);
+      return;
+    }
+
+    if (action === "rebuild") {
+      const requestedBackend = takeArg(args, "--backend");
+      if (requestedBackend && requestedBackend !== "json" && requestedBackend !== "sqlite") {
+        console.error(`Unknown --backend "${requestedBackend}" (expected json or sqlite)`);
+        process.exit(1);
+      }
+      // Unlike openStore()'s ambient default (stay on JSON until a prior
+      // rebuild already migrated), `kage store rebuild` IS the migration
+      // step -- it targets the best available backend by default so running
+      // it once is what flips a capable Node over to sqlite going forward
+      // (docs/design/MEMORY_STORE.md's "lazy migration").
+      const forceBackend = (requestedBackend as BackendKind | undefined) ?? (detectSqliteStore().available ? "sqlite" : "json");
+      const result = rebuildStore(projectDir, { forceBackend });
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log(`Rebuilt the ${result.backend} store for ${projectDir}`);
+      console.log(`Regenerated:`);
+      for (const [table, count] of Object.entries(result.counts).sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${table}: ${count}`);
+      console.log(`Rebuilt at: ${result.rebuiltAt}`);
+      return;
+    }
+
+    usage();
   }
 
   if (command === "pr") {

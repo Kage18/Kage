@@ -96,7 +96,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export const SCHEMA_VERSION = 1;
+// v2 (M2, docs/design/MEMORY_STORE.md): docs_fts grows anchor/line columns so
+// the sqlite backend can return line-accurate search hits and reconstruct
+// docs-index.json's chunk shape, the same fields the JSON backend always had.
+export const SCHEMA_VERSION = 2;
 
 export function sqliteStorePath(projectDir: string): string {
   return join(projectDir, ".agent_memory", "store", "kage.sqlite");
@@ -117,7 +120,7 @@ const SCHEMA_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS packet_paths_packet ON packet_paths(packet_id)`,
   `CREATE TABLE IF NOT EXISTS packet_symbols(packet_id TEXT, symbol TEXT, sha256 TEXT, UNIQUE(packet_id, symbol))`,
   `CREATE INDEX IF NOT EXISTS packet_symbols_packet ON packet_symbols(packet_id)`,
-  `CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(id UNINDEXED, doc_path UNINDEXED, heading, body)`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(id UNINDEXED, doc_path UNINDEXED, anchor UNINDEXED, line UNINDEXED, heading, body)`,
   `CREATE TABLE IF NOT EXISTS vectors(packet_id TEXT, term TEXT, weight REAL)`,
   `CREATE INDEX IF NOT EXISTS vectors_packet ON vectors(packet_id)`,
   `CREATE INDEX IF NOT EXISTS vectors_term ON vectors(term)`,
@@ -181,6 +184,11 @@ export class SqliteStoreBackend implements StoreBackend {
     if (fromVersion >= SCHEMA_VERSION) {
       return { fromVersion, toVersion: fromVersion, applied: false };
     }
+    // v1 -> v2 (M2): docs_fts's old shape has no anchor/line columns. FTS5
+    // doesn't support ALTER TABLE ADD COLUMN, so widen it by dropping and
+    // recreating -- always safe per Law 1, this whole store is a disposable
+    // derived cache the next kage refresh / kage store rebuild repopulates.
+    if (fromVersion >= 1 && fromVersion < 2) db.exec("DROP TABLE IF EXISTS docs_fts");
     for (const statement of SCHEMA_STATEMENTS) db.exec(statement);
     db.prepare("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
       String(SCHEMA_VERSION),
@@ -304,7 +312,14 @@ export class SqliteStoreBackend implements StoreBackend {
   upsertDocsFtsDoc(doc: DocsFtsDoc): void {
     const db = this.conn();
     db.prepare("DELETE FROM docs_fts WHERE id = ?").run(doc.id);
-    db.prepare("INSERT INTO docs_fts(id, doc_path, heading, body) VALUES (?, ?, ?, ?)").run(doc.id, doc.docPath, doc.heading, doc.body);
+    db.prepare("INSERT INTO docs_fts(id, doc_path, anchor, line, heading, body) VALUES (?, ?, ?, ?, ?, ?)").run(
+      doc.id,
+      doc.docPath,
+      doc.anchor ?? "",
+      doc.line ?? 0,
+      doc.heading,
+      doc.body,
+    );
   }
 
   queryDocsFts(term: string, scope?: string): DocsFtsHit[] {
@@ -312,10 +327,31 @@ export class SqliteStoreBackend implements StoreBackend {
     if (!escaped) return [];
     const rows = scope
       ? this.conn()
-          .prepare("SELECT id, doc_path, heading, body FROM docs_fts WHERE docs_fts MATCH ? AND doc_path LIKE ?")
+          .prepare("SELECT id, doc_path, anchor, line, heading, body FROM docs_fts WHERE docs_fts MATCH ? AND doc_path LIKE ?")
           .all(escaped, likePrefix(scope))
-      : this.conn().prepare("SELECT id, doc_path, heading, body FROM docs_fts WHERE docs_fts MATCH ?").all(escaped);
+      : this.conn().prepare("SELECT id, doc_path, anchor, line, heading, body FROM docs_fts WHERE docs_fts MATCH ?").all(escaped);
     return rows.map(rowToDocsHit);
+  }
+
+  listDocsFtsDocs(scope?: string): DocsFtsHit[] {
+    const rows = scope
+      ? this.conn().prepare("SELECT id, doc_path, anchor, line, heading, body FROM docs_fts WHERE doc_path LIKE ?").all(likePrefix(scope))
+      : this.conn().prepare("SELECT id, doc_path, anchor, line, heading, body FROM docs_fts").all();
+    return rows.map(rowToDocsHit);
+  }
+
+  replaceDocsFtsDocs(docs: DocsFtsDoc[]): void {
+    const db = this.conn();
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM docs_fts");
+      const stmt = db.prepare("INSERT INTO docs_fts(id, doc_path, anchor, line, heading, body) VALUES (?, ?, ?, ?, ?, ?)");
+      for (const doc of docs) stmt.run(doc.id, doc.docPath, doc.anchor ?? "", doc.line ?? 0, doc.heading, doc.body);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // -- vectors -----------------------------------------------------------------
@@ -340,7 +376,41 @@ export class SqliteStoreBackend implements StoreBackend {
           )
           .all(...terms, likePrefix(scope))
       : this.conn().prepare(`SELECT packet_id, term, weight FROM vectors WHERE term IN (${placeholders})`).all(...terms);
-    return rows.map(rowToVectorCandidate);
+    if (!rows.length) return [];
+    // A document's L2 norm depends on EVERY term it has, not just the ones
+    // that matched the query, so it is computed from the full vectors table
+    // per packetId here rather than carried on upsertVectorChunks's rows.
+    const packetIds = [...new Set(rows.map((row) => String(row.packet_id)))];
+    const normPlaceholders = packetIds.map(() => "?").join(", ");
+    const normRows = this.conn()
+      .prepare(`SELECT packet_id, SUM(weight * weight) AS sumsq FROM vectors WHERE packet_id IN (${normPlaceholders}) GROUP BY packet_id`)
+      .all(...packetIds);
+    const normByPacket = new Map(normRows.map((row) => [String(row.packet_id), Math.sqrt(Number(row.sumsq ?? 0))]));
+    return rows.map((row) => rowToVectorCandidate(row, normByPacket.get(String(row.packet_id)) ?? 0));
+  }
+
+  listVectorPacketIds(): string[] {
+    const rows = this.conn().prepare("SELECT DISTINCT packet_id FROM vectors ORDER BY packet_id").all();
+    return rows.map((row) => String(row.packet_id));
+  }
+
+  // opts.generatedFromUpdatedAt is unused here: sqlite has no single-file
+  // header to carry it in, and this backend's own freshness signal is
+  // listVectorPacketIds(), not a stored timestamp (see StoreBackend's doc).
+  replaceVectorDocuments(documents: Array<{ packetId: string; terms: VectorChunkRow[] }>): void {
+    const db = this.conn();
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM vectors");
+      const stmt = db.prepare("INSERT INTO vectors(packet_id, term, weight) VALUES (?, ?, ?)");
+      for (const document of documents) {
+        for (const term of document.terms) stmt.run(document.packetId, term.term, term.weight);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // -- knowledge graph -----------------------------------------------------------
@@ -435,11 +505,18 @@ function rowToPacket(row: Record<string, unknown>): PacketRow {
 }
 
 function rowToDocsHit(row: Record<string, unknown>): DocsFtsHit {
-  return { id: String(row.id), docPath: String(row.doc_path ?? ""), heading: String(row.heading ?? ""), body: String(row.body ?? "") };
+  return {
+    id: String(row.id),
+    docPath: String(row.doc_path ?? ""),
+    heading: String(row.heading ?? ""),
+    body: String(row.body ?? ""),
+    anchor: String(row.anchor ?? ""),
+    line: Number(row.line ?? 0),
+  };
 }
 
-function rowToVectorCandidate(row: Record<string, unknown>): VectorCandidate {
-  return { packetId: String(row.packet_id), term: String(row.term ?? ""), weight: Number(row.weight ?? 0) };
+function rowToVectorCandidate(row: Record<string, unknown>, norm: number): VectorCandidate {
+  return { packetId: String(row.packet_id), term: String(row.term ?? ""), weight: Number(row.weight ?? 0), norm };
 }
 
 function rowToKgEntity(row: Record<string, unknown>): KgEntityRow {
