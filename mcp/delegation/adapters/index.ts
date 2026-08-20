@@ -23,6 +23,18 @@ const AGENT_RUN_TIMEOUT_MS = 45 * 60_000;
  */
 export const AGENT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"];
 
+/**
+ * Tools a hired REVIEWER may use. review.ts's reviewRun brief tells the reviewer plainly
+ * it is "reviewing another agent's finished run... not writing code yourself" — Write and
+ * Edit are absent here for the same reason AGENT_ALLOWED_TOOLS above grants them: the set
+ * a headless `-p` agent gets is the entire permission surface it has, nothing implicit.
+ * Read/Glob/Grep let it look past what the review brief already excerpted (truncated at
+ * MAX_DIFF_CHARS for a large diff); Bash lets it re-run a command to check a specific
+ * claim rather than trust prose, never to redo the kernel's own mechanical checks — the
+ * brief already tells it not to repeat those.
+ */
+export const REVIEWER_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Bash"];
+
 export const claudeAdapter = (): Adapter => ({
   ...cliAgentAdapter({
     name: "claude",
@@ -86,11 +98,17 @@ export function claudeLiveArgs(input: { sessionId?: string; resumeSessionId?: st
   ];
 }
 
+/** Argv for codex's one-shot spawn, split out so it is unit-testable without spawning
+ * the real CLI — same reasoning as claudeOneShotArgs above. */
+export function codexArgs(brief: string): string[] {
+  return ["exec", "--full-auto", brief];
+}
+
 export const codexAdapter = (): Adapter =>
   cliAgentAdapter({
     name: "codex",
     bin: "codex",
-    args: (brief) => ["exec", "--full-auto", brief],
+    args: (brief) => codexArgs(brief),
     timeoutMs: AGENT_RUN_TIMEOUT_MS,
   });
 
@@ -101,6 +119,63 @@ export function adapterByName(name: string): Adapter {
   if (name === "claude") return claudeAdapter();
   if (name === "codex") return codexAdapter();
   if (name === "stub") return stubAdapter();
+  throw new Error(`Unknown agent: ${name}. One of: ${ADAPTER_NAMES.join(", ")}`);
+}
+
+/**
+ * Argv for a reviewer pass over claude: the same one-shot shape as claudeOneShotArgs,
+ * but REVIEWER_ALLOWED_TOOLS (no Write/Edit) instead of AGENT_ALLOWED_TOOLS, and no
+ * `--permission-mode acceptEdits` — a reviewer has nothing to accept edits FOR. Keeps
+ * claudeOneShotArgs's {sessionId, resumeSessionId} shape even though review.ts's
+ * reviewRun never passes either today (one pass per invocation, no resume) — a future
+ * resumed review then costs nothing to wire.
+ */
+export function claudeReviewerArgs(brief: string, input: { sessionId?: string; resumeSessionId?: string } = {}): string[] {
+  return [
+    ...(input.resumeSessionId ? ["--resume", input.resumeSessionId] : input.sessionId ? ["--session-id", input.sessionId] : []),
+    "-p",
+    brief,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowedTools",
+    REVIEWER_ALLOWED_TOOLS.join(","),
+  ];
+}
+
+export const claudeReviewerAdapter = (): Adapter =>
+  cliAgentAdapter({
+    name: "claude",
+    bin: "claude",
+    args: (brief, input) => claudeReviewerArgs(brief, input),
+    finalMessage: lastTextFromStreamJson,
+    timeoutMs: AGENT_RUN_TIMEOUT_MS,
+  });
+
+/**
+ * Codex has no documented flag in this codebase for a read-only/no-edit review mode —
+ * unlike claude's --allowedTools, --full-auto is codex exec's own approval policy, and
+ * there is no verified equivalent to strip Write/Edit from it short of guessing at an
+ * unconfirmed flag. This reuses codexArgs verbatim rather than invent one: a reviewer
+ * running under codex gets the same edit-capable sandbox a worker does today. Tightening
+ * this is a follow-up once a real codex flag for it is confirmed.
+ */
+export const codexReviewerArgs = codexArgs;
+
+export const codexReviewerAdapter = (): Adapter =>
+  cliAgentAdapter({ name: "codex", bin: "codex", args: (brief) => codexReviewerArgs(brief), timeoutMs: AGENT_RUN_TIMEOUT_MS });
+
+/**
+ * Resolve a REVIEWER adapter for the same agent brand a worker run used (task.agent) —
+ * dispatch.ts's dispatchReviewer calls this so a claude-worked run is reviewed by claude
+ * and a codex-worked one by codex, each in its own restricted review mode above. "stub"
+ * defaults to an approving scripted review; a test wanting a specific verdict constructs
+ * stubAdapter({review: {...}}) directly instead of going through this resolver.
+ */
+export function reviewerAdapterByName(name: string): Adapter {
+  if (name === "claude") return claudeReviewerAdapter();
+  if (name === "codex") return codexReviewerAdapter();
+  if (name === "stub") return stubAdapter({ review: { verdict: "approved" } });
   throw new Error(`Unknown agent: ${name}. One of: ${ADAPTER_NAMES.join(", ")}`);
 }
 

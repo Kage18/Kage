@@ -38,6 +38,20 @@ export interface StubOptions {
      */
     usd?: number;
   };
+  /**
+   * When set, this stub plays a REVIEWER, not a worker: `run()` emits a scripted
+   * kage-review fence (contract.ts's parseReviewFence) instead of any kage-claim/-blocked
+   * fence above, and never touches the worktree — a reviewer judges, it does not write
+   * code (review.ts's own review brief tells a real reviewer agent exactly that). This is
+   * what exercises review.ts's reviewRun / dispatch.ts's dispatchReviewer without a real
+   * coding-agent CLI installed, the same role the `behavior` option above plays for a
+   * worker's dispatch.ts's executeRun / supervisor.ts's superviseRun.
+   */
+  review?: {
+    /** Default "approved" — the common case a test doesn't care to vary. */
+    verdict?: "approved" | "changes_requested";
+    findings?: string[];
+  };
 }
 
 // A minimal stream-json speaker: advance one phase per stdin line it receives, exactly
@@ -93,6 +107,20 @@ export function stubAdapter(options: StubOptions = {}): Adapter {
       // changes nothing about the many tests that rely on the stub finishing instantly.
       const delayMs = Number(process.env.KAGE_STUB_RUN_DELAY_MS ?? 0);
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      if (options.review) {
+        const verdict = options.review.verdict ?? "approved";
+        const findings = options.review.findings ?? [];
+        const finalMessage = [
+          "Reviewed.",
+          "",
+          "```kage-review",
+          JSON.stringify({ verdict, findings }),
+          "```",
+        ].join("\n");
+        log({ kind: "final", message: finalMessage });
+        return { exit_code: 0, final_message: finalMessage };
+      }
 
       const target = join(input.workDir, edit.path);
       mkdirSync(dirname(target), { recursive: true });

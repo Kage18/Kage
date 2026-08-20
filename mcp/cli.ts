@@ -2858,6 +2858,18 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Internal: the body of an automatic reviewer-agent pass over a "ready" run
+  // (review.ts's reviewRun, resolved through dispatch.ts's dispatchReviewer). Spawned
+  // detached by dispatch.ts's dispatchReviewerDetached the moment a review_required run
+  // reaches "ready" — never typed by a human.
+  if (command === "review-run") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const { dispatchReviewer } = await import("./delegation/dispatch.js");
+    await dispatchReviewer(projectArg(args), runId);
+    return;
+  }
+
   // Internal: the body of a supervised ROOM — one held claude session for the whole
   // conversation, spawned detached by the daemon on the first message. Never typed by
   // a human directly (use `kage room` for an interactive terminal session instead).
