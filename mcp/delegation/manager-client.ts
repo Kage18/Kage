@@ -18,6 +18,7 @@ export const MANAGER_ALLOWED_TOOLS = [
   "kage_task",
   "kage_tell",
   "kage_stop",
+  "kage_review_run",
   "kage_merge_run",
   "kage_reject_run",
   "kage_report",

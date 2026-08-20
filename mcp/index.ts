@@ -94,8 +94,9 @@ import { renderClaimCard } from "./delegation/verify.js";
 import { mergeRun, rejectRun } from "./delegation/ratify.js";
 import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
 import { diffBudget } from "./delegation/config.js";
-import { readJudgment, renderJudgment } from "./delegation/manager.js";
+import { readJudgment, renderJudgment, readReview, renderReview, writeReview, type ReviewVerdict } from "./delegation/manager.js";
 import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
+import { notifyManagerOfRunEvent, REVIEWED_EVENT_STATE } from "./delegation/room-supervisor.js";
 import {
   abandonGoal,
   createGoal,
@@ -1305,6 +1306,21 @@ const DELEGATION_TOOLS = [
     },
   },
   {
+    name: "kage_review_run",
+    description:
+      "Record your review verdict on a run's ready claim — the review gate between kernel verification and a merge. Only a run in state 'ready' can be reviewed. approve says the receipt and diff look sound to merge as-is; request_changes says otherwise and needs notes explaining what.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        run_id: { type: "string" },
+        verdict: { type: "string", enum: ["approve", "request_changes"] },
+        notes: { type: "string", description: "Why — required for request_changes, optional for approve." },
+      },
+      required: ["project_dir", "run_id", "verdict"],
+    },
+  },
+  {
     name: "kage_merge_run",
     description:
       "Accept a verified claim: merge its branch and ratify the learnings that rode with it into team memory. Only a run in state 'ready' can be merged.",
@@ -1442,7 +1458,7 @@ async function runDelegationTool(
 ) {
   const projectDir = String(args?.project_dir ?? "");
   const runId = String(args?.run_id ?? "");
-  const needsRun = ["kage_task", "kage_tell", "kage_stop", "kage_merge_run", "kage_reject_run"];
+  const needsRun = ["kage_task", "kage_tell", "kage_stop", "kage_review_run", "kage_merge_run", "kage_reject_run"];
   if (needsRun.includes(name) && !runId) return text(`${name} needs a run_id. Call kage_room_state to see the runs that exist.`);
 
   if (name === "kage_room_state") return text(JSON.stringify(roomState(projectDir), null, 2));
@@ -1626,6 +1642,36 @@ async function runDelegationTool(
   }
   if (name === "kage_stop") {
     return text(renderRunLine(transitionRun(projectDir, runId, "stopped", "manager", "stopped from the room")));
+  }
+  if (name === "kage_review_run") {
+    const verdict = String(args?.verdict ?? "").trim();
+    if (verdict !== "approve" && verdict !== "request_changes") {
+      return text(`kage_review_run needs verdict "approve" or "request_changes", got "${verdict || "(none)"}".`);
+    }
+    const notes = String(args?.notes ?? "").trim();
+    if (verdict === "request_changes" && !notes) {
+      return text("kage_review_run needs notes for a request_changes verdict — what needs another pass.");
+    }
+    let task;
+    try {
+      task = readRun(projectDir, runId);
+    } catch (error) {
+      return text(error instanceof Error ? error.message : String(error));
+    }
+    if (task.state !== "ready") {
+      return text(`Run ${runId} is ${task.state}, not ready. Only a run awaiting merge can be reviewed.`);
+    }
+    if (!readClaim(projectDir, runId)) return text(`Run ${runId} has no claim to review.`);
+    const review = {
+      schema_version: 1 as const,
+      run_id: runId,
+      at: new Date().toISOString(),
+      verdict: verdict as ReviewVerdict,
+      ...(notes ? { notes } : {}),
+    };
+    writeReview(projectDir, review);
+    notifyManagerOfRunEvent(projectDir, runId, { state: REVIEWED_EVENT_STATE, detail: `${verdict}${notes ? `: ${notes}` : ""}` }).catch(() => {});
+    return text(renderReview(review).join("\n"));
   }
   if (name === "kage_merge_run") return text(mergeRun(projectDir, runId).message);
   if (name === "kage_reject_run") return text(rejectRun(projectDir, runId, String(args?.reason ?? "")).message);
