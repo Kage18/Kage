@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { diffBudget } from "./config.js";
 import { type CheckOutcome, type CheckSpec, type ClaimRecord, type TaskRecord, runEvidenceDir } from "./contract.js";
-import { type DiffStats, git, stageAndMeasure } from "./git.js";
+import { currentBranch, type DiffStats, git } from "./git.js";
 import type { ProgressSink } from "./progress.js";
 
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -55,6 +55,56 @@ function runCommandCheck(projectDir: string, runId: string, worktreeDir: string,
   // "unverified" here is the whole honesty contract: absence of proof is never proof.
   const result = exitCode === 0 ? "pass" : NO_ENV_EXIT_CODES.has(exitCode) ? "unverified_no_env" : "fail";
   return { ...check, result, exit_code: exitCode, evidence };
+}
+
+function parseNumstat(stdout: string): DiffStats {
+  if (!stdout) return { files: 0, lines: 0, paths: [] };
+  let lines = 0;
+  const paths: string[] = [];
+  for (const row of stdout.split("\n")) {
+    const [added, removed, path] = row.split("\t");
+    if (!path) continue;
+    paths.push(path);
+    // "-" marks a binary file: it contributes a file but no countable lines.
+    lines += (Number(added) || 0) + (Number(removed) || 0);
+  }
+  return { files: paths.length, lines, paths };
+}
+
+/**
+ * The full diff a run's worktree has produced: committed work since the branch's fork
+ * point from the project's base branch, PLUS whatever is still uncommitted. Runs commit
+ * their work at claim time (worktree.ts's commitWorktree), so by the time `kage reverify`
+ * re-runs this the working tree is clean — a measurement that only ever looked at
+ * uncommitted changes (git.ts's stageAndMeasure, this function's predecessor) read a real
+ * ~1,400-line committed change as "0 file(s), 0 changed line(s)" (see
+ * .agent_memory/runs/budgets-become-a-circuit-breaker-not-a-t-260820-e70a/evidence/diff-size.log).
+ *
+ * `git diff <merge-base>` (no `--cached`, a single ref) compares that commit straight
+ * against the WORKING TREE, which already folds in every committed change since the fork
+ * point AND whatever is staged/unstaged on top, in one pass — no risk of double-counting a
+ * file that has both a committed and an uncommitted edit the way summing two separate
+ * numstats (merge-base..HEAD, then HEAD..working-tree) would.
+ *
+ * This is verifyRun's own data source, and verifyRun is the one function every path that
+ * runs checks (claim-time execution, `kage reverify`, `kage adopt`) calls through — fixing
+ * the measurement here fixes it on all three at once.
+ */
+export function measureDiff(projectDir: string, worktreeDir: string): DiffStats {
+  // Untracked files an agent created are part of its work; staging is what makes them
+  // visible to `git diff` at all (mirrors the old stageAndMeasure's own first step).
+  git(worktreeDir, ["add", "-A"]);
+  const base = currentBranch(projectDir);
+  const mergeBase = git(worktreeDir, ["merge-base", "HEAD", base]);
+  if (mergeBase.ok && mergeBase.stdout) {
+    const diff = git(worktreeDir, ["diff", mergeBase.stdout, "--numstat"]);
+    if (diff.ok) return parseNumstat(diff.stdout);
+  }
+  // No usable merge-base (a sandbox workspace with no real worktree branch, detached
+  // history, or worktreeDir simply not a git repo at all) — fall back to whatever is
+  // staged right now rather than silently reporting zero.
+  const staged = git(worktreeDir, ["diff", "--cached", "--numstat"]);
+  return staged.ok ? parseNumstat(staged.stdout) : { files: 0, lines: 0, paths: [] };
 }
 
 function runDiffCheck(projectDir: string, runId: string, diff: DiffStats): CheckOutcome {
@@ -216,9 +266,7 @@ export function verifyRun(
   claimText: CitationText,
   onProgress?: ProgressSink,
 ): VerificationResult {
-  // Stage first: untracked files an agent created are part of its work, and the diff
-  // measurement must see them.
-  const diff = stageAndMeasure(worktreeDir);
+  const diff = measureDiff(projectDir, worktreeDir);
   const outcomes: CheckOutcome[] = [];
   for (const check of checks) {
     onProgress?.({ kind: "check", label: `verifying: ${check.cmd ?? check.id}` });

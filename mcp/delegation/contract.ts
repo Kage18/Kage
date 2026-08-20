@@ -94,6 +94,16 @@ export interface TaskRecord {
   spend: { usd_est: number; minutes: number };
   /** input+output tokens the agent reported; absent when it reported nothing. */
   tokens_used?: number;
+  /**
+   * Sealed spend per agent CLI session, keyed by agent_session_id. The agent CLI reports
+   * usage CUMULATIVE for the current session on every tick — the latest report for a
+   * session IS that session's true total, never something to add to an earlier report for
+   * the SAME session. A resumed run starts a brand-new session (a fresh agent_session_id)
+   * whose own cumulative usage starts back at zero, so total spend has to be the SUM across
+   * every session this run has ever had, with each session's own entry always holding only
+   * its latest report. See recordSpend.
+   */
+  session_spend?: Record<string, { usd: number; tokens: number }>;
   confidence: RunConfidence;
   /**
    * Who shaped this brief: a manager agent that curated it, or kernel defaults. Recorded
@@ -552,18 +562,37 @@ export function displayElapsedMs(task: Pick<TaskRecord, "state_history" | "creat
  * the claim assembly drifted the last time each path hand-rolled the same write.
  * Never estimates: absent usage leaves spend untouched rather than inventing zeros
  * that read as "measured free".
+ *
+ * `usage` is treated as this SESSION's own cumulative total so far — sessionId (falling
+ * back to the run's currently recorded agent_session_id when the caller does not have a
+ * fresher one yet) is the ledger key, and each call REPLACES that session's entry rather
+ * than adding to it. That is what makes repeated reports for the same session safe: the
+ * agent CLI emits a cumulative-for-this-session figure on every tick, so summing tick over
+ * tick would double (triple, ...) count a single session's own cost. Total spend is the
+ * SUM across every session this run has ever had — a resumed run starts a fresh session
+ * whose own usage starts at zero, but its prior session's sealed entry stays in the ledger
+ * untouched, so `kage resume-run` can never make total spend go DOWN (reproduced live:
+ * $30.96 before a stop read as $2.95 after resuming — the fresh session's own report
+ * silently overwrote the whole run's total instead of adding to it).
  */
 export function recordSpend(
   projectDir: string,
   runId: string,
   usage: { usd: number; tokens: number } | undefined,
+  sessionId?: string,
 ): void {
   if (!usage || (usage.usd <= 0 && usage.tokens <= 0)) return;
   const task = readRun(projectDir, runId);
+  const key = sessionId ?? task.agent_session_id ?? "unknown";
+  const sealed = { ...(task.session_spend ?? {}) };
+  sealed[key] = { usd: Math.round(usage.usd * 10_000) / 10_000, tokens: usage.tokens };
+  const totalUsd = Object.values(sealed).reduce((sum, entry) => sum + entry.usd, 0);
+  const totalTokens = Object.values(sealed).reduce((sum, entry) => sum + entry.tokens, 0);
   const minutes = runningMinutesElapsed(task.state_history);
   patchRun(projectDir, runId, {
-    spend: { usd_est: Math.round(usage.usd * 10_000) / 10_000, minutes: Math.round(minutes * 10) / 10 },
-    tokens_used: usage.tokens,
+    session_spend: sealed,
+    spend: { usd_est: Math.round(totalUsd * 10_000) / 10_000, minutes: Math.round(minutes * 10) / 10 },
+    tokens_used: totalTokens,
   });
 }
 

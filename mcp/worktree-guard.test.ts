@@ -26,9 +26,11 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: "test@example.com",
 };
 
-// A project with a real `mcp/dist` directory — the exact protected path — plus an
-// isolated "worktree" subdirectory standing in for a real `git worktree add` checkout,
-// so tests never need an actual second checkout to exercise the guard.
+// A project with a real `mcp/dist` directory — the exact protected path — plus a real
+// `git worktree add` checkout of its own branch. A real worktree (not a bare
+// subdirectory) is what content-based attribution needs: it diffs the worktree's branch
+// against the project's own branch to find the run's own changed source, so the fixture
+// has to have real branch history for that to mean anything.
 function projectWithDistAndWorktree(): { project: string; worktree: string } {
   const project = tempProject();
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: project, stdio: "ignore" });
@@ -39,7 +41,7 @@ function projectWithDistAndWorktree(): { project: string; worktree: string } {
   execFileSync("git", ["add", "-A"], { cwd: project, stdio: "ignore", env: GIT_ENV });
   execFileSync("git", ["commit", "-m", "seed"], { cwd: project, stdio: "ignore", env: GIT_ENV });
   const worktree = join(project, "isolated-worktree");
-  mkdirSync(worktree, { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "kage/run-1", worktree, "HEAD"], { cwd: project, stdio: "ignore", env: GIT_ENV });
   writeFileSync(join(worktree, "src.ts"), "export const x = 1;\n", "utf8");
   return { project, worktree };
 }
@@ -51,35 +53,61 @@ test("guardedPaths: empty for a sandboxed run (worktree IS project), names the p
   assert.deepEqual(guardedPaths(p2, worktree), [join(p2, "mcp", "dist")]);
 });
 
-test("detectWorktreeEscape is silent when nothing changed, and fails loudly on both a new AND a modified file", () => {
+test("detectWorktreeEscape is silent when nothing changed, and fails loudly when the escape actually carries this run's own code", () => {
   const { project, worktree } = projectWithDistAndWorktree();
   const before = snapshotGuardedPaths(project, worktree);
   assert.equal(detectWorktreeEscape(project, "run-1", worktree, before), null, "an untouched dist must never be reported as an escape");
 
+  // The run's own worktree writes distinctive symbols nowhere in the project's committed
+  // source — the markers content-attribution has to find.
+  writeFileSync(
+    join(worktree, "feature.ts"),
+    "export function totallyDistinctiveLeakMarkerFn() {\n  return anotherUniqueMarkerToken;\n}\n",
+    "utf8",
+  );
+
   // The exact shape of the real incident: something wrote into (and, separately,
   // overwrote a file already in) the PROJECT's dist while a DIFFERENT worktree was
-  // supposedly being verified.
-  writeFileSync(join(project, "mcp", "dist", "unreviewed.js"), "// escaped\n", "utf8");
+  // supposedly being verified — and this time the leaked content actually IS this run's
+  // own code, not just coincidental drift.
+  writeFileSync(
+    join(project, "mcp", "dist", "unreviewed.js"),
+    "function totallyDistinctiveLeakMarkerFn(){return anotherUniqueMarkerToken}\n",
+    "utf8",
+  );
   execFileSync("sleep", ["0.05"]); // mtime resolution can be coarse on some filesystems
-  writeFileSync(join(project, "mcp", "dist", "cli.js"), "// recompiled with unreviewed changes\n", "utf8");
+  writeFileSync(
+    join(project, "mcp", "dist", "cli.js"),
+    "// recompiled with unreviewed changes: totallyDistinctiveLeakMarkerFn / anotherUniqueMarkerToken\n",
+    "utf8",
+  );
 
   const finding = detectWorktreeEscape(project, "run-1", worktree, before);
-  assert.ok(finding, "an escape into the project's own dist must never pass silently");
+  assert.ok(finding, "an escape carrying this run's own code must never pass silently");
   assert.equal(finding!.result, "fail");
   assert.equal(finding!.id, "worktree-boundary");
   const log = readFileSync(join(project, finding!.evidence!), "utf8");
   assert.match(log, /unreviewed\.js/, "a brand-new file must be named");
   assert.match(log, /cli\.js/, "an overwritten existing file must be named too, not just additions");
+  assert.match(log, /totallyDistinctiveLeakMarkerFn/, "the traceable marker itself must be named in the evidence");
 });
 
 // --- integration: the escape check rides inside the real check pipeline ------------
 
-test("runAllChecks reports the run as NOT passed when its own declared check escapes its worktree", () => {
+test("runAllChecks reports the run as NOT passed when its own declared check leaks the run's own code outside its worktree", () => {
   const { project, worktree } = projectWithDistAndWorktree();
+  writeFileSync(
+    join(worktree, "feature.ts"),
+    "export function totallyDistinctiveLeakMarkerFn() {\n  return anotherUniqueMarkerToken;\n}\n",
+    "utf8",
+  );
   // A declared check whose command reaches OUTSIDE its cwd via an absolute path — the
   // exact mechanism this run's own operator found: a relative --prefix/path argument
-  // that resolves against the wrong directory (or, as reproduced here, an explicit one).
-  const escapingCmd = `node -e "require('fs').writeFileSync('${join(project, "mcp", "dist", "sneaked-in.js")}', '// bad')"`;
+  // that resolves against the wrong directory (or, as reproduced here, an explicit one) —
+  // and writes this run's own distinctive code there, not just arbitrary bytes.
+  const escapingCmd =
+    `node -e "require('fs').writeFileSync('${join(project, "mcp", "dist", "sneaked-in.js")}', ` +
+    `'function totallyDistinctiveLeakMarkerFn(){return anotherUniqueMarkerToken}')"`;
 
   const result = runAllChecks(
     project,
@@ -89,10 +117,28 @@ test("runAllChecks reports the run as NOT passed when its own declared check esc
     { cited: "work delivered", prose: "" },
   );
 
-  assert.equal(result.passed, false, "a run whose check escaped its worktree must never read as passed");
+  assert.equal(result.passed, false, "a run whose check leaked its own code outside its worktree must never read as passed");
   const boundary = result.checks.find((check) => check.id === "worktree-boundary");
   assert.ok(boundary, "the escape must surface as its own named check, not a silent failure elsewhere");
   assert.equal(boundary!.result, "fail");
+});
+
+test("runAllChecks does NOT flag drift in the project's dist that carries none of the run's own code", () => {
+  const { project, worktree } = projectWithDistAndWorktree();
+  // A declared check that touches the project's OWN dist, but with content that has
+  // nothing to do with the run's worktree — the operator-rebuild shape: real drift, zero
+  // traceable content. Must never be confused with an actual leak.
+  const rebuildCmd = `node -e "require('fs').writeFileSync('${join(project, "mcp", "dist", "cli.js")}', '// rebuilt from main only')"`;
+
+  const result = runAllChecks(
+    project,
+    "run-rebuild",
+    worktree,
+    [{ id: "tests", kind: "command", cmd: rebuildCmd, expect: "exit code 0" }],
+    { cited: "work delivered", prose: "" },
+  );
+
+  assert.equal(result.checks.some((check) => check.id === "worktree-boundary"), false, "drift with no traceable content must not be reported as an escape");
 });
 
 test("runAllChecks stays clean (no worktree-boundary entry at all) when nothing escapes", () => {
