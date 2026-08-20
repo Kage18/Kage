@@ -12,7 +12,7 @@
 export const APP_CLIENT = `"use strict";
 var TOKEN = "__KAGE_TOKEN__";
 var state = {
-  runs: [], goals: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
+  runs: [], goals: [], view: "room", roomMode: "chat", selected: null, selectedGoal: null, detail: null, tab: "follow", connected: false,
   room: { turns: [], busy: false, live: false, activity_at: null, has_transcript: false }, transcript: null, roomStreaming: [],
   projects: [], projectDir: "", installedAgents: [],
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
@@ -436,12 +436,14 @@ function abandonGoalClick(goal) {
   api("/goals/" + goal.id + "/abandon", { method: "POST" }).then(function (out) {
     if (!out.ok) { showError(out.error || "could not abandon the goal"); return; }
     flash("goal abandoned");
+    closeGoalDetail();
     refresh();
   });
 }
 function goalCard(goal) {
   var card = h("div", "card goal-card");
   card.id = "goal-" + goal.id;
+  card.tabIndex = 0;
   var head = h("div", "ghead");
   head.appendChild(h("div", "gt", goal.intent));
   head.appendChild(h("span", "chip state-" + goal.state, goal.state));
@@ -462,7 +464,7 @@ function goalCard(goal) {
       var found = state.runs.filter(function (r) { return r.id === runId; })[0];
       var chip = h("span", "gwchip " + tone[1], tone[0]);
       chip.title = found ? runTitle(found) : runId;
-      if (found) chip.onclick = function () { selectRun(runId); };
+      if (found) chip.onclick = function (ev) { ev.stopPropagation(); selectRun(runId); };
       row.appendChild(chip);
     });
     card.appendChild(row);
@@ -472,10 +474,99 @@ function goalCard(goal) {
   var spend = goalSpendLabel(goal);
   if (spend) foot.appendChild(h("span", "atom", spend));
   var abandon = h("button", "btn danger sm", "Abandon");
-  abandon.onclick = function () { abandonGoalClick(goal); };
+  abandon.onclick = function (ev) { ev.stopPropagation(); abandonGoalClick(goal); };
   foot.appendChild(abandon);
   card.appendChild(foot);
+  // The card itself is the whole goal surface's entry point (finding 1): title, state,
+  // autonomy, wave dots and spend are all summary — reading the full intent, what
+  // autonomy actually means, and each wave's runs by name needs the detail view below.
+  card.onclick = function () { openGoalDetail(goal.id); };
+  card.onkeydown = function (ev) {
+    if (ev.target !== card) return;
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openGoalDetail(goal.id); }
+  };
   return card;
+}
+// --- goal detail: the goal card's ENTIRE surface used to be the card itself — no
+// click did anything, wave dots were unlabeled, "recommend" was unexplained, and a
+// long intent just truncated with no way to read the rest. This overlay (same pattern
+// as the memory packet overlay) is read-and-navigate only: every mutation it offers
+// (Abandon) already existed on the card, just relocated here with its own confirm.
+function autonomyExplain(goal) {
+  return goal.autonomy === "merge"
+    ? "Auto-merge: once a run in this goal passes every check, it lands and ratifies what it learned without waiting for you."
+    : "Recommend: once a run in this goal passes every check, it waits in Ready for you to review and merge yourself.";
+}
+function goalRunRow(runId) {
+  var run = state.runs.filter(function (r) { return r.id === runId; })[0];
+  var row = h("div", "gd-run-row");
+  if (!run) {
+    row.appendChild(h("span", "gd-run-name dim", runId));
+    row.appendChild(h("span", "atom dim", "not found"));
+    return row;
+  }
+  row.appendChild(h("span", "gd-run-name", displayName(run)));
+  var atoms = h("div", "qatoms");
+  var g = glyphFor(run);
+  var stateAtom = h("span", "atom statedot");
+  var dot = h("i", "dot");
+  dot.style.background = STATE_DOT_COLOR[g[1]] || "var(--text3)";
+  stateAtom.appendChild(dot);
+  stateAtom.appendChild(document.createTextNode(run.display_state));
+  atoms.appendChild(stateAtom);
+  var verdict = verdictChipFor(run);
+  if (verdict) atoms.appendChild(verdictChipEl(verdict));
+  row.appendChild(atoms);
+  row.onclick = function () { closeGoalDetail(); openRun(run.id); };
+  row.tabIndex = 0;
+  row.onkeydown = function (ev) {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); closeGoalDetail(); openRun(run.id); }
+  };
+  return row;
+}
+function renderGoalDetail() {
+  var goal = (state.goals || []).filter(function (g) { return g.id === state.selectedGoal; })[0];
+  if (!goal) { closeGoalDetail(); return; }
+  document.getElementById("goal-title").textContent = goal.intent;
+  var body = document.getElementById("goal-body");
+  body.textContent = "";
+
+  var meta = h("div", "chips gd-meta");
+  meta.appendChild(h("span", "chip state-" + goal.state, goal.state));
+  meta.appendChild(h("span", "chip autonomy-" + goal.autonomy, goal.autonomy === "merge" ? "auto-merge" : "recommend"));
+  body.appendChild(meta);
+  body.appendChild(h("p", "gd-autonomy", autonomyExplain(goal)));
+
+  var waves = goal.plan.waves || [];
+  if (!waves.length) {
+    body.appendChild(h("div", "empty", "No plan yet — the manager has not broken this goal into waves."));
+  }
+  waves.forEach(function (wave, idx) {
+    var block = h("div", "gd-wave-block");
+    block.appendChild(h("div", "seclabel-sm", "Wave " + (idx + 1) + " of " + waves.length));
+    if (!wave.run_ids.length) block.appendChild(h("div", "empty", "no runs yet"));
+    wave.run_ids.forEach(function (runId) { block.appendChild(goalRunRow(runId)); });
+    body.appendChild(block);
+  });
+
+  var foot = h("div", "gd-foot");
+  var spend = goalSpendLabel(goal);
+  foot.appendChild(h("span", "atom", spend || "no spend yet"));
+  if (goal.state === "planning" || goal.state === "executing") {
+    var abandon = h("button", "btn danger sm", "Abandon");
+    abandon.onclick = function () { abandonGoalClick(goal); };
+    foot.appendChild(abandon);
+  }
+  body.appendChild(foot);
+}
+function openGoalDetail(goalId) {
+  state.selectedGoal = goalId;
+  renderGoalDetail();
+  document.getElementById("goal-overlay").classList.add("on");
+}
+function closeGoalDetail() {
+  document.getElementById("goal-overlay").classList.remove("on");
+  state.selectedGoal = null;
 }
 function goalDoneRow(goal) {
   var row = h("div", "wrow goal-done");
@@ -496,17 +587,6 @@ function renderGoalCards() {
   wrap.textContent = "";
   var active = (state.goals || []).filter(function (g) { return g.state === "planning" || g.state === "executing"; });
   active.forEach(function (goal) { wrap.appendChild(goalCard(goal)); });
-}
-// The run detail's goal chip lands here: switch out of Board (goal cards only live
-// in the List layout, same footprint as the handover banner) and flash the card so
-// the click actually reads as "landed", not just a silent scroll.
-function jumpToGoalCard(goalId) {
-  if (state.workLayout === "board") setWorkLayout("list");
-  var el = document.getElementById("goal-" + goalId);
-  if (!el) return;
-  el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  el.classList.add("flash-hi");
-  setTimeout(function () { el.classList.remove("flash-hi"); }, 900);
 }
 
 // --- room: the conversation. askManager's tool names arrive as "mcp__kage__kage_dispatch";
@@ -597,6 +677,17 @@ function renderLiveRail() {
     more.onclick = function () { setView("work"); };
     rail.appendChild(more);
   }
+  // The goal detail's other door in (finding 1: "reachable from the board and Room") —
+  // an active goal you started from the Room composer (⌥⏎) stays reachable from the
+  // Room itself, not just from the Work list where its card lives.
+  var activeGoals = (state.goals || []).filter(function (g) { return g.state === "planning" || g.state === "executing"; });
+  activeGoals.forEach(function (goal) {
+    var row = h("div", "liverow");
+    row.appendChild(h("span", "la", "goal"));
+    row.appendChild(h("span", "li", goal.intent));
+    row.onclick = function () { openGoalDetail(goal.id); };
+    rail.appendChild(row);
+  });
 }
 
 // The typing indicator is the one thing an in-flight SSE delta is allowed to touch
@@ -1807,6 +1898,91 @@ function jumpToDiffFile(path) {
 // Receipt/Diff/Brief/Raw tabs stay for deep inspection; this panel is what a glance
 // needs without switching tabs.
 var FINISHED_RECEIPT_STATES = ["ready", "merged", "failed"];
+
+// --- what-now (finding 6): one line under the state chips naming the next move for
+// every terminal-or-stuck state. Driven only by fields the API already serves
+// (display_state, state_history notes, branch_landed, worktree_adoptable, the claim's
+// own checks) — never a new guess layered on top of the kernel's own words.
+function lastNoteFor(run, matchState) {
+  var history = run.state_history || [];
+  for (var i = history.length - 1; i >= 0; i--) {
+    if (!matchState || history[i].state === matchState) return history[i].note || "";
+  }
+  return "";
+}
+function failingCheckLabel(claim) {
+  if (!claim || !claim.checks) return null;
+  var failing = claim.checks.filter(function (c) { return c.result === "fail"; });
+  if (!failing.length) return null;
+  return failing.map(function (c) { return c.id; }).join(", ");
+}
+function whatNowLine(run, d) {
+  var s = run.display_state;
+  if (run.branch_landed && (s === "stopped" || s === "failed")) {
+    return "this run's work is already on " + shortBranch(run.branch) + " — Close as landed keeps the record honest without merging again.";
+  }
+  if (s === "stopped") {
+    var note = lastNoteFor(run, "stopped") || "a budget or time cap was reached";
+    return "stopped by the kernel: " + note + ". Resume, take over, or reject.";
+  }
+  if (s === "failed") {
+    if (run.worktree_adoptable) {
+      return "the agent's process is gone, but its worktree still holds real work. Adopt it to verify what it left behind.";
+    }
+    if (d && d.claim) {
+      var failing = failingCheckLabel(d.claim);
+      return "verification failed: " + (failing || "a check did not pass") + ". Steer a fix, or reject.";
+    }
+    return null;
+  }
+  if (s === "ready") {
+    return "verified — review the receipt and merge.";
+  }
+  return null;
+}
+
+// --- resume (finding 2): which budget cap tripped, read from the kernel's own stop
+// note text — WHICH cap only; the prefilled number always comes from the run's own
+// live spend/budgets, never re-parsed out of the note's prose.
+function parseCapFromStopNote(note) {
+  if (!note) return null;
+  if (/exceeded the \\$/.test(note)) return "usd";
+  if (/exceeded the [\\d.]+ min budget/.test(note)) return "minutes";
+  return null;
+}
+function suggestedUsdRaise(run) {
+  return Math.max(run.spend.usd_est + 2, run.budgets.usd * 2);
+}
+function suggestedMinutesRaise(run) {
+  return Math.max(Math.ceil(run.spend.minutes + 10), run.budgets.minutes * 2);
+}
+function resumeRunClick(run) {
+  var cap = parseCapFromStopNote(lastNoteFor(run, "stopped"));
+  if (cap === "usd") {
+    var suggestedUsd = suggestedUsdRaise(run);
+    var val = window.prompt(
+      "Resume " + run.id + " with a higher usd budget (stopped at $" + run.spend.usd_est.toFixed(2) + " against $" + run.budgets.usd.toFixed(2) + "):",
+      suggestedUsd.toFixed(2));
+    if (val === null) return;
+    var n = Number(val);
+    if (!Number.isFinite(n)) { showError("enter a number"); return; }
+    actOnRun(run.id, "resume-run", { budget_usd: n }, "Resuming…", "resumed");
+  } else if (cap === "minutes") {
+    var suggestedMin = suggestedMinutesRaise(run);
+    var valM = window.prompt(
+      "Resume " + run.id + " with a higher minutes budget (current " + run.budgets.minutes + "):",
+      String(suggestedMin));
+    if (valM === null) return;
+    var nm = Number(valM);
+    if (!Number.isFinite(nm)) { showError("enter a number"); return; }
+    actOnRun(run.id, "resume-run", { budget_minutes: nm }, "Resuming…", "resumed");
+  } else {
+    // Unrecognized note (e.g. a stall) — plain resume, no prefill, matches
+    // resumeStoppedRun's own unconditional-resume behavior for a stalled run.
+    actOnRun(run.id, "resume-run", {}, "Resuming…", "resumed");
+  }
+}
+
 function panelSection(panel, title) {
   var sec = h("div", "pnl-sec");
   sec.appendChild(h("div", "seclabel-sm", title));
@@ -1868,6 +2044,25 @@ function renderDetailPanel(panel, d, run) {
     filesSec.appendChild(tree);
   }
 }
+// Finding 5: blankness on the Receipt tab used to be a dead end for a stopped run —
+// it stopped before an agent ever wrote a claim, so "no claim yet" read as "still
+// coming" when nothing is coming without a human acting. Follows the same emptyBlock()
+// teaching pattern the rest of the app uses, with the two actions that actually apply.
+function renderClaimlessStoppedReceipt(body, run) {
+  body.appendChild(emptyBlock("No claim exists", "The run stopped before reporting. Resume it to continue, or Reject to close.", null));
+  var receiptActs = h("div", "empty-actions");
+  var receiptResume = h("button", "btn primary sm", "Resume");
+  receiptResume.onclick = function () { resumeRunClick(run); };
+  receiptActs.appendChild(receiptResume);
+  var receiptReject = h("button", "btn danger sm", "Reject");
+  receiptReject.onclick = function () {
+    var reason = window.prompt("Why? The reason is kept as memory — the next brief carries it.");
+    if (!reason) return;
+    actOnRun(run.id, "reject", { reason: reason }, "Rejecting…", "rejected");
+  };
+  receiptActs.appendChild(receiptReject);
+  body.appendChild(receiptActs);
+}
 function renderDetail() {
   var el = document.getElementById("run-detail");
   el.textContent = "";
@@ -1928,11 +2123,13 @@ function renderDetail() {
   var ownerGoal = run.goal_id ? (state.goals || []).filter(function (g) { return g.id === run.goal_id; })[0] : null;
   if (ownerGoal) {
     var goalChip = h("span", "chip goal-chip", "goal: " + ownerGoal.intent);
-    goalChip.title = "jump to the goal card";
-    goalChip.onclick = function () { jumpToGoalCard(ownerGoal.id); };
+    goalChip.title = "open the goal — reachable from Board too, unlike the list-only card";
+    goalChip.onclick = function () { openGoalDetail(ownerGoal.id); };
     chips.appendChild(goalChip);
   }
   head.appendChild(chips);
+  var whatNow = whatNowLine(run, d);
+  if (whatNow) head.appendChild(h("div", "whatnow", whatNow));
   var tabs = h("div", "tabs");
   [["follow", "Follow"], ["queue", "Queue"], ["receipt", "Receipt"], ["diff", "Diff"], ["brief", "Brief"], ["raw", "Raw"]].forEach(function (t) {
     var b = h("button", "tab" + (state.tab === t[0] ? " on" : ""), t[1]);
@@ -1951,6 +2148,7 @@ function renderDetail() {
     // for a run whose claim.json could not be parsed.
     if (d.claim) renderReceipt(body, d.claim, run, d.verdict, d.taught);
     else if (d.receipt) body.appendChild(h("div", "rawpane", d.receipt));
+    else if (run.display_state === "stopped") renderClaimlessStoppedReceipt(body, run);
     else body.appendChild(h("div", "empty", "No claim yet — the receipt appears when the run finishes."));
   } else if (state.tab === "brief") {
     var briefPane = h("div", "rawpane", d.brief || "no brief recorded");
@@ -2073,6 +2271,39 @@ function renderDetail() {
     if (pendingLabel) interrupt.disabled = true;
     interrupt.onclick = function () { actOnRun(run.id, "interrupt", null, "Interrupting…", "interrupted"); };
     bar.appendChild(interrupt);
+  }
+  if (run.display_state === "stopped") {
+    // Finding 2: a stopped run used to offer Take Over and Reject only — neither can
+    // actually get the SAME run moving again. Resume reuses the exact recovery route
+    // (resumeStoppedRun) and prefills the raise for whichever cap the kernel's own
+    // stop note names.
+    var resume = h("button", "btn primary", pendingLabel === "Resuming…" ? pendingLabel : "Resume");
+    if (pendingLabel) resume.disabled = true;
+    resume.onclick = function () { resumeRunClick(run); };
+    bar.appendChild(resume);
+  }
+  if (run.branch_landed && (run.display_state === "stopped" || run.display_state === "failed")) {
+    // Finding 3: this run's own branch is already an ancestor of HEAD — landed some
+    // other way (here, by hand under the bootstrap exception) — but the record itself
+    // never learned. Closing it as landed is the existing reject transition, just
+    // with an honest note, never a new state.
+    var closeLanded = h("button", "btn", pendingLabel === "Closing…" ? pendingLabel : "Close as landed");
+    closeLanded.title = "This run's work is already on " + run.branch + " — closes the record without merging it again.";
+    if (pendingLabel) closeLanded.disabled = true;
+    closeLanded.onclick = function () {
+      actOnRun(run.id, "reject", { reason: "closed: work already landed on " + run.branch }, "Closing…", "rejected");
+    };
+    bar.appendChild(closeLanded);
+  }
+  if (run.display_state === "failed" && run.worktree_adoptable) {
+    // Finding 4: an orphan-shaped failed run (agent process gone, worktree still
+    // holds real changes) is exactly what "kage adopt" recovers — this calls the
+    // same POST /runs/:id/adopt route the CLI's "kage adopt" uses.
+    var adopt = h("button", "btn primary", pendingLabel === "Adopting…" ? pendingLabel : "Adopt");
+    adopt.title = "Verify the work it left behind — no agent claim, Kage's own checks only.";
+    if (pendingLabel) adopt.disabled = true;
+    adopt.onclick = function () { actOnRun(run.id, "adopt", null, "Adopting…", "adopted"); };
+    bar.appendChild(adopt);
   }
   if (["running", "blocked", "stopped", "failed"].indexOf(run.display_state) >= 0 && !state.runTerminalActive) {
     var takeOverBtn = h("button", "btn", "Take Over");
@@ -2650,7 +2881,10 @@ function queueOp(runId, body) {
 }
 function renderQueue(body, runId, steers) {
   if (steers === undefined) { body.appendChild(h("div", "empty", "loading queue…")); return; }
-  if (!steers.length) { body.appendChild(h("div", "empty", "No steers yet — anything sent or queued from the composer appears here.")); return; }
+  if (!steers.length) {
+    body.appendChild(emptyBlock("Nothing queued yet", "Messages you queue with cmd-enter wait here and deliver at the agent's next pause.", null));
+    return;
+  }
   var queuedIds = steers.filter(function (s) { return s.status === "queued"; }).map(function (s) { return s.id; });
   steers.forEach(function (record) {
     var delivered = record.status === "delivered";
@@ -3170,6 +3404,10 @@ document.getElementById("mem-search").oninput = function () { renderMemory(); };
 document.getElementById("packet-close").onclick = function () { document.getElementById("packet-overlay").classList.remove("on"); };
 document.getElementById("packet-overlay").onclick = function (ev) {
   if (ev.target === document.getElementById("packet-overlay")) document.getElementById("packet-overlay").classList.remove("on");
+};
+document.getElementById("goal-close").onclick = function () { closeGoalDetail(); };
+document.getElementById("goal-overlay").onclick = function (ev) {
+  if (ev.target === document.getElementById("goal-overlay")) closeGoalDetail();
 };
 // The rail is persistent by default but not compulsory — a narrow window or a single
 // project makes it dead weight, and the preference outlives the session.

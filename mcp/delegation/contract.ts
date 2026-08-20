@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 // says — reproduced live: a run stamped $2/30m by a freshly restarted daemon while
 // config.json said usd 40 / minutes 240, because createRun never consulted it at all.
 import { configuredBudgets } from "./config.js";
+import { git } from "./git.js";
 
 export const RUN_SCHEMA_VERSION = 1;
 
@@ -749,6 +750,32 @@ export function displayState(task: TaskRecord): DisplayState {
   if (liveState(task).stale) return "dropped";
   if (isOrphaned(task)) return "orphaned";
   return task.state;
+}
+
+// Keyed by `${branch}@${headSha}` so the cache invalidates itself the instant HEAD
+// moves (a merge, most of all) instead of ever needing an explicit clear — cheap for
+// the common case of listing many stopped/failed runs against the same HEAD in one
+// serve, cold only once per HEAD per branch.
+const branchLandedCache = new Map<string, boolean>();
+
+/**
+ * Whether a stopped/failed run's own branch is already an ancestor of the project's
+ * current HEAD — the zombie-record shape: work landed by hand (the bootstrap
+ * exception) or by some other path, but the run record itself never learned and sits
+ * stopped/failed forever with no way to say so. Cheap (`git merge-base --is-ancestor`
+ * is a graph walk, not a diff) and side-effect-free, so callers can check it on every
+ * serve without measuring it.
+ */
+export function isBranchLanded(projectDir: string, branch: string): boolean {
+  if (!branch) return false;
+  const head = git(projectDir, ["rev-parse", "HEAD"]);
+  if (!head.ok || !head.stdout) return false;
+  const key = `${branch}@${head.stdout}`;
+  const cached = branchLandedCache.get(key);
+  if (cached !== undefined) return cached;
+  const landed = git(projectDir, ["merge-base", "--is-ancestor", branch, "HEAD"]).ok;
+  branchLandedCache.set(key, landed);
+  return landed;
 }
 
 /** Who owns the next move — the question a board's columns should answer. */

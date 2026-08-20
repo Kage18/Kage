@@ -284,6 +284,23 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     padding:13px 20px; border-top:1px solid var(--line); }
   .packet .pf-label { font-size:12px; color:var(--text3); margin-right:2px; }
   .packet .pfoot .msg { font-size:11.5px; color:var(--text3); margin-left:auto; }
+
+  /* goal detail overlay — read-and-navigate: full intent, autonomy in words, each
+     wave's runs, spend, and the relocated Abandon. Overrides the packet body's mono
+     pre-wrap (built for memory text) with the same prose/row register the run detail
+     already uses. */
+  #goal-body { font-family:var(--sans); white-space:normal; }
+  .gd-meta { margin-bottom:10px; }
+  .gd-autonomy { margin:0 0 18px; color:var(--text2); }
+  .gd-wave-block { margin-bottom:16px; }
+  .gd-run-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:8px 10px; margin:0 -10px; border-radius:var(--r-panel); cursor:pointer; }
+  .gd-run-row:hover { background:var(--surface2); }
+  .gd-run-name { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gd-foot { display:flex; align-items:center; gap:10px; margin-top:6px;
+    padding-top:14px; border-top:1px solid var(--line2); }
+  .gd-foot .atom { margin-right:auto; font-family:var(--mono); }
+
   .view.on { display:flex; flex-direction:column; }
 
   .status { height:28px; display:flex; align-items:center; gap:14px; padding:0 14px;
@@ -301,6 +318,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .empty kbd { font-family:var(--mono); font-size:10.5px; border:1px solid var(--line);
     border-radius:var(--r-control); padding:1px 5px; color:var(--text2); background:var(--bg); }
   .empty .kbd { margin:0 3px; }
+  .empty-actions { display:flex; gap:8px; justify-content:center; margin-top:14px; }
   .kbd { font-family:var(--mono); font-size:10px; border:1px solid var(--line); border-bottom-width:2px;
     border-radius:var(--r-control); padding:1px 6px; color:var(--text2); background:var(--surface); }
 
@@ -506,7 +524,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .hatom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
 
   /* goal cards — a plan of waves, sitting above the triaged list itself. */
-  .list .goal-card { margin:8px 10px 14px; padding:12px 14px; }
+  .list .goal-card { margin:8px 10px 14px; padding:12px 14px; cursor:pointer; }
   .ghead { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
   .ghead .gt { font-size:13.5px; font-weight:600; flex:1; min-width:0; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; }
@@ -521,8 +539,6 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .gfoot { display:flex; align-items:center; gap:10px; margin-top:8px; }
   .gfoot .atom { margin-right:auto; }
   .goal-done { opacity:.65; }
-  @keyframes flashhi { 0% { background:color-mix(in srgb, var(--jade) 22%, var(--surface)); } 100% { background:var(--surface); } }
-  .flash-hi { animation:flashhi .9s ease; }
 
   /* ---- the triaged list + detail split ---- */
   .runs { display:grid; grid-template-columns:340px 1fr; flex:1; min-height:0; }
@@ -577,6 +593,10 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .chip.state-abandoned { color:var(--crimson); border-color:color-mix(in srgb, var(--crimson) 40%, var(--line)); }
   .chip.goal-chip { cursor:pointer; }
   .chip.goal-chip:hover { color:var(--text); }
+  /* The what-now line (finding 6): one sentence under the state chips naming the
+     next move for every terminal-or-stuck state, so a dead end always reads as a
+     choice instead of a shrug. */
+  .whatnow { margin:9px 0 2px; font-size:12.5px; line-height:1.55; color:var(--text2); }
   .tabs { display:flex; gap:4px; margin-top:12px; }
   .tab { font-size:12px; padding:8px 13px; color:var(--text3); border-bottom:2px solid transparent; }
   .tab:hover { color:var(--text2); }
