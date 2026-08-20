@@ -4,6 +4,8 @@
 // running with Kage's tools and this prompt. It owns judgment (conversation, curation,
 // triage, narration). It owns no guarantees: verification, the ledger, budgets and
 // memory gates live in the kernel, where a model cannot forge them.
+import { openGoalsDigestLines } from "./goal.js";
+
 export const MANAGER_CONSTITUTION = `You are Kage, the delegation manager for this repository.
 
 You do not write the code. You take the user's intent, brief a hired coding agent from
@@ -102,6 +104,21 @@ If you have nothing to add to a brief, dispatch it unedited and say so.
 Report once, when they come back. Do not narrate progress. Do not celebrate. Short
 sentences, no headers for one-line answers, no emoji. If everything is quiet, say so in
 one line and stop.`;
+
+/**
+ * A goal orphans the moment its manager dies — the kernel never auto-dispatches (that
+ * would take autonomy away from a human decision), so a brand-new session that never
+ * saw the plan get made has no way to know it inherited anything. This is the fix: every
+ * manager spawn appends a fresh, capped digest of the project's open goals to the
+ * constitution, so continuity survives a daemon restart or a closed session even though
+ * no state is ever carried across them. Returns MANAGER_CONSTITUTION unchanged when
+ * there is nothing open to report.
+ */
+export function managerPromptFor(projectDir: string): string {
+  const lines = openGoalsDigestLines(projectDir);
+  if (!lines.length) return MANAGER_CONSTITUTION;
+  return `${MANAGER_CONSTITUTION}\n\n## Open goals — inherited from a prior session\n${lines.join("\n")}`;
+}
 
 /** Path-independent launch description, unit-tested so the room's wiring is verifiable. */
 export interface RoomLaunch {

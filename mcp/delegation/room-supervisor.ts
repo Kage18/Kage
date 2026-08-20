@@ -27,7 +27,7 @@ import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
   MANAGER_ALLOWED_TOOLS, collectManagerFacts, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
-import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
+import { MANAGER_CONSTITUTION, managerPromptFor } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import { readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
 import {
@@ -285,7 +285,7 @@ export function orchestratorSpawnEnv(base: NodeJS.ProcessEnv): Record<string, st
  * without spawning a real `claude` process — the array itself is unchanged from before
  * this extraction, byte for byte.
  */
-export function buildHeadlessRoomArgs(options: { resumeId?: string; mcpConfigPath: string }): string[] {
+export function buildHeadlessRoomArgs(options: { resumeId?: string; mcpConfigPath: string; systemPrompt?: string }): string[] {
   return [
     ...(options.resumeId ? ["--resume", options.resumeId] : []),
     "-p",
@@ -297,7 +297,7 @@ export function buildHeadlessRoomArgs(options: { resumeId?: string; mcpConfigPat
     "--mcp-config",
     options.mcpConfigPath,
     "--append-system-prompt",
-    MANAGER_CONSTITUTION,
+    options.systemPrompt ?? MANAGER_CONSTITUTION,
     "--permission-mode",
     "acceptEdits",
     // Without this, the held manager is permission-denied on EVERY kage tool, forever:
@@ -323,7 +323,11 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
   // this restart — otherwise the next spawn would see the same mismatch and loop.
   writeRoomSessionMeta(projectDir, { session_id: resumeId, permission_digest: currentDigest }, session);
 
-  const args = buildHeadlessRoomArgs({ resumeId, mcpConfigPath });
+  // The open-goals digest is folded into the system prompt at spawn time, never cached —
+  // a headless manager that restarts (the exact failure mode goals must survive) gets a
+  // brief that reflects whatever the goal directory says RIGHT NOW, not what it said the
+  // last time this session came up.
+  const args = buildHeadlessRoomArgs({ resumeId, mcpConfigPath, systemPrompt: managerPromptFor(projectDir) });
   const child: ChildProcess = spawn("claude", args, {
     cwd: projectDir,
     stdio: ["pipe", "pipe", "pipe"],
