@@ -13,13 +13,21 @@ export const APP_CLIENT = `"use strict";
 var TOKEN = "__KAGE_TOKEN__";
 var state = {
   runs: [], goals: [], view: "room", roomMode: "chat", selected: null, detail: null, tab: "follow", connected: false,
-  room: { turns: [], busy: false }, roomStreaming: [], projects: [], projectDir: "", installedAgents: [],
+  room: { turns: [], busy: false, live: false, activity_at: null }, transcript: null, roomStreaming: [],
+  projects: [], projectDir: "", installedAgents: [],
   session: "main", sessions: [{ key: "main", title: "Room" }], threadBusy: {},
   memory: null, memType: null,
   workLayout: "list", dover: false, mobileDetailOpen: false, showAllDone: false, workOrder: [],
   diffView: "unified", collapsedDiff: {}, expandedGroups: {}, detailIntentOpen: false,
-  steerQueueMode: false, runTerminalActive: false, runTermRunId: null,
+  steerQueueMode: false, runTerminalActive: false, runTermRunId: null, diffJumpTarget: null,
 };
+// Lazily-fetched verdict labels for finished runs shown on a CARD (sidebar/board/list)
+// rather than the selected run's own detail. Never re-derived: each entry is read
+// verbatim from GET /runs/:id's own verdict.label (claimVerdict, computed server-side
+// by verify.ts) the same way the receipt already reads it — a card only asks once per
+// run id, then caches the answer, since a finished run's claim never changes in place.
+var verdictCache = {};
+var verdictFetching = {};
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
 
@@ -73,6 +81,32 @@ function glyphFor(run) {
 function isPlanApproval(run) {
   return Boolean(run.waiting_on && run.waiting_on.needs === "plan approval");
 }
+// A card's VERIFIED n/n chip (docs/design/SESSIONS_SURFACE.md §5) reads claimVerdict's
+// own label — never a re-derived guess (that exact bug shipped once: a client-side
+// recount showed VERIFIED for a run the kernel had already failed). The list endpoint
+// a card renders from carries no verdict field, only the per-run detail route does, so
+// a finished card fetches its own detail once, caches the verdict verbatim, and repaints.
+var VERDICT_CARD_STATES = ["ready", "merged", "failed", "rejected"];
+function verdictChipFor(run, onReady) {
+  if (VERDICT_CARD_STATES.indexOf(run.display_state) < 0) return null;
+  var cached = verdictCache[run.id];
+  if (cached) return cached;
+  if (!verdictFetching[run.id]) {
+    verdictFetching[run.id] = true;
+    api("/runs/" + run.id).then(function (detail) {
+      delete verdictFetching[run.id];
+      if (detail && detail.ok && detail.verdict && detail.verdict.label) {
+        verdictCache[run.id] = detail.verdict;
+        if (onReady) onReady();
+      }
+    });
+  }
+  return null;
+}
+function verdictChipEl(verdict) {
+  var cls = verdict.label.indexOf("UNVERIFIED") >= 0 ? "amber" : verdict.label.indexOf("NOT") >= 0 ? "hot" : "jade";
+  return h("span", "atom vchip " + cls, verdict.label);
+}
 // Short display title derived from a run's raw intent — mirrors runTitle in
 // mcp/delegation/contract.ts exactly (first sentence or first line, trailing
 // punctuation trimmed, whitespace collapsed, capped on a word boundary). Intents are
@@ -94,6 +128,31 @@ function runTitle(run) {
   var lastSpace = truncated.lastIndexOf(" ");
   if (lastSpace > 0) truncated = truncated.slice(0, lastSpace);
   return truncated.trim() + ellipsis;
+}
+// The manager-given (or derived) short name every card/row/header should read, per
+// docs/design/SESSIONS_SURFACE.md §2 — TaskRecord.display_name, set once at createRun
+// so every surface reads the identical string. Falls back to runTitle's own derivation
+// only for a run recorded before display_name existed on disk.
+function displayName(run) {
+  return run.display_name || runTitle(run);
+}
+var STATE_DOT_COLOR = { jade: "var(--jade)", amber: "var(--amber)", crimson: "var(--crimson)", dim: "var(--text3)" };
+// The five AO fields plus one Kage field, shared by every card-shaped surface (sidebar
+// fleet, list row, board card) so they can never disagree with each other the way
+// workRow() and renderBoard() used to (docs/design/SESSIONS_SURFACE.md §5). Age is
+// deliberately NOT included here — each caller already has its own natural slot for it.
+function cardCoreAtoms(run) {
+  var atoms = [];
+  atoms.push(h("span", "atom mono", shortBranch(run.branch)));
+  var g = glyphFor(run);
+  var stateAtom = h("span", "atom statedot");
+  var dot = h("i", "dot");
+  dot.style.background = STATE_DOT_COLOR[g[1]] || "var(--text3)";
+  stateAtom.appendChild(dot);
+  stateAtom.appendChild(document.createTextNode(run.display_state));
+  atoms.push(stateAtom);
+  if (run.tokens_used) atoms.push(h("span", "atom mono", compact(run.tokens_used) + " tok"));
+  return atoms;
 }
 // Deliver a message to a blocked/live run's own tell route — the ONE path every
 // answer field, the Approve button, and the detail composer's "send now" all use, so
@@ -170,24 +229,14 @@ function workRow(run) {
   var g = glyphFor(run);
   row.appendChild(h("span", "glyph " + g[1], g[0]));
   var mid = h("div");
-  mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : runTitle(run)));
+  mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : displayName(run)));
+  // Trimmed to the shared card shape (docs/design/SESSIONS_SURFACE.md §5): branch,
+  // state word with a dot, token count, plus the verdict chip on a finished run — the
+  // row's own age already lives in .qtime on the right, so it is not repeated here.
   var atoms = h("div", "qatoms");
-  atoms.appendChild(h("span", "atom", run.agent));
-  if (run.display_state === "ready") atoms.appendChild(h("span", "atom jade", "awaiting merge"));
-  if (run.stale) atoms.appendChild(h("span", "atom hot", "process gone"));
-  if (run.display_state === "failed" && !run.stale) atoms.appendChild(h("span", "atom hot", "checks failed"));
-  if (run.ownership === "working" && run.activity) {
-    atoms.appendChild(h("span", "atom", readableLabel(run.activity.last_label) + " · " + run.activity.actions + " actions"));
-  }
-  // What actually changed, so the decision can be made HERE. A row that only
-  // repeats the intent asks you to go and find out somewhere else.
-  if (run.claim_summary) atoms.appendChild(h("span", "atom", run.claim_summary));
-  if (run.blast && run.blast.dependents > 0) {
-    atoms.appendChild(h("span", "atom" + (run.blast.dependents >= 5 ? " hot" : ""),
-      run.blast.dependents + " dependent" + (run.blast.dependents === 1 ? "" : "s")));
-  }
-  var cost = costLabel(run);
-  if (cost && run.ownership !== "working") atoms.appendChild(h("span", "atom", cost));
+  cardCoreAtoms(run).forEach(function (el) { atoms.appendChild(el); });
+  var verdict = verdictChipFor(run, function () { renderWork(); });
+  if (verdict) atoms.appendChild(verdictChipEl(verdict));
   mid.appendChild(atoms);
   // The question answers where it is asked. Delivery is reported with the kernel's
   // own vocabulary, never assumed.
@@ -653,27 +702,11 @@ function turnRunCard(run) {
   return card;
 }
 
-function renderRoom() {
-  var turns = state.room.turns || [];
-  var last = turns.length ? turns[turns.length - 1] : null;
-  var linkedCount = Object.keys(roomLinkedRuns).length;
-  // A cheap fingerprint of what would be painted. refreshRoom polls every 15s and
-  // refresh() every 30s, and neither implies the transcript actually changed — every
-  // rebuild replayed the .turn entry animation on every existing turn, so the whole
-  // thread shimmered continuously. Skip the rebuild entirely when nothing moved.
-  var signature = turns.length + "|" + (last ? last.text.length : 0) + "|" +
-    (state.room.busy ? "1" : "0") + "|" + linkedCount;
-
-  updateRoomTyping();
-  document.getElementById("room-send").disabled = state.room.busy;
-  if (signature === roomSignature) return;
-  roomSignature = signature;
-
-  var scroll = document.querySelector("#v-room .room-scroll");
-  var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
-  var turnsEl = document.getElementById("room-turns");
-  document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
-  turnsEl.textContent = "";
+// The Room's history register (docs/design/SESSIONS_SURFACE.md §2) — the manager's OWN
+// paraphrase of what happened, from GET /room. This is what Chat falls back to when
+// /room/transcript carries nothing yet (a thread the pty has never answered): a
+// headless-only conversation must still read as a real conversation, not a blank pane.
+function renderHistoryTurns(turnsEl, turns) {
   turns.forEach(function (turn, index) {
     // Close the previous exchange with a rule + elapsed time, so a long thread reads
     // as a sequence of completed turns rather than one undifferentiated column.
@@ -689,7 +722,12 @@ function renderRoom() {
     var wrap = h("div", "turn " + turn.role + (index >= roomPaintedCount ? " turn-new" : ""));
     // Say who is speaking. Alignment alone carried it before, which meant a transcript
     // you had to decode rather than read.
-    wrap.appendChild(h("div", "who", turn.role === "you" ? "You" : "Kage"));
+    var who = h("div", "who", turn.role === "you" ? "You" : "Kage");
+    // The pty manager answering gets no special mention (it IS the session); the
+    // headless fallback's own label is shown quietly, next to "Kage" — the API already
+    // reports which one answered (RoomHistoryTurn.manager, room-history.ts).
+    if (turn.role === "kage" && turn.manager === "headless") who.appendChild(h("span", "who-sub", "headless"));
+    wrap.appendChild(who);
     wrap.appendChild(turn.role === "kage" ? renderTurnBubble(turn.text) : h("div", "bubble2", turn.text));
     if (turn.role === "kage" && turn.tools && turn.tools.length) {
       var used = turn.tools.map(toolLabel);
@@ -720,6 +758,88 @@ function renderRoom() {
     }
     turnsEl.appendChild(wrap);
   });
+}
+// The Room's Chat tab as a real session view (docs/design/SESSIONS_SURFACE.md §2):
+// claude's own native transcript, the SAME file Terminal renders raw. A prompt block
+// per user turn, the manager's words verbatim, tool calls collapsed into one
+// expandable group line, a timestamp — no paraphrase, no second rendering of the same
+// conversation (that would be the two-sources bug in new clothes).
+function renderTranscriptTurns(turnsEl, turns) {
+  turns.forEach(function (turn, index) {
+    var wrap = h("div", "turn " + (turn.role === "user" ? "you" : "kage") + (index >= roomPaintedCount ? " turn-new" : ""));
+    wrap.appendChild(h("div", "who", turn.role === "user" ? "You" : "Kage"));
+    if (turn.text) wrap.appendChild(turn.role === "user" ? h("div", "bubble2", turn.text) : renderTurnBubble(turn.text));
+    if (turn.tools && turn.tools.length) {
+      var uniq = turn.tools.map(toolLabel).filter(function (t, i, arr) { return arr.indexOf(t) === i; });
+      var group = h("div", "toolgroup");
+      var summary = h("button", "foldrow", "Ran " + turn.tools.length + " tool call" + (turn.tools.length === 1 ? "" : "s"));
+      var list = h("div", "toolgrouplist");
+      list.style.display = "none";
+      uniq.forEach(function (name) { list.appendChild(h("div", "toolgroupitem", name)); });
+      summary.onclick = function () {
+        var open = list.style.display !== "none";
+        list.style.display = open ? "none" : "block";
+        summary.classList.toggle("open", !open);
+      };
+      group.appendChild(summary);
+      group.appendChild(list);
+      wrap.appendChild(group);
+    }
+    if (turn.timestamp) wrap.appendChild(h("span", "ts", String(turn.timestamp).slice(11, 19)));
+    turnsEl.appendChild(wrap);
+  });
+}
+function renderPresenceBanner() {
+  var banner = document.getElementById("room-banner");
+  if (!banner) return;
+  if (state.room.live) { banner.style.display = "none"; return; }
+  banner.textContent = "";
+  banner.style.display = "flex";
+  banner.appendChild(h("span", "", "No orchestrator is running"));
+  var start = h("button", "btn primary sm", "Start");
+  start.onclick = function () {
+    start.disabled = true;
+    start.textContent = "starting…";
+    // The same path the Terminal tab already uses to bring the orchestrator's pty up
+    // (primeTerminal/ensurePtyAttached) — no new start mechanism invented for this.
+    api("/room/pty/snapshot?session=" + encodeURIComponent(state.session)).then(function () {
+      refreshRoom();
+    }).catch(function () {
+      start.disabled = false;
+      start.textContent = "Start";
+    });
+  };
+  banner.appendChild(start);
+}
+function renderRoom() {
+  // The chat tab prefers the REAL session transcript once it has anything to show —
+  // /room/transcript is only ever empty for a thread the pty has never answered, so
+  // this is a fallback for that case, never a second competing rendering.
+  var useTranscript = Boolean(state.transcript && state.transcript.total > 0);
+  var turns = useTranscript ? state.transcript.turns : (state.room.turns || []);
+  var last = turns.length ? turns[turns.length - 1] : null;
+  var linkedCount = Object.keys(roomLinkedRuns).length;
+  // A cheap fingerprint of what would be painted. refreshRoom polls every 15s and
+  // refresh() every 30s, and neither implies the transcript actually changed — every
+  // rebuild replayed the .turn entry animation on every existing turn, so the whole
+  // thread shimmered continuously. Skip the rebuild entirely when nothing moved.
+  var signature = (useTranscript ? "t" : "h") + turns.length + "|" +
+    (last ? String(last.text || "").length + ":" + (last.tools ? last.tools.length : 0) : 0) + "|" +
+    (state.room.busy ? "1" : "0") + "|" + linkedCount + "|" + (state.room.live ? "1" : "0");
+
+  updateRoomTyping();
+  renderPresenceBanner();
+  document.getElementById("room-send").disabled = state.room.busy;
+  if (signature === roomSignature) return;
+  roomSignature = signature;
+
+  var scroll = document.querySelector("#v-room .room-scroll");
+  var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+  var turnsEl = document.getElementById("room-turns");
+  document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
+  turnsEl.textContent = "";
+  if (useTranscript) renderTranscriptTurns(turnsEl, turns);
+  else renderHistoryTurns(turnsEl, turns);
   roomPaintedCount = turns.length;
 
   if (scroll && (wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
@@ -735,7 +855,10 @@ function refreshRoom() {
     if (out.session && out.session !== state.session) return;
     state.sessions = out.sessions || state.sessions;
     renderThreads();
-    state.room = { turns: out.turns || [], busy: Boolean(out.busy) };
+    // orchestrator_live/orchestrator_activity_at (docs/design/SESSIONS_SURFACE.md §6)
+    // are the presence banner's and the sidebar fleet's one shared source — sourced
+    // server-side from the SAME liveness probes both the pty and headless paths trust.
+    state.room = { turns: out.turns || [], busy: Boolean(out.busy), live: Boolean(out.orchestrator_live), activity_at: out.orchestrator_activity_at || null };
     if (!out.busy) state.roomStreaming = [];
     var turns = state.room.turns;
     var last = turns[turns.length - 1];
@@ -751,6 +874,20 @@ function refreshRoom() {
         }
       });
     }
+    renderRoom();
+    renderProjects();
+    refreshTranscript();
+  }).catch(function () {});
+}
+// The Chat tab's real source of truth (docs/design/SESSIONS_SURFACE.md §2): claude's
+// own native transcript for this thread's pty session, the SAME file Terminal reads
+// live. Polled alongside /room on the same cadence — when it carries turns, renderRoom
+// prefers it over /room's own (paraphrased, pty-blind) history; when it is empty (no
+// pty has ever answered this thread), renderRoom falls back to /room's history so a
+// headless-only conversation is never rendered as blank.
+function refreshTranscript() {
+  return api("/room/transcript?session=" + encodeURIComponent(state.session)).then(function (out) {
+    state.transcript = out && out.ok ? out : null;
     renderRoom();
   }).catch(function () {});
 }
@@ -830,6 +967,11 @@ function renderMemory() {
   figs.appendChild(fig(num(v.packets), "memories written", "verified against the repo", "jade"));
   figs.appendChild(fig(num(v.recalls), "recalls served", v.recalls ? "answered from memory" : "none yet", v.recalls ? "jade" : null));
   if (v.stale_caught) figs.appendChild(fig(num(v.stale_caught), "stale memories caught", "before they misled an agent", "amber"));
+  // A DIFFERENT stale quantity from the health tile below, on purpose: this is a
+  // running count from the value ledger (every recall this repo has ever withheld a
+  // stale memory from), the health tile is a snapshot as of the last kage refresh —
+  // two windows over the same word, so each label names its own.
+  if (v.stale_withheld) figs.appendChild(fig(num(v.stale_withheld), "stale recalls withheld", "all-time, from the value ledger", "amber"));
   card.appendChild(figs);
 
   // The estimate, visibly separated and named as an estimate — and only shown once
@@ -851,13 +993,23 @@ function renderMemory() {
   // snapshot, updated only when kage refresh last ran; kage stale is always current
   // and is the one to act on). Two tiles both reading "stale" invited exactly the
   // silent-drift bug this file is part of the fix for.
+  //
+  // The standing fix: "active" is now total MINUS stale, never the bare total — a
+  // reader who saw "approved" labelled "active" beside a separate "stale" count
+  // naturally read them as partitioning one number, and they didn't (independently
+  // sourced: graph.approved_packets vs quality.totals.stale). Now they do.
+  var activeCount = Math.max(0, (mem.health.approved || 0) - (mem.health.stale || 0));
   var stats = [
-    [num(mem.health.approved), "active", false, null],
-    [mem.measured ? num(mem.health.stale) : "—", "stale (as of last refresh)", mem.health.stale > 0, "Snapshot from the last kage refresh. Run kage stale for the live, actionable count."],
+    [num(activeCount), "active", false, "Total memories minus those currently stale (as of last refresh) — the two tiles now partition one total."],
+    [mem.measured ? num(mem.health.stale) : "—", "stale packets (as of last refresh)", mem.health.stale > 0, "Snapshot from the last kage refresh. Run kage stale for the live, actionable count. A different window from \\"stale recalls withheld\\" above."],
     [pct(mem.health.average_quality), "avg quality", false, null],
     [pct(mem.health.evidence_coverage_percent), "evidence-backed", false, null],
-    [cnt(mem.health.hot), "used recently", false, null],
-    [cnt(mem.health.never_used), "never recalled", false, null],
+    // "used recently" and "never recalled" do NOT partition "active" between them —
+    // a packet used, but not recently, is counted in neither. Said here rather than
+    // left implicit, since two counts sitting beside "active" invite the same
+    // partition assumption active/stale used to.
+    [cnt(mem.health.hot), "used recently", false, "One access slice, not a partition — a packet used but not recently is counted in neither this nor \\"never recalled\\"."],
+    [cnt(mem.health.never_used), "never recalled", false, "One access slice, not a partition — does not sum with \\"used recently\\" to the active total."],
   ];
   stats.forEach(function (row) {
     var stat = h("div", "mem-stat" + (row[2] ? " warn" : ""));
@@ -998,7 +1150,8 @@ function switchThread(key) {
   state.session = key;
   // Each thread has its own transcript and its own terminal screen; carrying either
   // across the switch would show one conversation's words under another's name.
-  state.room = { turns: [], busy: false };
+  state.room = { turns: [], busy: false, live: false, activity_at: null };
+  state.transcript = null;
   state.roomStreaming = [];
   state.threadBusy[key] = false;
   // The painted-count and signature belong to whichever thread's turns were last
@@ -1107,9 +1260,17 @@ function shortPath(path) {
   var parts = String(path).split("/").filter(Boolean);
   return parts.length <= 2 ? parts.join("/") : parts.slice(-2).join("/");
 }
+// The modal's own preflight box reserves its line's height at all times (CSS,
+// .modal .preflight) so the Dispatch button below it never moves when the forecast
+// resolves — the standing defect. It is toggled by VISIBILITY there, never display;
+// every other preflight target (the Room composer) keeps the old display:none/flex
+// toggle, since only the modal's button-drop was the named defect.
 function renderPreflight(el, forecast) {
   el.textContent = "";
-  if (!forecast) { el.style.display = "none"; return; }
+  var reserved = el.id === "modal-preflight";
+  function hide() { if (reserved) el.style.visibility = "hidden"; else el.style.display = "none"; }
+  function show() { if (reserved) el.style.visibility = "visible"; else el.style.display = "flex"; }
+  if (!forecast) { hide(); return; }
   var touches = forecast.touches || [];
   if (touches.length) {
     var where = touches.slice(0, 2).map(shortPath).join(", ");
@@ -1123,9 +1284,9 @@ function renderPreflight(el, forecast) {
     el.appendChild(h("span", "pf-mem",
       forecast.memories + " " + (forecast.memories === 1 ? "memory" : "memories") + " will ride in the brief"));
   }
-  if (!el.children.length) { el.style.display = "none"; return; }
+  if (!el.children.length) { hide(); return; }
   el.appendChild(h("span", "pf-tag", "forecast"));
-  el.style.display = "flex";
+  show();
 }
 function schedulePreflight(text, targetId, type) {
   var el = document.getElementById(targetId);
@@ -1167,6 +1328,40 @@ function sendRoomMessage() {
 function autoGrow(el) {
   el.style.height = "auto";
   el.style.height = Math.min(140, el.scrollHeight) + "px";
+}
+
+// --- ghost suggestions (docs/design/SESSIONS_SURFACE.md §4): suggested_next, read
+// verbatim from the API, pre-filled as dim placeholder text inside an EMPTY composer.
+// Tab or a click accepts it into the input; typing a character replaces it (the native
+// placeholder simply vanishes, no extra code needed for that half); Escape dismisses.
+// Never auto-sends — accepting only ever fills the input, nothing calls send().
+function applyGhostSuggestion(inputEl, suggestion, defaultPlaceholder) {
+  var text = suggestion || "";
+  inputEl.dataset.ghost = text;
+  inputEl.placeholder = text || defaultPlaceholder;
+  inputEl.classList.toggle("ghost-on", Boolean(text));
+}
+function wireGhostInput(inputEl, defaultPlaceholder) {
+  if (inputEl.dataset.ghostWired) return;
+  inputEl.dataset.ghostWired = "1";
+  inputEl.addEventListener("keydown", function (ev) {
+    if (ev.key === "Tab" && !inputEl.value && inputEl.dataset.ghost) {
+      ev.preventDefault();
+      inputEl.value = inputEl.dataset.ghost;
+      applyGhostSuggestion(inputEl, null, defaultPlaceholder);
+    } else if (ev.key === "Escape" && inputEl.dataset.ghost) {
+      applyGhostSuggestion(inputEl, null, defaultPlaceholder);
+    }
+  });
+  inputEl.addEventListener("click", function () {
+    if (!inputEl.value && inputEl.dataset.ghost) {
+      inputEl.value = inputEl.dataset.ghost;
+      applyGhostSuggestion(inputEl, null, defaultPlaceholder);
+    }
+  });
+  inputEl.addEventListener("input", function () {
+    if (inputEl.value) inputEl.dataset.ghost = "";
+  });
 }
 
 // --- composer pickers. Every option states what it DOES, not just what it's called:
@@ -1601,6 +1796,78 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
   }
 }
 
+function jumpToDiffFile(path) {
+  state.diffJumpTarget = path;
+  state.tab = "diff";
+  loadTabText(state.selected);
+  renderDetail();
+}
+// The right panel (docs/design/SESSIONS_SURFACE.md §3c): the at-a-glance layer, in the
+// design's own order — RECEIPT, SESSION CONTROLS, ACTIVITY, FILES. The Follow/Queue/
+// Receipt/Diff/Brief/Raw tabs stay for deep inspection; this panel is what a glance
+// needs without switching tabs.
+var FINISHED_RECEIPT_STATES = ["ready", "merged", "failed"];
+function panelSection(panel, title) {
+  var sec = h("div", "pnl-sec");
+  sec.appendChild(h("div", "seclabel-sm", title));
+  panel.appendChild(sec);
+  return sec;
+}
+function renderDetailPanel(panel, d, run) {
+  panel.textContent = "";
+
+  // 1. RECEIPT — always visible for a run the kernel has actually checked, never
+  // behind a tab. Reuses the SAME renderReceipt() the Receipt tab reads, so the two
+  // can never disagree.
+  if (d.claim && FINISHED_RECEIPT_STATES.indexOf(run.display_state) >= 0) {
+    var receiptSec = panelSection(panel, "Receipt");
+    renderReceipt(receiptSec, d.claim, run, d.verdict, d.taught);
+  }
+
+  // 2. SESSION CONTROLS — the deliver-now/queue toggle, relocated from the composer
+  // row. Both positions now state a word, not a mix of a command and a gerund (the
+  // standing mode-pill defect): "Delivers now" / "Queues".
+  var controlsSec = panelSection(panel, "Session controls");
+  var queueToggle = h("button", "btn sm modepill" + (state.steerQueueMode ? " on" : ""),
+    state.steerQueueMode ? "Queues" : "Delivers now");
+  queueToggle.title = "Toggle whether ⏎ delivers immediately or queues for later — ⌘⏎ always queues";
+  queueToggle.onclick = function () { state.steerQueueMode = !state.steerQueueMode; renderDetail(); };
+  controlsSec.appendChild(queueToggle);
+
+  // 3. ACTIVITY — state_history as a compact timeline, real kernel records
+  // (transitionRun, contract.ts) never rendered in the browser before this.
+  if ((run.state_history || []).length) {
+    var activitySec = panelSection(panel, "Activity");
+    var timeline = h("div", "pnl-timeline");
+    run.state_history.slice().reverse().forEach(function (change) {
+      var row = h("div", "pnl-tl-row");
+      row.appendChild(h("span", "pnl-tl-state", change.state));
+      row.appendChild(h("span", "pnl-tl-by", change.by));
+      row.appendChild(h("span", "pnl-tl-at", ago(change.at)));
+      if (change.note) row.appendChild(h("div", "pnl-tl-note", change.note));
+      timeline.appendChild(row);
+    });
+    activitySec.appendChild(timeline);
+  }
+
+  // 4. FILES — the W1 per-file tree, restructured from the Diff tab's own file-chip
+  // bar into the panel; clicking a file scrolls the Diff tab to it.
+  if ((d.files || []).length) {
+    var filesSec = panelSection(panel, "Files");
+    var tree = h("div", "pnl-files");
+    d.files.forEach(function (f) {
+      var row = h("button", "pnl-file");
+      row.appendChild(h("span", "n", f.path));
+      var counts = h("span", "c");
+      if (f.added) counts.appendChild(h("span", "a", "+" + f.added));
+      if (f.removed) counts.appendChild(h("span", "d", "−" + f.removed));
+      row.appendChild(counts);
+      row.onclick = function () { jumpToDiffFile(f.path); };
+      tree.appendChild(row);
+    });
+    filesSec.appendChild(tree);
+  }
+}
 function renderDetail() {
   var el = document.getElementById("run-detail");
   el.textContent = "";
@@ -1626,7 +1893,7 @@ function renderDetail() {
     renderWork();
   };
   head.appendChild(close);
-  head.appendChild(h("h2", "", runTitle(run)));
+  head.appendChild(h("h2", "", displayName(run)));
   // The title above is a derived short form — the full intent (often the length of a
   // paragraph, by design: the New-run modal asks "what should change, and how you'll
   // know it worked") stays one click away instead of blowing up the header.
@@ -1676,8 +1943,9 @@ function renderDetail() {
   el.appendChild(head);
 
   var scroll = h("div", "dbody");
+  var main = h("div", "dmain");
   var body = h("div", "dcol");
-  scroll.appendChild(body);
+  main.appendChild(body);
   if (state.tab === "receipt") {
     // Prefer the structured claim; d.receipt (the CLI's text card) is only a fallback
     // for a run whose claim.json could not be parsed.
@@ -1690,13 +1958,36 @@ function renderDetail() {
   } else if (state.tab === "diff") {
     if (d.diffText === undefined) body.appendChild(h("div", "empty", "loading diff…"));
     else if (!d.diffText || d.diffText === "no changes yet") body.appendChild(h("div", "empty", "No changes yet."));
-    else renderDiff(body, d.diffText);
+    else {
+      renderDiff(body, d.diffText);
+      // The FILES panel's own click (docs/design/SESSIONS_SURFACE.md §3c) lands here —
+      // scroll to the matching file card, once, then forget the target.
+      if (state.diffJumpTarget) {
+        var jumpTo = state.diffJumpTarget;
+        state.diffJumpTarget = null;
+        setTimeout(function () {
+          var files = parseDiff(d.diffText);
+          var at = files.findIndex(function (f) { return f.name === jumpTo; });
+          var jumpCard = at >= 0 ? document.querySelector('[data-df="' + at + '"]') : null;
+          if (jumpCard) jumpCard.scrollIntoView({ block: "start", behavior: "smooth" });
+        }, 0);
+      }
+    }
   } else if (state.tab === "raw") {
     if (d.rawText === undefined) body.appendChild(h("div", "empty", "loading transcript…"));
     else body.appendChild(h("div", "rawpane", d.rawText));
   } else if (state.tab === "queue") {
     renderQueue(body, run.id, d.steers);
   } else {
+    // The session-transcript register (docs/design/SESSIONS_SURFACE.md §3a): Follow
+    // opens with the brief's own intent, the same "prompt" a room turn would show —
+    // real data (run.intent), never a placeholder.
+    if (run.intent) {
+      var openPrompt = h("div", "turn you");
+      openPrompt.appendChild(h("div", "who", "Brief"));
+      openPrompt.appendChild(h("div", "bubble2", run.intent));
+      body.appendChild(openPrompt);
+    }
     if (run.activity) {
       var act = h("div", "activityline");
       act.appendChild(h("span", "pulse", "●"));
@@ -1722,9 +2013,13 @@ function renderDetail() {
     else if (!events.length && !d.rawText.trim()) body.appendChild(h("div", "empty", "Nothing yet — the conversation appears as the agent works."));
     else {
       var isLive = ["running", "dispatched", "verifying"].indexOf(run.display_state) >= 0;
-      renderConversation(body, d.rawText === "no transcript yet" ? "" : d.rawText, events, isLive);
+      renderConversation(body, d.rawText === "no transcript yet" ? "" : d.rawText, events, isLive, d.files, d.claim);
     }
   }
+  scroll.appendChild(main);
+  var panel = h("div", "dpanel");
+  renderDetailPanel(panel, d, run);
+  scroll.appendChild(panel);
   el.appendChild(scroll);
 
   var composer = h("div", "composer");
@@ -1733,6 +2028,8 @@ function renderDetail() {
   var input = h("input");
   input.id = "steer-input";
   input.placeholder = "Message the agent…";
+  wireGhostInput(input, "Message the agent…");
+  applyGhostSuggestion(input, d.suggested_next || null, "Message the agent…");
   // Immediate stays the default (Conductor shipped queue-by-default, then reverted):
   // plain ⏎ delivers now unless the toggle is on; ⌘⏎ always queues, regardless.
   input.onkeydown = function (ev) {
@@ -1751,10 +2048,9 @@ function renderDetail() {
     }
   };
   cwrap.appendChild(input);
-  var queueToggle = h("button", "btn sm" + (state.steerQueueMode ? " on" : ""), state.steerQueueMode ? "Queuing" : "Deliver now");
-  queueToggle.title = "Toggle whether ⏎ delivers immediately or queues for later — ⌘⏎ always queues";
-  queueToggle.onclick = function () { state.steerQueueMode = !state.steerQueueMode; renderDetail(); };
-  cwrap.appendChild(queueToggle);
+  // The mode toggle now lives in the panel's SESSION CONTROLS section (relocated per
+  // docs/design/SESSIONS_SURFACE.md §3c) — state.steerQueueMode is still what this
+  // composer's Enter handler above reads, just no longer set from a button in this row.
   cwrap.appendChild(h("span", "hint", "⏎ send · ⌘⏎ queue for later · delivery reported honestly"));
   composer.appendChild(cwrap);
   el.appendChild(composer);
@@ -1872,20 +2168,17 @@ function renderBoard() {
     // vocabulary instead of showing four zeroes.
     if (!members.length) col.appendChild(h("div", "bempty", spec.hint));
     members.forEach(function (run) {
+      // Trimmed to AO's five fields plus the verdict chip (docs/design/
+      // SESSIONS_SURFACE.md §5) — no harness avatar, no bespoke state phrasing.
       var card = h("div", "acard" + (state.selected === run.id ? " sel" : ""));
       card.setAttribute("data-run", run.id);
       card.tabIndex = 0;
-      card.appendChild(h("span", "av " + run.agent, run.agent.slice(0, 2)));
       var mid = h("div");
-      mid.appendChild(h("div", "at", runTitle(run)));
-      mid.appendChild(h("div", "abr", shortBranch(run.branch)));
+      mid.appendChild(h("div", "at", displayName(run)));
       var arow = h("div", "arow");
-      if (run.display_state === "ready") arow.appendChild(h("span", "atom jade", "awaiting merge"));
-      else if (run.display_state === "blocked") arow.appendChild(h("span", "atom amber", "? waiting"));
-      else if (run.stale || run.display_state === "failed") arow.appendChild(h("span", "atom hot", "resumable"));
-      else if (run.activity) arow.appendChild(h("span", "atom", run.activity.last_label));
-      var cardCost = costLabel(run);
-      if (cardCost) arow.appendChild(h("span", "atom", cardCost.split(" · ")[0]));
+      cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
+      var boardVerdict = verdictChipFor(run, function () { renderWork(); });
+      if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
       arow.appendChild(h("span", "tm", ago(run.updated_at)));
       mid.appendChild(arow);
       card.appendChild(mid);
@@ -1943,6 +2236,29 @@ function loadProjects() {
     renderProjects();
   }).catch(function () {});
 }
+function fleetDot(color) {
+  var dot = h("i", "dot fleet-dot");
+  dot.style.background = color;
+  return dot;
+}
+function renderSidebarFleet() {
+  var wrap = h("div", "pfleet");
+  var orch = h("div", "pfleet-row orch" + (state.view === "room" ? " on" : ""));
+  orch.appendChild(fleetDot(state.room.live ? "var(--jade)" : "var(--text3)"));
+  orch.appendChild(h("span", "pfleet-n", "Orchestrator"));
+  orch.onclick = function () { setView("room"); };
+  wrap.appendChild(orch);
+  var fleet = state.runs.filter(function (r) { return ["merged", "rejected"].indexOf(r.display_state) < 0; });
+  fleet.forEach(function (run) {
+    var g = glyphFor(run);
+    var row = h("div", "pfleet-row" + (state.selected === run.id && state.view === "work" ? " on" : ""));
+    row.appendChild(fleetDot(STATE_DOT_COLOR[g[1]] || "var(--text3)"));
+    row.appendChild(h("span", "pfleet-n", displayName(run)));
+    row.onclick = function () { openRun(run.id); };
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
 function renderProjects() {
   var list = document.getElementById("plist");
   if (!list) return;
@@ -1969,6 +2285,12 @@ function renderProjects() {
     row.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
     if (!current) row.onclick = function () { openProject(project.dir, row); };
     list.appendChild(row);
+    // The sidebar fleet (docs/design/SESSIONS_SURFACE.md §1): under the ACTIVE project
+    // only — a badge on any other project would assert state this daemon never asked
+    // for. Orchestrator first with its own live dot, then every non-terminal run by
+    // display_name with its own display_state dot. A merged/rejected run's home is the
+    // board, not here.
+    if (current) list.appendChild(renderSidebarFleet());
   });
   var foot = document.getElementById("sidefoot");
   if (foot) {
@@ -2390,7 +2712,44 @@ function toolGlyph(label) {
   return ["⌕", "read"];
 }
 
-function renderConversation(body, rawText, ledgerEvents, isLive) {
+// Cross-references a Write/Edit toolcard's label against the W1 per-file tree so its
+// +/- counts can show inline (docs/design/SESSIONS_SURFACE.md §3a) — the transcript
+// stream itself never carries a diff, only a shortened file path in the label.
+function labelRest(label) {
+  var sp = String(label || "").indexOf(" ");
+  return sp >= 0 ? String(label).slice(sp + 1).replace(/…$/, "") : "";
+}
+function fileDiffFor(files, label) {
+  var l = String(label || "");
+  if (!files || !files.length || (l.indexOf("editing") !== 0 && l.indexOf("writing") !== 0)) return null;
+  var rest = labelRest(l);
+  if (!rest) return null;
+  for (var i = 0; i < files.length; i += 1) {
+    var f = files[i];
+    if (f.path === rest || f.path.slice(-(rest.length + 1)) === "/" + rest) return f;
+  }
+  return null;
+}
+// Cross-references a "running …" toolcard against the claim's own checks (the SAME
+// exit_code the receipt already reads, verify.ts) — the stream never carries an exit
+// code itself, only the command it ran.
+function checkExitFor(claim, label) {
+  var l = String(label || "");
+  if (!claim || !claim.checks || l.indexOf("running") !== 0) return null;
+  var rest = labelRest(l);
+  if (!rest) return null;
+  for (var i = 0; i < claim.checks.length; i += 1) {
+    var c = claim.checks[i];
+    if (c.cmd && (c.exit_code !== undefined && c.exit_code !== null) && c.cmd.indexOf(rest) === 0) return c;
+  }
+  return null;
+}
+function formatGap(ms) {
+  var s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s later";
+  return Math.round(s / 60) + "m later";
+}
+function renderConversation(body, rawText, ledgerEvents, isLive, files, claim) {
   var entries = [];
   rawText.split("\\n").forEach(function (line) {
     if (!line.trim()) return;
@@ -2425,6 +2784,15 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
       var trow = h("div", "toolcard");
       trow.appendChild(h("span", "ic " + g[1], g[0]));
       trow.appendChild(h("span", "lbl", readableLabel(e.label) || "working"));
+      var fdiff = fileDiffFor(files, e.label);
+      if (fdiff) {
+        var fd = h("span", "filediff");
+        if (fdiff.added) fd.appendChild(h("span", "a", "+" + fdiff.added));
+        if (fdiff.removed) fd.appendChild(h("span", "d", "−" + fdiff.removed));
+        trow.appendChild(fd);
+      }
+      var checkHit = checkExitFor(claim, e.label);
+      if (checkHit) trow.appendChild(h("span", "exitcode" + (checkHit.result === "pass" ? "" : " bad"), "exit " + checkHit.exit_code));
       trow.appendChild(h("span", "ts", (e.at || "").slice(11, 19)));
       body.appendChild(trow);
       return;
@@ -2457,7 +2825,23 @@ function renderConversation(body, rawText, ledgerEvents, isLive) {
       else blocks.push({ tools: [e] });
     } else blocks.push({ one: e });
   });
+  // Duration lines between turns (docs/design/SESSIONS_SURFACE.md §3a): the gap between
+  // one block's last real timestamp and the next block's first, computed from the
+  // transcript's own timestamps — never a guess, and skipped when trivially short.
+  var prevBlockEnd = null;
   blocks.forEach(function (block, index) {
+    var firstAt = block.one ? block.one.at : (block.tools[0] && block.tools[0].at);
+    if (prevBlockEnd && firstAt) {
+      var gapMs = new Date(firstAt).getTime() - new Date(prevBlockEnd).getTime();
+      if (gapMs > 3000) {
+        var durRow = h("div", "turnbreak");
+        durRow.appendChild(h("span", "rule"));
+        durRow.appendChild(h("span", "label", formatGap(gapMs)));
+        body.appendChild(durRow);
+      }
+    }
+    var lastAt = block.one ? block.one.at : (block.tools.length ? block.tools[block.tools.length - 1].at : null);
+    if (lastAt) prevBlockEnd = lastAt;
     if (block.one) { renderEntry(block.one); return; }
     var liveTail = isLive && index === blocks.length - 1;
     var expanded = Boolean(state.expandedGroups[index]);
@@ -2620,7 +3004,13 @@ function renderNotifications() {
 // --- dispatch modal
 function showOverlay(on) {
   document.getElementById("overlay").classList.toggle("on", on);
-  if (on) document.getElementById("intent").focus();
+  if (on) {
+    // The standing defect: a prior dispatch's transient status text ("dispatched",
+    // "failed") used to still be sitting there the next time this modal opened,
+    // read as if it were about the run someone is about to describe.
+    document.getElementById("dispatch-flash").textContent = "";
+    document.getElementById("intent").focus();
+  }
 }
 document.getElementById("m-new").onclick = function () { showOverlay(true); };
 document.getElementById("dispatch-cancel").onclick = function () { showOverlay(false); };
@@ -2646,6 +3036,10 @@ function dispatchNow() {
 }
 
 var roomInput = document.getElementById("room-input");
+// Wired for parity with the run composer (docs/design/SESSIONS_SURFACE.md §4); the
+// Room has no suggested_next source yet (GET /room carries none), so this stays inert
+// — dataset.ghost never gets set — until a server-side source exists for it.
+wireGhostInput(roomInput, "Message Kage…");
 roomInput.addEventListener("input", function () {
   autoGrow(roomInput);
   schedulePreflight(roomInput.value, "room-preflight", composerPrefs.type);

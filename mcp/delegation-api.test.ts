@@ -1590,7 +1590,7 @@ test("runTitle falls back to the run id when the intent is blank", () => {
   assert.equal(runTitle(fakeTask("   ", "blank-intent-run-id")), "blank-intent-run-id");
 });
 
-test("the composed client script routes every run title through runTitle, never raw run.intent, in row/header render paths", () => {
+test("the composed client script routes every run title through displayName (which itself falls back to runTitle), never raw run.intent, in row/header render paths", () => {
   const html = delegationAppHtml("tok");
   const script = html.split("<script>")[1].split("</" + "script>")[0];
   // The syntactically-valid-JS gate this task must not regress — re-asserted here
@@ -1600,8 +1600,13 @@ test("the composed client script routes every run title through runTitle, never 
   assert.ok(!script.includes('"qt", needsYou ? decisionText(run) : run.intent'),
     "the work-row title must not fall back to the raw, uncapped intent");
   assert.ok(!script.includes('"h2", "", run.intent'), "the detail header must not render the raw intent");
-  assert.ok(script.includes('"qt", needsYou ? decisionText(run) : runTitle(run)'),
-    "the work-row title must route through runTitle");
-  assert.ok(script.includes('"h2", "", runTitle(run)'), "the detail header must route through runTitle");
+  // W2 (docs/design/SESSIONS_SURFACE.md §2/§5) reads TaskRecord.display_name on every
+  // named card/header now that it's landed — displayName(run) is `run.display_name ||
+  // runTitle(run)`, so the "never raw run.intent" guarantee above still holds; only the
+  // preferred source changed.
+  assert.ok(script.includes("function displayName(run)"), "the display_name-aware helper must be defined");
+  assert.ok(script.includes('"qt", needsYou ? decisionText(run) : displayName(run)'),
+    "the work-row title must route through displayName");
+  assert.ok(script.includes('"h2", "", displayName(run)'), "the detail header must route through displayName");
   assert.ok(script.includes("Full intent"), "a disclosure must keep the full intent reachable");
 });
