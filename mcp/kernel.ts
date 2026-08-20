@@ -52,7 +52,19 @@ import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
 import { openStore } from "./store/manifest.js";
-import type { DocsFtsDoc, StoreBackend, VectorCandidate, VectorChunkRow } from "./store/types.js";
+import type {
+  CallEdgeRow,
+  DocsFtsDoc,
+  FileRow,
+  ImportEdgeRow,
+  KgEdgeRow,
+  KgEntityRow,
+  KgEpisodeRow,
+  StoreBackend,
+  SymbolRow,
+  VectorCandidate,
+  VectorChunkRow,
+} from "./store/types.js";
 
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -6639,6 +6651,53 @@ function structuralReport(index: StructuralIndex): string {
   ].join("\n");
 }
 
+function fileRowFromStructural(file: StructuralFileFact): FileRow {
+  return { path: file.path, sha: file.hash, mtime: file.mtime_ms, kind: file.kind, language: file.language };
+}
+
+function symbolRowFromStructural(symbol: StructuralSymbolFact): SymbolRow {
+  return { id: symbol.id, file: symbol.path, name: symbol.name, kind: symbol.kind, sha: "" };
+}
+
+function importEdgeRowFromCode(edge: CodeImportEdge): ImportEdgeRow {
+  return { fromFile: edge.from_path, toFile: edge.to_path, kind: edge.kind };
+}
+
+// Pure projection, no I/O: given the full structural facts just computed and
+// the set of file paths this build actually re-extracted (buildStructuralFile's
+// own cache-hit/miss signal, mcp/kernel.ts:6444), returns exactly those files'
+// StoreBackend rows -- never the whole corpus. This is what makes a `kage
+// refresh` touching N cache-miss files push N files' worth of rows through
+// StoreBackend.replaceFileGraphRows (docs/design/MEMORY_STORE.md M3,
+// "(d) Incrementality"), not the whole repo's. Exported so tests can assert
+// the scoping directly, without needing a live store to count rows through.
+export function structuralRowsForFiles(
+  structural: { files: StructuralFileFact[]; symbols: StructuralSymbolFact[]; imports: CodeImportEdge[] },
+  touchedPaths: Set<string>
+): Array<{ file: FileRow; symbols: SymbolRow[]; importEdges: ImportEdgeRow[] }> {
+  const symbolsByPath = new Map<string, StructuralSymbolFact[]>();
+  for (const symbol of structural.symbols) {
+    if (!touchedPaths.has(symbol.path)) continue;
+    const list = symbolsByPath.get(symbol.path) ?? [];
+    list.push(symbol);
+    symbolsByPath.set(symbol.path, list);
+  }
+  const importsByPath = new Map<string, CodeImportEdge[]>();
+  for (const edge of structural.imports) {
+    if (!touchedPaths.has(edge.from_path)) continue;
+    const list = importsByPath.get(edge.from_path) ?? [];
+    list.push(edge);
+    importsByPath.set(edge.from_path, list);
+  }
+  return structural.files
+    .filter((file) => touchedPaths.has(file.path))
+    .map((file) => ({
+      file: fileRowFromStructural(file),
+      symbols: (symbolsByPath.get(file.path) ?? []).map(symbolRowFromStructural),
+      importEdges: (importsByPath.get(file.path) ?? []).map(importEdgeRowFromCode),
+    }));
+}
+
 export function buildStructuralIndex(projectDir: string): StructuralIndex {
   ensureMemoryDirs(projectDir);
   ensureDir(structuralIndexDir(projectDir));
@@ -6730,6 +6789,23 @@ export function buildStructuralIndex(projectDir: string): StructuralIndex {
     cache_misses: misses,
     worker_count: builtFiles.workerCount,
   });
+  // Row-level structural refresh, routed through the StoreBackend seam
+  // (docs/design/MEMORY_STORE.md M3): files.json/symbols.json/imports.json
+  // above stay direct writeJson calls, byte-compatible with today -- FileRow/
+  // SymbolRow/ImportEdgeRow are reduced projections (no size_bytes/signals/
+  // concepts/language/signature/specifier) that cannot reconstruct those
+  // artifacts byte-for-byte, the same reason catalog.json stayed a direct
+  // write in M2. Only cache-miss files' rows (builtFiles.results whose
+  // cacheHit is false) are pushed -- a refresh that re-extracts N files
+  // upserts N files' worth of store rows, not the whole repo's.
+  const touchedPaths = new Set(builtFiles.results.filter((result) => !result.cacheHit).map((result) => result.entry.path));
+  const structuralRows = structuralRowsForFiles({ files, symbols, imports }, touchedPaths);
+  const { backend: structuralBackend } = openStore(projectDir);
+  try {
+    structuralBackend.replaceFileGraphRows(structuralRows);
+  } finally {
+    structuralBackend.close();
+  }
   return index;
 }
 
@@ -8368,6 +8444,18 @@ export function buildCodeGraph(projectDir: string, options: { force?: boolean } 
   removeLegacyCodeGraphSplits(projectDir);
   writeJson(join(codeGraphDir(projectDir), "graph.json"), compactCodeGraphArtifact(projectDir, graph, structural));
   graphMemoryCache.delete(resolve(projectDir));
+  // Call edges have no per-file cache upstream -- they're re-extracted from
+  // source on every non-cached build above, unlike files/symbols/imports
+  // (see buildStructuralIndex's row-level push). So the correct StoreBackend
+  // scope here is "every call edge this build produced," replacing the whole
+  // call_edges table rather than a per-file upsert (docs/design/MEMORY_STORE.md
+  // M3, replaceCallEdgesForRepo's own doc comment in mcp/store/types.ts).
+  const { backend: callEdgeBackend } = openStore(projectDir);
+  try {
+    callEdgeBackend.replaceCallEdgesForRepo(graph.calls.map((call): CallEdgeRow => ({ fromSymbol: call.from_symbol, toSymbol: call.to_symbol, kind: call.resolution })));
+  } finally {
+    callEdgeBackend.close();
+  }
   return graph;
 }
 
@@ -8835,6 +8923,25 @@ export function buildKnowledgeGraph(projectDir: string, codeGraph = buildCodeGra
   writeJson(join(graphDir(projectDir), "edges.json"), graph.edges);
   writeJson(join(graphDir(projectDir), "graph.json"), compactKnowledgeGraphArtifact(projectDir, graph));
   graphMemoryCache.delete(resolve(projectDir));
+  // Knowledge graph, routed through the StoreBackend seam (docs/design/
+  // MEMORY_STORE.md M3): entities.json/edges.json/episodes.json above stay
+  // direct writeJson calls, byte-compatible with today -- KgEntityRow/
+  // KgEdgeRow/KgEpisodeRow are reduced projections (no aliases/summary/
+  // evidence/branch/commit) that cannot reconstruct those artifacts
+  // byte-for-byte, the same reason catalog.json stayed a direct write in M2.
+  // buildKnowledgeGraph recomputes the whole graph every call -- there is no
+  // per-entity cache to scope a smaller push to, so this replaces the whole
+  // kg_entities/kg_edges/kg_episodes table set rather than upserting.
+  const { backend: kgBackend } = openStore(projectDir);
+  try {
+    kgBackend.replaceKnowledgeGraph(
+      graph.entities.map((entity): KgEntityRow => ({ id: entity.id, kind: entity.type, label: entity.name })),
+      graph.edges.map((edge): KgEdgeRow => ({ fromId: edge.from, toId: edge.to, kind: edge.relation, weight: edge.confidence })),
+      graph.episodes.map((episode): KgEpisodeRow => ({ id: episode.id, ts: episode.observed_at, summary: episode.summary })),
+    );
+  } finally {
+    kgBackend.close();
+  }
   return graph;
 }
 
@@ -11005,6 +11112,78 @@ function boostTermScore(boost: string, term: string): number {
   if (term.length >= 6 && normalized.includes(term)) return 2;
   if (normalized.length >= 6 && term.includes(normalized)) return 2;
   return 0;
+}
+
+export interface StructuralGraphStoreQueryResult {
+  query: string;
+  files: FileRow[];
+  symbols: SymbolRow[];
+}
+
+/**
+ * Lazy walk (docs/design/MEMORY_STORE.md M3, "(c) Query semantics" /
+ * rollout table row "M3"): answers a code-graph search ENTIRELY from
+ * StoreBackend rows -- backend.listFiles()/listSymbols(), never a readJson
+ * of the whole structural/files.json or symbols.json (2.7-3.0MB each,
+ * measured in this doc's own Problem section). On the sqlite backend this
+ * is real indexed row iteration over the files/symbols tables, not one big
+ * JSON.parse; on the json backend today's readJson-the-whole-file behaviour
+ * is unchanged (mcp/store/json.ts). This answers a narrower question than
+ * queryCodeGraph -- Row-shaped facts only (no parser/signature/size_bytes
+ * fidelity), not a replacement for it -- the store-backed counterpart to
+ * queryPacketsByPath, not a replacement for the rich, existing query.
+ */
+export function queryStructuralGraphFromStore(projectDir: string, query: string, limit = 10): StructuralGraphStoreQueryResult {
+  const terms = tokenize(query);
+  const { backend } = openStore(projectDir);
+  try {
+    const files = backend
+      .listFiles()
+      .map((file) => ({ file, score: scoreText(terms, `${file.path} ${file.kind} ${file.language}`, [file.path, file.language]) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path))
+      .slice(0, limit)
+      .map((entry) => entry.file);
+    const symbols = backend
+      .listSymbols()
+      .map((symbol) => ({ symbol, score: scoreText(terms, `${symbol.name} ${symbol.kind} ${symbol.file}`, [symbol.name, symbol.file]) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.symbol.file.localeCompare(b.symbol.file))
+      .slice(0, limit)
+      .map((entry) => entry.symbol);
+    return { query, files, symbols };
+  } finally {
+    backend.close();
+  }
+}
+
+export interface KgNeighbourhoodResult {
+  entity: KgEntityRow | null;
+  neighbours: KgEntityRow[];
+  edges: KgEdgeRow[];
+}
+
+/**
+ * Lazy walk for "kg neighbourhood reads" (docs/design/MEMORY_STORE.md M3):
+ * one indexed queryKgEdgesForEntities call plus a getKgEntity per neighbour
+ * endpoint -- never a readJson of the whole graph/edges.json (8MB+ measured
+ * in this doc's own Problem section) just to find the handful of edges
+ * touching one entity. On the sqlite backend, queryKgEdgesForEntities is a
+ * `WHERE from_id IN (...) OR to_id IN (...)` scan over the kg_edges_from/
+ * kg_edges_to indexes (mcp/store/sqlite.ts); on the json backend it is
+ * today's full-array filter, unchanged.
+ */
+export function kgNeighbourhood(projectDir: string, entityId: string): KgNeighbourhoodResult {
+  const { backend } = openStore(projectDir);
+  try {
+    const entity = backend.getKgEntity(entityId);
+    const edges = backend.queryKgEdgesForEntities([entityId]);
+    const neighbourIds = unique(edges.map((edge) => (edge.fromId === entityId ? edge.toId : edge.fromId)));
+    const neighbours = neighbourIds.map((id) => backend.getKgEntity(id)).filter((row): row is KgEntityRow => Boolean(row));
+    return { entity, neighbours, edges };
+  } finally {
+    backend.close();
+  }
 }
 
 export function queryCodeGraph(projectDir: string, query: string, limit = 10, graph?: CodeGraph): CodeGraphQueryResult {

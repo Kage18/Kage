@@ -137,6 +137,17 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "replaceVectorDocuments", file: "mcp/store/types.ts" },
   { symbol: "listDocsFtsDocs", file: "mcp/store/types.ts" },
   { symbol: "loadDocsChunks", file: "mcp/store/rebuild.ts" },
+  // M3 landed the same day -- see the "M3 seam is wired into kernel.ts" test
+  // below for the call-site half of this guard.
+  { symbol: "replaceFileGraphRows", file: "mcp/store/types.ts" },
+  { symbol: "replaceCallEdgesForRepo", file: "mcp/store/types.ts" },
+  { symbol: "replaceKnowledgeGraph", file: "mcp/store/types.ts" },
+  { symbol: "queryKgEdgesForEntities", file: "mcp/store/types.ts" },
+  { symbol: "structuralRowsForFiles", file: "mcp/kernel.ts" },
+  { symbol: "queryStructuralGraphFromStore", file: "mcp/kernel.ts" },
+  { symbol: "kgNeighbourhood", file: "mcp/kernel.ts" },
+  { symbol: "buildStructuralIndex", file: "mcp/kernel.ts" },
+  { symbol: "buildKnowledgeGraph", file: "mcp/kernel.ts" },
 ];
 
 test("docs/design/MEMORY_STORE.md exists and is a substantial design doc", () => {
@@ -235,23 +246,27 @@ test("M2's store seam is wired into mcp/kernel.ts, and the doc says M2 landed", 
 
 // PATH_TOKEN-style regex match against a bold table-cell phrase must account
 // for the bold-close ** landing directly against the pipe with no space --
-// e.g. "**M3 — the graph-side port** | Not yet built" has ** immediately
-// before the |, so a naive \s*\|\s* right after the phrase text can miss it.
-// (Caught by actually running this test, not by inspection -- see the repo
-// memory packet on this exact gotcha, captured while landing M1's own guard.)
-test("M3 has not wired the store seam into mcp/kernel.ts yet, and the doc still marks it not built", () => {
+// e.g. "**M4 — benchmarks and the scale guard** | Not yet built" has **
+// immediately before the |, so a naive \s*\|\s* right after the phrase text
+// can miss it. (Caught by actually running this test, not by inspection --
+// see the repo memory packet on this exact gotcha, captured while landing
+// M1's own guard.)
+test("M3's store seam is wired into mcp/kernel.ts, and the doc says M3 landed", () => {
+  // Mirror image of M1/M2's own guard tests above: this now fails if the
+  // structural/knowledge-graph write path disappears out from under the
+  // doc, or if the doc stops saying M3 landed while the code still routes
+  // through it.
   const kernelSource = readFileSync(repoPath("mcp", "kernel.ts"), "utf8");
-  // M2 legitimately calls openStore()/upsertPackets()/etc. now; the
-  // structural- and knowledge-graph writes are M3's own scope and the
-  // tripwire here -- if kernel.ts starts calling any of these, M3 has
-  // started and the doc's M3/M4 "Not yet built" rows are now stale.
-  assert.ok(
-    !/\bupsertKgEntities\(|\bupsertKgEdges\(|\bupsertKgEpisodes\(|\bbackend\.upsertFiles\(|\bbackend\.upsertSymbols\(/.test(kernelSource),
-    "expected mcp/kernel.ts to not write the structural/knowledge graph through the store seam yet -- that's M3's job, not M2's",
-  );
+  assert.ok(/\breplaceFileGraphRows\(/.test(kernelSource), "expected mcp/kernel.ts to write structural files/symbols/import-edges through replaceFileGraphRows");
+  assert.ok(/\breplaceCallEdgesForRepo\(/.test(kernelSource), "expected mcp/kernel.ts to write call edges through replaceCallEdgesForRepo");
+  assert.ok(/\breplaceKnowledgeGraph\(/.test(kernelSource), "expected mcp/kernel.ts to write the knowledge graph through replaceKnowledgeGraph");
+  assert.ok(/\bqueryKgEdgesForEntities\(/.test(kernelSource), "expected mcp/kernel.ts to expose an indexed kg-neighbourhood lookup via queryKgEdgesForEntities");
 
   const doc = readDoc();
-  assert.ok(/M3 — the graph-side port\*\*\s*\|\s*Not yet built/.test(doc), "doc's M3 row should still say Not yet built");
+  assert.ok(doc.includes("M3 — the graph-side port") && doc.includes("**Landed"), "doc's M3 row should say M3 landed, not just describe it as proposed");
+  for (const symbol of ["replaceFileGraphRows", "replaceCallEdgesForRepo", "replaceKnowledgeGraph", "queryKgEdgesForEntities"]) {
+    assert.ok(doc.includes(symbol), `doc's M3 row should name the real symbol "${symbol}" it landed`);
+  }
   assert.ok(/M4 — benchmarks and the scale guard\*\*\s*\|\s*Not yet built/.test(doc), "doc's M4 row should still say Not yet built");
 });
 
