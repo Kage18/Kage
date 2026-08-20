@@ -4,7 +4,7 @@
 // claim is never believed: the commands run again, in the run's worktree, and the
 // verdict is the exit code. An agent that says "tests pass" over a red suite is caught
 // by construction, which is the difference between a receipt and a rumor.
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { diffBudget } from "./config.js";
@@ -22,6 +22,125 @@ const COMMAND_TIMEOUT_MS = 20 * 60_000;
 // Exit codes shells use for "command not found" / "cannot execute". These mean we could
 // not judge the claim — never that the claim passed.
 const NO_ENV_EXIT_CODES = new Set([126, 127]);
+// Exit code convention this file already used for a timed-out command before the tree-kill
+// fix below; kept so evidence and CheckOutcome.exit_code read the same as always.
+const TIMEOUT_EXIT_CODE = 124;
+
+// Grace between a group-wide SIGTERM and the follow-up SIGKILL sweep in sweepProcessGroup
+// below — long enough for a well-behaved tree to unwind on its own (npm/node/test workers
+// flushing and exiting cleanly), short enough that a genuinely hung tree doesn't add much
+// past COMMAND_TIMEOUT_MS before the verdict is final.
+const TREE_KILL_GRACE_MS = 5_000;
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Signal 0 to a NEGATIVE pid probes the whole process GROUP, not one process — this is
+// what lets sweepProcessGroup below know whether any descendant is still alive well after
+// the one pid spawnSync itself tracked (and already reaped) is long gone.
+function processGroupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Synchronous sleep with no busy-spin — parks the thread via the VM's own wait rather than
+// polling in a tight loop. Safe only because this ever runs after spawnSync has already
+// returned control to us; nothing else here needs the event loop during the grace window.
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// The actual fix: spawnSync's own `timeout`+`killSignal` only ever signals the ONE pid it
+// tracks — Node's own docs for spawnSync say the parent "will wait until the child process
+// has exited", meaning that single immediate child, never its descendants. A shell running
+// `npm run test` forwards nothing to npm's own children when IT gets SIGTERM, so killing
+// just the shell orphans `node --test` and every per-file worker it spawned, still running,
+// still holding whatever the test suite held. Reproduced live: three such zombie suites
+// accumulated across retry cycles overnight, and every later verification on the machine
+// ran beside them and hung the same way (238 tests then stall) until they were killed by
+// hand — the timeout was reporting real hangs caused by its own previous kills.
+// `detached: true` on the spawnSync call below is what makes a real sweep possible: it
+// makes the child its own process group leader, so `-pid` here reaches the whole tree that
+// grew under it, not just the one pid Node itself was watching.
+function sweepProcessGroup(pid: number, graceMs: number): void {
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    return; // ESRCH — the group is already gone.
+  }
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && processGroupAlive(pid)) sleepSync(100);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Exited on its own within the grace window — nothing left to force.
+  }
+}
+
+export interface TreeKillSpawnResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: NodeJS.ErrnoException;
+  /** True only when this call's own timeout fired and a group sweep ran. */
+  treeKilled: boolean;
+}
+
+/**
+ * spawnSync wrapped with the tree-kill fix: the child is spawned as its own process group
+ * (`detached: true`) and a timeout sweeps the WHOLE group — SIGTERM, a TREE_KILL_GRACE_MS
+ * grace, then SIGKILL — instead of leaving orphaned descendants running past the verdict
+ * that was supposed to be their last word.
+ *
+ * Exported so static-checks.ts's kernel-executed checks (tsc, the composed-page parse)
+ * share this exact fix instead of a second hand-rolled copy that could drift — same
+ * reasoning as writeEvidence's export below.
+ */
+export function spawnWithTreeKill(
+  cmd: string,
+  args: string[],
+  options: { cwd: string; shell?: boolean; maxBuffer?: number },
+  timeoutMs: number,
+): TreeKillSpawnResult {
+  // @types/node's SpawnSyncOptions omits `detached` (it's only typed on the async
+  // SpawnOptions), even though the underlying binding honors it for spawnSync exactly the
+  // same way — confirmed empirically (see this run's claim). Built as a plain, unannotated
+  // object rather than an inline literal argument so the extra property is structurally
+  // allowed instead of tripping TS's excess-property check.
+  const spawnOptions = {
+    cwd: options.cwd,
+    shell: options.shell ?? false,
+    encoding: "utf8" as const,
+    stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+    timeout: timeoutMs,
+    killSignal: "SIGTERM" as const,
+    maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
+    detached: true,
+  };
+  const result = spawnSync(cmd, args, spawnOptions);
+  // SpawnSyncReturns types `error` as a plain Error — Node itself attaches `.code` (a
+  // Node.js errno exception) at runtime, same as any other child_process spawn error.
+  const spawnError = result.error as NodeJS.ErrnoException | undefined;
+  const treeKilled = spawnError?.code === "ETIMEDOUT";
+  if (treeKilled) sweepProcessGroup(result.pid, TREE_KILL_GRACE_MS);
+  return {
+    status: result.status,
+    stdout: String(result.stdout ?? ""),
+    stderr: String(result.stderr ?? ""),
+    error: spawnError,
+    treeKilled,
+  };
+}
 
 // Exported so static-checks.ts (kernel-executed checks that are not part of a declared
 // CheckSpec) can log evidence through the same mechanism the receipt already links to.
@@ -33,29 +152,32 @@ export function writeEvidence(projectDir: string, runId: string, checkId: string
   return path.slice(projectDir.length + 1);
 }
 
-function runCommandCheck(projectDir: string, runId: string, worktreeDir: string, check: CheckSpec): CheckOutcome {
+// timeoutMs defaults to COMMAND_TIMEOUT_MS but is overridable — exported so
+// mcp/tree-kill.test.ts can exercise the real evidence-writing path (not a reimplementation
+// of it) against a short timeout instead of waiting out the real 20-minute ceiling.
+export function runCommandCheck(
+  projectDir: string,
+  runId: string,
+  worktreeDir: string,
+  check: CheckSpec,
+  timeoutMs: number = COMMAND_TIMEOUT_MS,
+): CheckOutcome {
   if (!check.cmd) return { ...check, result: "not_run", evidence: undefined };
-  let stdout = "";
-  let exitCode = 0;
-  try {
-    stdout = execFileSync(check.cmd, {
-      cwd: worktreeDir,
-      shell: true,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: COMMAND_TIMEOUT_MS,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-  } catch (error) {
-    const shell = error as { status?: number | null; stdout?: string | Buffer; stderr?: string | Buffer; code?: string };
-    stdout = `${String(shell.stdout ?? "")}\n${String(shell.stderr ?? "")}`;
-    exitCode = typeof shell.status === "number" ? shell.status : shell.code === "ETIMEDOUT" ? 124 : 1;
-  }
+  const spawned = spawnWithTreeKill(check.cmd, [], { cwd: worktreeDir, shell: true }, timeoutMs);
+  const exitCode = spawned.treeKilled
+    ? TIMEOUT_EXIT_CODE
+    : typeof spawned.status === "number"
+      ? spawned.status
+      : 1;
+  // The success path only ever reported stdout (stderr silently dropped) before this fix
+  // and still does — only a non-zero/timed-out outcome pulls stderr into the evidence too.
+  const stdout = exitCode === 0 ? spawned.stdout : `${spawned.stdout}\n${spawned.stderr}`;
+  const treeKillNote = spawned.treeKilled ? ` (timeout after ${timeoutMs / 1000}s - process tree killed)` : "";
   const evidence = writeEvidence(
     projectDir,
     runId,
     check.id,
-    `$ ${check.cmd}\n(cwd: ${worktreeDir})\n\n${stdout}\n\n--- exit code: ${exitCode} ---\n`,
+    `$ ${check.cmd}\n(cwd: ${worktreeDir})\n\n${stdout}\n\n--- exit code: ${exitCode}${treeKillNote} ---\n`,
   );
   // A missing interpreter/binary means the environment could not run the check. Saying
   // "unverified" here is the whole honesty contract: absence of proof is never proof.
