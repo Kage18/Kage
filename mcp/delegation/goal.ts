@@ -320,6 +320,102 @@ function reconcileGoalState(projectDir: string, goal: GoalRecord): GoalRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Due-wave derivation. Goals orphan when the manager that owned them dies (a daemon
+// restart, a closed session) — nothing else in the kernel advances a wave, by design
+// (autonomy is judgment, not automation). What every surface DOES need, without any of
+// them recomputing it independently, is an honest read of "is anything actually owed
+// right now" — derived fresh from run state on every read, matching the derive-display/
+// persist-death rule the rest of this module already follows (reconcileGoalState above).
+// Nothing here is ever written back to disk.
+
+export type GoalWaveDisplayStatus = "merged" | "executing" | "due" | "waiting" | "partial";
+
+export interface GoalWaveStatusInfo {
+  status: GoalWaveDisplayStatus;
+  /** Only set for 'partial' — the run ids that settled into failed/rejected. */
+  failed_run_ids?: string[];
+}
+
+/**
+ * Per-wave display status, derived purely from the goal's plan and its attached runs'
+ * live states (via readRun — the same disk-truth reader every other call site in this
+ * module uses). Never trusts goal.state, never persists anything.
+ *
+ *   merged    - every attached run reached "merged".
+ *   executing - at least one attached run is still non-terminal.
+ *   due       - no run attached yet, and every earlier wave is "merged" — nothing is
+ *               blocking this wave except a manager to dispatch it.
+ *   waiting   - no run attached yet, but an earlier wave has not merged — dispatching
+ *               this wave now would jump the plan's own ordering.
+ *   partial   - every attached run has settled, but not all of them merged; the
+ *               failed/rejected ones are named so a reviewer knows what to look at.
+ *
+ * A run id whose own record cannot be read (vanished, torn) is treated as still
+ * in-flight rather than either merged or failed — the same conservative call
+ * goalRunsAllSettled already makes for the same reason: an unreadable run is not
+ * evidence of anything, honest or not.
+ */
+export function goalWaveStatus(projectDir: string, goal: GoalRecord): GoalWaveStatusInfo[] {
+  const statuses: GoalWaveStatusInfo[] = [];
+  let earlierAllMerged = true;
+  for (const wave of goal.plan.waves) {
+    let info: GoalWaveStatusInfo;
+    if (!wave.run_ids.length) {
+      info = { status: earlierAllMerged ? "due" : "waiting" };
+    } else {
+      const states = wave.run_ids.map((runId): RunState | null => {
+        try {
+          return readRun(projectDir, runId).state;
+        } catch {
+          return null;
+        }
+      });
+      const allMerged = states.every((state) => state === "merged");
+      const anyNonTerminal = states.some((state) => state === null || !RUN_TERMINAL_STATES.has(state));
+      if (allMerged) {
+        info = { status: "merged" };
+      } else if (anyNonTerminal) {
+        info = { status: "executing" };
+      } else {
+        const failed_run_ids = wave.run_ids.filter((_, index) => states[index] === "failed" || states[index] === "rejected");
+        info = { status: "partial", failed_run_ids };
+      }
+    }
+    statuses.push(info);
+    earlierAllMerged = earlierAllMerged && info.status === "merged";
+  }
+  return statuses;
+}
+
+const OPEN_GOALS_DIGEST_LIMIT = 3;
+
+/**
+ * The compact "what did I inherit" brief for a manager session that is just starting —
+ * every non-terminal goal, one line each, wave statuses spelled out so a due wave reads
+ * as an instruction ("wave N is due — dispatch it or say why not") rather than a fact
+ * the manager has to interpret. Capped so a repo with many open goals never turns the
+ * system prompt into a wall of text. Computed fresh at spawn time — never cached — so a
+ * goal that finished five minutes ago never lingers in a brand-new session's brief.
+ */
+export function openGoalsDigestLines(projectDir: string, limit: number = OPEN_GOALS_DIGEST_LIMIT): string[] {
+  const open = listGoals(projectDir).filter((goal) => goal.state !== "done" && goal.state !== "abandoned");
+  return open.slice(0, limit).map((goal) => {
+    const firstLine = goal.intent.split("\n")[0].trim();
+    const statuses = goalWaveStatus(projectDir, goal);
+    const waveText = statuses
+      .map((info, index) =>
+        info.status === "due"
+          ? `wave ${index} is due — dispatch it or say why not`
+          : info.status === "partial"
+            ? `wave ${index} partial (${(info.failed_run_ids ?? []).join(", ") || "no runs named"})`
+            : `wave ${index} ${info.status}`,
+      )
+      .join("; ");
+    return `- ${goal.id} (${goal.state}): ${firstLine}${waveText ? ` — ${waveText}` : ""}`;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Pre-dispatch gates: files_scope disjointness and budgets. Both are checked BEFORE a
 // new run is created, never after — a plan that cannot be safely parallelized, or a
 // goal that is already spent, must never get as far as a real run record.

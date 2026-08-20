@@ -29,16 +29,18 @@ import {
   type RunType,
   type RunView,
 } from "./contract.js";
-import { appendSteerRecord, dispatchDetached, readSteerRecords } from "./dispatch.js";
+import { appendSteerRecord, dispatchDetached, dispatchRun, readSteerRecords } from "./dispatch.js";
 import {
   abandonGoal,
   attachRunToGoal,
   checkGoalAcceptsNewRun,
   createGoal,
   goalForRun,
+  goalWaveStatus,
   listGoals,
   readGoal,
   type GoalAutonomy,
+  type GoalRecord,
   type GoalRunSpec,
 } from "./goal.js";
 import { compileBrief, renderBrief } from "./brief.js";
@@ -48,7 +50,7 @@ import { sendControl, isRunLive } from "./control.js";
 import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
 import { adoptOrphanedRun, isWorktreeAdoptable, killOrphanedAgent, resumeStoppedRun } from "./recovery.js";
-import { adapterByName } from "./adapters/index.js";
+import { adapterByName, detectAgent } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
 import { claimVerdict, renderClaimCard } from "./verify.js";
 import { suggestedNextForRoom, suggestedNextPrompt } from "./suggest.js";
@@ -308,6 +310,14 @@ export interface DelegationApiContext {
   takeOverRunFn?: typeof takeOverRun;
   /** Test seam: replace the real kill-and-reattach hand-back entirely. */
   handBackFn?: typeof handBack;
+  /**
+   * Test seam: replace the real dispatch-a-run call the /goals/:id/dispatch-wave route
+   * uses. Production always uses the real dispatchRun (dispatch.ts) — the same path
+   * kage_dispatch itself calls — so this exists only so a test can avoid the real
+   * compileBrief/checkGoalAcceptsNewRun path per spec in a wave without changing
+   * production behavior at all.
+   */
+  dispatchRunFn?: typeof dispatchRun;
 }
 
 /**
@@ -821,6 +831,13 @@ function roomSuggestedNext(projectDir: string, session: string): string | null {
   return suggestedNextForRoom(runs);
 }
 
+/** GET /goals and GET /goals/:id both carry the derived per-wave status alongside the
+ * raw record, so a surface renders "wave 2 is due" without re-deriving goalWaveStatus
+ * itself from every run it lists. */
+function withWaveStatus(projectDir: string, goal: GoalRecord): GoalRecord & { wave_status: ReturnType<typeof goalWaveStatus> } {
+  return { ...goal, wave_status: goalWaveStatus(projectDir, goal) };
+}
+
 function runDetail(projectDir: string, runId: string): Record<string, unknown> {
   const run = readRun(projectDir, runId);
   const owningGoal = goalForRun(projectDir, runId);
@@ -1326,7 +1343,7 @@ export async function handleDelegationRoute(
   // Goals: the room manager's own bookkeeping for a multi-run intent. Runs stay the unit
   // of dispatch — a goal only records the plan and which runs belong to which wave.
   if (path === "/goals" && method === "GET") {
-    json(res, 200, { ok: true, goals: listGoals(projectDir) });
+    json(res, 200, { ok: true, goals: listGoals(projectDir).map((goal) => withWaveStatus(projectDir, goal)) });
     return true;
   }
 
@@ -1371,7 +1388,7 @@ export async function handleDelegationRoute(
     const [, goalId, goalAction] = goalMatch;
     if (!goalAction && method === "GET") {
       try {
-        json(res, 200, { ok: true, goal: readGoal(projectDir, goalId) });
+        json(res, 200, { ok: true, goal: withWaveStatus(projectDir, readGoal(projectDir, goalId)) });
       } catch (error) {
         json(res, 404, { ok: false, error: (error as Error).message });
       }
@@ -1412,6 +1429,68 @@ export async function handleDelegationRoute(
       return true;
     }
     return false;
+  }
+
+  // A goal's life must not depend on the one manager conversation that planned it — the
+  // manager that owned goal X can die (daemon restart, closed session) with wave 2 fully
+  // planned and never dispatched, and nothing else in the kernel moves it forward: the
+  // kernel never auto-dispatches (autonomy is judgment, not automation) and the app is
+  // read-only on goals. This route is the other half of that: dispatch exactly one wave,
+  // through the SAME path kage_dispatch itself uses (dispatchRun briefOnly, then hand off
+  // to a detached supervisor — dispatch.ts), refusing outright unless goalWaveStatus
+  // already agrees the wave is 'due'. Merge gating is unchanged, so this is safe under
+  // every autonomy level: dispatching a run is not deciding its fate.
+  const dispatchWaveMatch = path.match(/^\/goals\/([A-Za-z0-9._-]+)\/dispatch-wave$/);
+  if (dispatchWaveMatch && method === "POST") {
+    const [, goalId] = dispatchWaveMatch;
+    let goal: GoalRecord;
+    try {
+      goal = readGoal(projectDir, goalId);
+    } catch (error) {
+      json(res, 404, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      // No body required — with no wave_index, this dispatches the goal's own due wave.
+    }
+    const statuses = goalWaveStatus(projectDir, goal);
+    const waveIndex = typeof body.wave_index === "number" ? body.wave_index : statuses.findIndex((s) => s.status === "due");
+    const status = waveIndex >= 0 ? statuses[waveIndex] : undefined;
+    if (waveIndex < 0 || !status) {
+      json(res, 409, { ok: false, error: `Goal "${goal.intent}" has no wave due for dispatch.` });
+      return true;
+    }
+    if (status.status !== "due") {
+      json(res, 409, { ok: false, error: `Wave ${waveIndex} is not due (status: ${status.status}) — refusing to dispatch.` });
+      return true;
+    }
+    const wave = goal.plan.waves[waveIndex];
+    const agentName = typeof body.agent === "string" && body.agent ? body.agent : detectAgent() ?? "stub";
+    const adapter = adapterByName(agentName);
+    // Test seam, same convention POST /runs already uses (body.hold === true): skips the
+    // real detached `kage supervise` spawn so a test can assert the attach without a
+    // stray child process outliving it.
+    const hold = body.hold === true;
+    const doDispatch = ctx.dispatchRunFn ?? dispatchRun;
+    const runIds: string[] = [];
+    const warnings: string[] = [];
+    for (const spec of wave.runs) {
+      try {
+        // briefOnly + dispatchDetached mirrors kage_dispatch (index.ts) exactly — a
+        // second, divergent dispatch path is exactly what this route must not become.
+        const held = await doDispatch(projectDir, { intent: spec.intent, type: spec.type, briefOnly: true, goalId: goal.id }, adapter);
+        runIds.push(held.task.id);
+        const spawned = hold ? { pid: undefined } : dispatchDetached(projectDir, held.task);
+        if (!hold && !spawned.pid) warnings.push(`${held.task.id}: could not hand off to a detached supervisor`);
+      } catch (error) {
+        warnings.push(`"${spec.intent}": ${(error as Error).message}`);
+      }
+    }
+    json(res, 200, { ok: true, goal_id: goal.id, wave_index: waveIndex, run_ids: runIds, ...(warnings.length ? { warnings } : {}) });
+    return true;
   }
 
   if (path === "/runs" && method === "GET") {

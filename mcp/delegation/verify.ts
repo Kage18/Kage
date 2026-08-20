@@ -12,12 +12,19 @@ import { type CheckOutcome, type CheckSpec, type ClaimRecord, type TaskRecord, r
 import { currentBranch, type DiffStats, git } from "./git.js";
 import type { ProgressSink } from "./progress.js";
 
+<<<<<<< HEAD
 // 20 min, raised from 10 on 2026-08-20: the full suite (1060+ tests, several >10s
 // integration tests) outgrew the old cap in a cold worktree under concurrent
 // verification, and a run raising this constant in its OWN worktree can never
 // benefit — checks execute in the supervisor's (main) build, so the harness cannot
 // verify a fix to its own ceiling. Operator-landed for exactly that reason. The
 // timeout still exists to catch hangs; it just needs room for the real suite.
+=======
+// The suite outgrew 10 minutes under concurrent verification (2026-08-20): 1060+ tests,
+// several multi-second integration tests, and several runs verifying at once on the same
+// laptop left zero headroom, timing out a genuinely green suite. The cap still exists to
+// catch a real hang — it just needs more room for the real suite.
+>>>>>>> cfda303 (kage: Goals must survive their manager: due-wave derivation, a dispatch-wave path, and goal continuity for every new manager session. The live evidence: goal add-a-reviewer-agent-role-to-kage-s-run-260819-d1c6 has wave 1 merged (VERIFIED 5/5) and wave 2 - whose three run intents are fully written in plan.waves[1].runs - undispatched for a day, because the headless manager that owned it died in a daemon restart and NOTHING else advances waves: the kernel never auto-dispatches (correct - autonomy is judgment), the app is read-only on goals, and a new manager session is never told which goals it inherited. Goals orphan when their manager does.)
 const COMMAND_TIMEOUT_MS = 20 * 60_000;
 // Exit codes shells use for "command not found" / "cannot execute". These mean we could
 // not judge the claim — never that the claim passed.

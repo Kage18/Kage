@@ -29,7 +29,7 @@ import {
 } from "./room-supervisor.js";
 import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
 import { MANAGER_ALLOWED_TOOLS } from "./manager-client.js";
-import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
+import { managerPromptFor } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import { createWorktree } from "./worktree.js";
 import { resolveNativeTranscriptPath } from "./room-transcript.js";
@@ -154,9 +154,11 @@ export function ensureOrchestratorWorktree(projectDir: string, session?: string)
   try {
     const id = orchestratorWorktreeId(session);
     const handle = createWorktree(projectDir, id, orchestratorBranch(session));
-    // Rewritten every time, even on a reused worktree: an updated constitution must
-    // reach an orchestrator that already has a worktree from a prior session.
-    writeFileSync(join(handle.path, "CLAUDE.md"), `${MANAGER_CONSTITUTION}\n`, "utf8");
+    // Rewritten every time, even on a reused worktree: an updated constitution — and,
+    // critically, a FRESH open-goals digest (never stale-cached) — must reach an
+    // orchestrator that already has a worktree from a prior session, since that prior
+    // session is exactly the kind of manager whose goals this one may now be inheriting.
+    writeFileSync(join(handle.path, "CLAUDE.md"), `${managerPromptFor(projectDir)}\n`, "utf8");
     return handle.path;
   } catch {
     return projectDir;
