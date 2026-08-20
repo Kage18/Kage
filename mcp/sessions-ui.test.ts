@@ -19,8 +19,10 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { runInNewContext } from "node:vm";
 
 import { delegationAppHtml } from "./delegation/app-html.js";
+import { APP_CLIENT } from "./delegation/app-client.js";
 
 function composedHtml(): string {
   return delegationAppHtml("test-token");
@@ -118,6 +120,93 @@ test("piece 6 — cards: exactly display_name, branch, state+dot, tokens, age, p
   assert.ok(!script.includes('"awaiting merge"'), 'the bespoke "awaiting merge" atom must be gone from both card renderers');
   assert.ok(!script.includes('"? waiting"'), 'the bespoke "? waiting" atom must be gone');
   assert.ok(!script.includes('"resumable"'), 'the bespoke "resumable" atom must be gone');
+});
+
+// vm-sandbox harness for the pure board-card functions, same technique
+// render-calm.test.ts / dead-ends.test.ts / receipt.test.ts already use: APP_CLIENT is
+// evaluated in a fresh vm context against a minimal DOM stub, and the real functions are
+// called directly — no source-text pattern matching for the behaviour under test.
+// Function declarations (midTruncate, fillBoardCard, cardCoreAtoms, ...) hoist ahead of
+// the top-level DOM wiring that throws in this DOM-less context, so they are all live in
+// the sandbox regardless of where execution later aborts.
+function fakeElement(tag: string): Record<string, unknown> {
+  const attrs: Record<string, string> = {};
+  return {
+    tagName: tag, className: "", textContent: "", style: {}, children: [] as unknown[],
+    appendChild(c: unknown) { (this.children as unknown[]).push(c); return c; },
+    setAttribute(k: string, v: string) { attrs[k] = v; },
+    getAttribute(k: string) { return attrs[k] ?? null; },
+  };
+}
+function loadClientSandbox(): Record<string, unknown> {
+  const sandbox: Record<string, unknown> = {
+    document: {
+      createElement: (tag: string) => fakeElement(tag),
+      createTextNode: (text: string) => ({ nodeType: 3, textContent: text }),
+      getElementById: () => null,
+      querySelectorAll: () => [],
+      body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } },
+    },
+    navigator: { userAgent: "" },
+    window: {},
+    console,
+  };
+  try {
+    runInNewContext(APP_CLIENT, sandbox, { timeout: 2000 });
+  } catch {
+    // Expected: top-level DOM wiring past the function declarations throws in this
+    // DOM-less context — every function under test is still defined.
+  }
+  return sandbox;
+}
+
+// FAILS ON REVERT: the pre-fix fillBoardCard wrapped .at and .arow inside one shared
+// "mid" div appended to a single grid cell — card.children.length would be 1, not 3,
+// and that one child's own children (not card's) would hold the name/meta rows.
+test("piece 6d — board cards: fillBoardCard renders name, slug and meta as three DIRECT SIBLING rows of the card, and the meta row excludes the raw (untruncated) branch slug", () => {
+  const sandbox = loadClientSandbox();
+  const fillBoardCard = sandbox.fillBoardCard as (card: Record<string, unknown>, run: Record<string, unknown>) => void;
+  assert.equal(typeof fillBoardCard, "function", "fillBoardCard must be defined at the top level of app-client.ts");
+
+  const run = {
+    id: "r1", display_state: "running", branch: "kage/write-if-changed-finish-the-render-calm-260820-3502",
+    updated_at: new Date().toISOString(), tokens_used: 12345, verdict_label: null,
+    display_name: "Write-if-changed: finish the render calm", intent: "irrelevant",
+  };
+  const card = fakeElement("div");
+  fillBoardCard(card, run);
+
+  const rows = card.children as Record<string, unknown>[];
+  assert.equal(rows.length, 3, "the card must have exactly three direct-child rows: name, slug, meta");
+  assert.equal(rows[0].className, "at", "row 1 must be the name row");
+  assert.equal(rows[0].textContent, "Write-if-changed: finish the render calm");
+  assert.equal(rows[1].className, "aslug", "row 2 must be the branch/slug row");
+  assert.equal(rows[2].className, "arow", "row 3 must be the meta cluster row");
+
+  // Row 2 is middle-truncated (see the dedicated midTruncate test below); row 3 must
+  // NOT also carry the full, untruncated branch text — the branch lives in row 2 only.
+  const metaTexts = (rows[2].children as Record<string, unknown>[]).map((c) => c.textContent);
+  assert.ok(!metaTexts.includes(run.branch) && !metaTexts.some((t) => typeof t === "string" && t.indexOf("write-if-changed-finish") >= 0),
+    "the meta row (row 3) must not repeat the full branch slug — that belongs to row 2 only");
+});
+
+// FAILS ON REVERT: reverting to a plain shortBranch(run.branch) (no midTruncate call)
+// makes the "exactly one ellipsis, capped length" assertions fail on any branch longer
+// than 31 characters — real run slugs like write-if-changed-finish-the-render-calm-260820-3502 always are.
+test("piece 6e — board cards: the middle-truncation helper keeps a leading and trailing slice with exactly one ellipsis, and never exceeds head + 1 + tail", () => {
+  const sandbox = loadClientSandbox();
+  const midTruncate = sandbox.midTruncate as (text: string, head: number, tail: number) => string;
+  assert.equal(typeof midTruncate, "function", "midTruncate must be defined at the top level of app-client.ts");
+
+  const long = "write-if-changed-finish-the-render-calm-260820-3502";
+  const out = midTruncate(long, 18, 12);
+  assert.equal(out, long.slice(0, 18) + "…" + long.slice(long.length - 12), "must be exactly the 18-char head + one ellipsis + 12-char tail");
+  assert.equal((out.match(/…/g) || []).length, 1, "exactly one ellipsis character");
+  assert.ok(out.length <= 18 + 1 + 12, "truncated output must never exceed head + 1 + tail characters");
+  assert.ok(out.endsWith("260820-3502"), "the trailing -YYMMDD-serial must survive untouched, exactly as the brief requires");
+
+  const short = "kage/fix-thing-1a2b";
+  assert.equal(midTruncate(short, 18, 12), short, "text already within the cap must pass through unchanged, not gain a spurious ellipsis");
 });
 
 test("piece 6b — the mode toggle's two positions share one grammar: both state words, not a command beside a gerund", () => {
