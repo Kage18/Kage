@@ -12,7 +12,13 @@ import { type CheckOutcome, type CheckSpec, type ClaimRecord, type TaskRecord, r
 import { currentBranch, type DiffStats, git } from "./git.js";
 import type { ProgressSink } from "./progress.js";
 
-const COMMAND_TIMEOUT_MS = 10 * 60_000;
+// 20 min, raised from 10 on 2026-08-20: the full suite (1060+ tests, several >10s
+// integration tests) outgrew the old cap in a cold worktree under concurrent
+// verification, and a run raising this constant in its OWN worktree can never
+// benefit — checks execute in the supervisor's (main) build, so the harness cannot
+// verify a fix to its own ceiling. Operator-landed for exactly that reason. The
+// timeout still exists to catch hangs; it just needs room for the real suite.
+const COMMAND_TIMEOUT_MS = 20 * 60_000;
 // Exit codes shells use for "command not found" / "cannot execute". These mean we could
 // not judge the claim — never that the claim passed.
 const NO_ENV_EXIT_CODES = new Set([126, 127]);
