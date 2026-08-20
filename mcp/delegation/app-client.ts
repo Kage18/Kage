@@ -32,6 +32,111 @@ function h(tag, cls, text) {
   if (text !== undefined) el.textContent = text;
   return el;
 }
+
+// --- render-calm: the seam that kills the whole-page repaint. AO's own renderer does
+// keyed, targeted updates off a change feed instead of repainting on every poll tick —
+// this is that discipline for Kage's vanilla DOM, no framework. Three pieces:
+//   1. revisionChanged() gates a whole section's DOM work behind a cheap stable-hash
+//      compare, so an unchanged poll response touches nothing.
+//   2. keyedListPlan() is the pure add/remove/reorder DECISION for a keyed list — never
+//      says to touch a key that is neither added nor removed.
+//   3. reconcileChildren() is the thin DOM APPLIER: it moves/keeps real node identity
+//      for anything still wanted, so an unaffected row's node is never destroyed and
+//      recreated (which is what causes focus loss and paint flicker).
+// RENDER_COUNTS is the proof seam: every section's actual DOM-writing function bumps
+// its own counter exactly once per real paint, never on a gated skip — tests (and the
+// console, via window.__kageRenderCounts) read it directly.
+var RENDER_COUNTS = { runs: 0, board: 0, sidebar: 0, goalRail: 0, room: 0, memory: 0, detail: 0 };
+try { window.__kageRenderCounts = RENDER_COUNTS; } catch (e) {}
+function bumpRenderCount(name) { RENDER_COUNTS[name] = (RENDER_COUNTS[name] || 0) + 1; }
+
+// Deterministic stringify — object keys sorted, so two payloads differing only in key
+// insertion order still hash identically. This repo's run/goal lists run to tens of
+// entries, not thousands, so a full stringify per poll costs far less than the DOM
+// rebuild it exists to skip.
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  var keys = Object.keys(value).sort();
+  return "{" + keys.map(function (k) { return JSON.stringify(k) + ":" + stableStringify(value[k]); }).join(",") + "}";
+}
+
+// One remembered revision per section — a plain object keyed by section name, not a
+// per-caller closure, so every polling refresh path shares the same tiny gate.
+var lastRevision = { runs: null, board: null, sidebar: null, goalRail: null, memory: null };
+// True (and remembers the new hash) the first time this exact payload is seen for this
+// section; false — meaning "skip the DOM work" — every time after, until the payload
+// actually differs.
+function revisionChanged(section, payload) {
+  var rev = stableStringify(payload);
+  if (lastRevision[section] === rev) return false;
+  lastRevision[section] = rev;
+  return true;
+}
+
+// The patch-vs-rebuild decision for a keyed list: given the keys currently painted (in
+// order) and the keys that should be painted now, say which existing keys to drop,
+// which new keys to create, and whether the surviving keys' order itself moved. Never
+// names a key that is neither added nor removed — a caller that only adds "removed" and
+// "added" nodes and reorders on "reordered" never touches an untouched row.
+function keyedListPlan(existingKeys, nextKeys) {
+  var nextSet = {};
+  nextKeys.forEach(function (k) { nextSet[k] = true; });
+  var existingSet = {};
+  existingKeys.forEach(function (k) { existingSet[k] = true; });
+  var removed = existingKeys.filter(function (k) { return !nextSet[k]; });
+  var added = nextKeys.filter(function (k) { return !existingSet[k]; });
+  var kept = existingKeys.filter(function (k) { return nextSet[k]; });
+  var expected = nextKeys.filter(function (k) { return existingSet[k]; });
+  var reordered = false;
+  for (var i = 0; i < kept.length; i += 1) {
+    if (kept[i] !== expected[i]) { reordered = true; break; }
+  }
+  return { removed: removed, added: added, reordered: reordered };
+}
+
+// Reconciles a container's children to desiredNodes, in order. Keeps real DOM node
+// identity for anything already wanted (moving, not recreating it), removes only nodes
+// no longer wanted, and inserts only genuinely new ones — the DOM-side twin of
+// keyedListPlan's decision, generic over whatever node list a section builds.
+function reconcileChildren(container, desiredNodes) {
+  var existing = Array.prototype.slice.call(container.childNodes || []);
+  existing.forEach(function (node) {
+    if (desiredNodes.indexOf(node) < 0) container.removeChild(node);
+  });
+  var ref = container.firstChild;
+  desiredNodes.forEach(function (node) {
+    if (ref !== node) container.insertBefore(node, ref);
+    ref = node.nextSibling;
+  });
+}
+
+// A single age label, wired for the ticker below: the visible text is set once here,
+// but tickAges() repaints it every 15s from the data-age (+ optional prefix/suffix)
+// attributes alone — no section re-render, no DOM rebuild, just the text node.
+function ageSpan(cls, iso, prefix, suffix) {
+  var el = h("span", cls);
+  el.setAttribute("data-age", iso);
+  if (prefix) el.setAttribute("data-age-prefix", prefix);
+  if (suffix) el.setAttribute("data-age-suffix", suffix);
+  el.textContent = (prefix || "") + ago(iso) + (suffix || "");
+  return el;
+}
+// Patches every live age label's text in place from its own data-age attribute —
+// timers tick without repaints, per the discipline this file exists to enforce. Never
+// calls bumpRenderCount: this is not a section render, just a text-node refresh.
+function tickAges() {
+  var nodes = document.querySelectorAll ? document.querySelectorAll("[data-age]") : [];
+  for (var i = 0; i < nodes.length; i += 1) {
+    var el = nodes[i];
+    var iso = el.getAttribute("data-age");
+    if (!iso) continue;
+    var prefix = el.getAttribute("data-age-prefix") || "";
+    var suffix = el.getAttribute("data-age-suffix") || "";
+    el.textContent = prefix + ago(iso) + suffix;
+  }
+}
+
 function ago(iso) {
   var s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return Math.floor(s) + "s";
@@ -202,62 +307,62 @@ function renderWork() {
   renderDetail();
 }
 
+// The answer field and the merge-button group are split out from workRow's own
+// creation so patchWorkRow (below) can rebuild just one of them on an update — the
+// answer field specifically is skipped entirely by patchWorkRow while the user is
+// actively focused in it, so a half-typed reply to a blocked run is never wiped out
+// from under them by a poll tick.
+function buildAnswerBlock(run) {
+  var answer = h("div", "qanswer");
+  if (isPlanApproval(run)) {
+    var approveRow = h("button", "btn primary sm", "Approve");
+    approveRow.onclick = function (ev) { ev.stopPropagation(); tellRun(run.id, "approved — proceed as planned"); };
+    answer.appendChild(approveRow);
+  }
+  var field = document.createElement("input");
+  field.type = "text";
+  field.placeholder = isPlanApproval(run) ? "Or answer with a revision…" : "Answer the agent…";
+  field.onclick = function (ev) { ev.stopPropagation(); };
+  field.onkeydown = function (ev) {
+    ev.stopPropagation();
+    if (ev.key !== "Enter" || !field.value.trim()) return;
+    var msg = field.value.trim();
+    field.disabled = true;
+    tellRun(run.id, msg);
+  };
+  answer.appendChild(field);
+  return answer;
+}
+function buildMergeBtnGroup(run) {
+  var acts = h("div", "qbtns");
+  var pending = pendingActions[run.id];
+  var merge = h("button", "btn primary sm", pending || "Merge");
+  merge.title = "Land the code and ratify what it learned";
+  if (pending) merge.disabled = true;
+  merge.onclick = function (ev) {
+    ev.stopPropagation();
+    actOnRun(run.id, "merge", null, "Merging…", "merged");
+  };
+  acts.appendChild(merge);
+  return acts;
+}
 function workRow(run) {
   var needsYou = run.ownership === "needs_you";
-  var row = h("div", "wrow" + (needsYou ? " attn" : "") + (state.selected === run.id ? " sel" : ""));
+  var row = h("div", "wrow");
   row.setAttribute("data-run", run.id);
   row.tabIndex = 0;
-  var g = glyphFor(run);
-  row.appendChild(h("span", "glyph " + g[1], g[0]));
+  var glyphEl = h("span");
+  row.appendChild(glyphEl);
   var mid = h("div");
+  // patchWorkRow (below) overwrites this on the very same call — the initial value is
+  // set here too, matching it exactly, only so the row is never briefly empty and the
+  // element itself is create-time keyed the same way as its patched-in-place update.
   mid.appendChild(h("div", "qt", needsYou ? decisionText(run) : displayName(run)));
-  // Trimmed to the shared card shape (docs/design/SESSIONS_SURFACE.md §5): branch,
-  // state word with a dot, token count, plus the verdict chip on a finished run — the
-  // row's own age already lives in .qtime on the right, so it is not repeated here.
   var atoms = h("div", "qatoms");
-  cardCoreAtoms(run).forEach(function (el) { atoms.appendChild(el); });
-  var verdict = verdictChipFor(run);
-  if (verdict) atoms.appendChild(verdictChipEl(verdict));
   mid.appendChild(atoms);
-  // The question answers where it is asked. Delivery is reported with the kernel's
-  // own vocabulary, never assumed.
-  if (run.display_state === "blocked") {
-    var answer = h("div", "qanswer");
-    if (isPlanApproval(run)) {
-      var approveRow = h("button", "btn primary sm", "Approve");
-      approveRow.onclick = function (ev) { ev.stopPropagation(); tellRun(run.id, "approved — proceed as planned"); };
-      answer.appendChild(approveRow);
-    }
-    var field = document.createElement("input");
-    field.type = "text";
-    field.placeholder = isPlanApproval(run) ? "Or answer with a revision…" : "Answer the agent…";
-    field.onclick = function (ev) { ev.stopPropagation(); };
-    field.onkeydown = function (ev) {
-      ev.stopPropagation();
-      if (ev.key !== "Enter" || !field.value.trim()) return;
-      var msg = field.value.trim();
-      field.disabled = true;
-      tellRun(run.id, msg);
-    };
-    answer.appendChild(field);
-    mid.appendChild(answer);
-  }
   row.appendChild(mid);
   var right = h("div", "qact");
-  right.appendChild(h("span", "qtime", ago(run.updated_at)));
-  if (run.display_state === "ready") {
-    var acts = h("div", "qbtns");
-    var pending = pendingActions[run.id];
-    var merge = h("button", "btn primary sm", pending || "Merge");
-    merge.title = "Land the code and ratify what it learned";
-    if (pending) merge.disabled = true;
-    merge.onclick = function (ev) {
-      ev.stopPropagation();
-      actOnRun(run.id, "merge", null, "Merging…", "merged");
-    };
-    acts.appendChild(merge);
-    right.appendChild(acts);
-  }
+  right.appendChild(ageSpan("qtime", run.updated_at));
   row.appendChild(right);
   row.onclick = function () { selectRun(run.id); };
   row.onkeydown = function (ev) {
@@ -269,16 +374,86 @@ function workRow(run) {
       focusPrimary();
     }
   };
+  patchWorkRow(row, run, needsYou);
+  return row;
+}
+// The keyed-reuse update for one run row: text nodes, class names and the two
+// sub-blocks that can appear/disappear (the answer field, the merge button) are
+// patched in place — the row node itself is never destroyed and recreated, so an
+// unrelated row two lines up never even repaints. The one exception carved out on
+// purpose: the answer field is left completely untouched while the user is focused in
+// it (item 3's "never rebuild what the user is touching").
+function patchWorkRow(row, run, needsYou) {
+  row.className = "wrow" + (needsYou ? " attn" : "") + (state.selected === run.id ? " sel" : "");
+  var glyphEl = row.firstChild;
+  var g = glyphFor(run);
+  if (glyphEl) { glyphEl.className = "glyph " + g[1]; glyphEl.textContent = g[0]; }
+  var qt = row.querySelector(".qt");
+  if (qt) qt.textContent = needsYou ? decisionText(run) : displayName(run);
+  // Trimmed to the shared card shape (docs/design/SESSIONS_SURFACE.md §5): branch,
+  // state word with a dot, token count, plus the verdict chip on a finished run — the
+  // row's own age already lives in .qtime on the right, so it is not repeated here.
+  var atomsHost = row.querySelector(".qatoms");
+  if (atomsHost) {
+    atomsHost.textContent = "";
+    cardCoreAtoms(run).forEach(function (el) { atomsHost.appendChild(el); });
+    var verdict = verdictChipFor(run);
+    if (verdict) atomsHost.appendChild(verdictChipEl(verdict));
+  }
+  var mid = qt ? qt.parentNode : null;
+  var oldAnswer = row.querySelector(".qanswer");
+  var answerField = oldAnswer ? oldAnswer.querySelector("input") : null;
+  var touchingAnswer = Boolean(answerField && document.activeElement === answerField);
+  // The question answers where it is asked. Delivery is reported with the kernel's own
+  // vocabulary, never assumed.
+  if (!touchingAnswer && mid) {
+    if (run.display_state === "blocked") {
+      var freshAnswer = buildAnswerBlock(run);
+      if (oldAnswer) mid.replaceChild(freshAnswer, oldAnswer);
+      else mid.appendChild(freshAnswer);
+    } else if (oldAnswer) {
+      mid.removeChild(oldAnswer);
+    }
+  }
+  var qtimeEl = row.querySelector(".qtime");
+  if (qtimeEl) qtimeEl.setAttribute("data-age", run.updated_at);
+  var actHost = row.querySelector(".qact");
+  if (actHost) {
+    var oldBtns = actHost.querySelector(".qbtns");
+    if (oldBtns) actHost.removeChild(oldBtns);
+    if (run.display_state === "ready") actHost.appendChild(buildMergeBtnGroup(run));
+  }
+}
+
+// Every run row is cached by run id and reused across renders — a row whose own hash
+// hasn't changed is not even patched, let alone recreated.
+var workRowCache = {};
+function runRowHash(run, needsYou) {
+  return stableStringify({
+    display_state: run.display_state, needsYou: needsYou, branch: run.branch, updated_at: run.updated_at,
+    tokens_used: run.tokens_used, verdict_label: run.verdict_label, display_name: run.display_name,
+    intent: run.intent, waiting_on: run.waiting_on, pending: pendingActions[run.id] || null,
+  });
+}
+function getOrPatchWorkRow(run, needsYou) {
+  var cached = workRowCache[run.id];
+  var hash = runRowHash(run, needsYou);
+  var row;
+  if (cached && cached.hash === hash) {
+    row = cached.row;
+  } else if (cached) {
+    patchWorkRow(cached.row, run, needsYou);
+    cached.hash = hash;
+    row = cached.row;
+  } else {
+    row = workRow(run);
+    workRowCache[run.id] = { row: row, hash: hash };
+  }
+  row.className = "wrow" + (needsYou ? " attn" : "") + (state.selected === run.id ? " sel" : "");
   return row;
 }
 
 function renderWorkList() {
-  var listWrap = document.getElementById("run-list");
-  // Rebuilding the rows collapses the scroll container for a frame; restoring the
-  // offset afterwards is what keeps a refresh from yanking the list back to the top.
-  var scroller = listWrap.parentNode;
-  var keepScroll = scroller.scrollTop;
-  listWrap.textContent = "";
   renderHandover();
   renderGoalCards();
   // Sections ordered by what it COSTS to ignore, not by when it happened: a blocked
@@ -291,6 +466,7 @@ function renderWorkList() {
     ["Working", function (r) { return r.ownership === "working"; }],
     ["Done", function (r) { return r.ownership === "done"; }],
   ];
+  var built = [];
   sections.forEach(function (spec) {
     var members = state.runs.filter(spec[1]);
     // Finished goals collapse into this same section as one quiet row each — they are
@@ -302,26 +478,60 @@ function renderWorkList() {
     members.sort(function (a, b) { return String(b.updated_at).localeCompare(String(a.updated_at)); });
     var capped = spec[0] === "Done" && !state.showAllDone && members.length > 8;
     var shown = capped ? members.slice(0, 8) : members;
-    var head = h("div", "lgroup", spec[0]);
-    head.appendChild(h("em", "", String(members.length + doneGoals.length)));
-    listWrap.appendChild(head);
-    shown.forEach(function (run) {
-      listWrap.appendChild(workRow(run));
-      state.workOrder.push(run.id);
+    built.push({ label: spec[0], total: members.length + doneGoals.length, shown: shown, doneGoals: doneGoals, capped: capped, capCount: members.length });
+  });
+  // workOrder must stay correct for j/k navigation even on a gated (skipped) pass below
+  // — it costs nothing beyond the filtering already done above.
+  state.workOrder = [];
+  built.forEach(function (section) { section.shown.forEach(function (run) { state.workOrder.push(run.id); }); });
+
+  var payload = {
+    sections: built.map(function (s) {
+      return {
+        label: s.label, total: s.total, capped: s.capped,
+        shown: s.shown.map(function (r) {
+          return { id: r.id, display_state: r.display_state, ownership: r.ownership, branch: r.branch, updated_at: r.updated_at,
+            tokens_used: r.tokens_used, verdict_label: r.verdict_label, display_name: r.display_name, intent: r.intent, waiting_on: r.waiting_on };
+        }),
+        doneGoals: s.doneGoals.map(function (g) { return { id: g.id, intent: g.intent, state: g.state }; }),
+      };
+    }),
+    selected: state.selected, pending: pendingActions, hasRuns: Boolean(state.runs.length),
+  };
+  if (!revisionChanged("runs", payload)) return;
+  bumpRenderCount("runs");
+
+  var listWrap = document.getElementById("run-list");
+  // Rebuilding the rows collapses the scroll container for a frame; restoring the
+  // offset afterwards is what keeps a refresh from yanking the list back to the top.
+  var scroller = listWrap.parentNode;
+  var keepScroll = scroller.scrollTop;
+  var desired = [];
+  var liveIds = {};
+  built.forEach(function (section) {
+    var head = h("div", "lgroup", section.label);
+    head.appendChild(h("em", "", String(section.total)));
+    desired.push(head);
+    section.shown.forEach(function (run) {
+      var needsYou = run.ownership === "needs_you";
+      desired.push(getOrPatchWorkRow(run, needsYou));
+      liveIds[run.id] = true;
     });
-    doneGoals.forEach(function (goal) { listWrap.appendChild(goalDoneRow(goal)); });
-    if (capped) {
-      var more = h("button", "showmore", "show all " + members.length + " done");
+    section.doneGoals.forEach(function (goal) { desired.push(goalDoneRow(goal)); });
+    if (section.capped) {
+      var more = h("button", "showmore", "show all " + section.capCount + " done");
       more.onclick = function () { state.showAllDone = true; renderWork(); };
-      listWrap.appendChild(more);
+      desired.push(more);
     }
   });
   if (!state.runs.length) {
-    listWrap.appendChild(emptyBlock(
+    desired.push(emptyBlock(
       "No runs yet",
       "A run is one delegated job: Kage briefs an agent from repo memory, it works in its own worktree, and the kernel re-runs your checks before you see a result.",
       "n"));
   }
+  reconcileChildren(listWrap, desired);
+  Object.keys(workRowCache).forEach(function (id) { if (!liveIds[id]) delete workRowCache[id]; });
   scroller.scrollTop = keepScroll;
 }
 
@@ -440,10 +650,12 @@ function abandonGoalClick(goal) {
     refresh();
   });
 }
-function goalCard(goal) {
-  var card = h("div", "card goal-card");
-  card.id = "goal-" + goal.id;
-  card.tabIndex = 0;
+// The card's inner content, shared by creation and by the keyed-reuse patch below — a
+// goal card carries no focus-sensitive input, so a full inner rebuild on a real hash
+// change is cheap and safe; only the CARD's own node identity (never recreated while
+// its goal id survives) is what keeps the goal rail from flickering as a whole.
+function fillGoalCard(card, goal) {
+  card.textContent = "";
   var head = h("div", "ghead");
   head.appendChild(h("div", "gt", goal.intent));
   head.appendChild(h("span", "chip state-" + goal.state, goal.state));
@@ -477,6 +689,12 @@ function goalCard(goal) {
   abandon.onclick = function (ev) { ev.stopPropagation(); abandonGoalClick(goal); };
   foot.appendChild(abandon);
   card.appendChild(foot);
+}
+function goalCard(goal) {
+  var card = h("div", "card goal-card");
+  card.id = "goal-" + goal.id;
+  card.tabIndex = 0;
+  fillGoalCard(card, goal);
   // The card itself is the whole goal surface's entry point (finding 1): title, state,
   // autonomy, wave dots and spend are all summary — reading the full intent, what
   // autonomy actually means, and each wave's runs by name needs the detail view below.
@@ -485,6 +703,20 @@ function goalCard(goal) {
     if (ev.target !== card) return;
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openGoalDetail(goal.id); }
   };
+  return card;
+}
+var goalCardCache = {};
+function goalCardHash(goal) {
+  return stableStringify({ intent: goal.intent, state: goal.state, autonomy: goal.autonomy, plan: goal.plan,
+    spend: goalSpendLabel(goal), tones: (goal.plan.waves || []).map(function (w) { return w.run_ids.map(goalWaveTone); }) });
+}
+function getOrPatchGoalCard(goal) {
+  var cached = goalCardCache[goal.id];
+  var hash = goalCardHash(goal);
+  if (cached && cached.hash === hash) return cached.card;
+  if (cached) { fillGoalCard(cached.card, goal); cached.hash = hash; return cached.card; }
+  var card = goalCard(goal);
+  goalCardCache[goal.id] = { card: card, hash: hash };
   return card;
 }
 // --- goal detail: the goal card's ENTIRE surface used to be the card itself — no
@@ -584,9 +816,15 @@ function goalDoneRow(goal) {
 function renderGoalCards() {
   var wrap = document.getElementById("goal-cards");
   if (!wrap) return;
-  wrap.textContent = "";
   var active = (state.goals || []).filter(function (g) { return g.state === "planning" || g.state === "executing"; });
-  active.forEach(function (goal) { wrap.appendChild(goalCard(goal)); });
+  var payload = active.map(function (g) { return { id: g.id, hash: goalCardHash(g) }; });
+  if (!revisionChanged("goalRail", payload)) return;
+  bumpRenderCount("goalRail");
+  var desired = active.map(getOrPatchGoalCard);
+  reconcileChildren(wrap, desired);
+  var liveIds = {};
+  active.forEach(function (g) { liveIds[g.id] = true; });
+  Object.keys(goalCardCache).forEach(function (id) { if (!liveIds[id]) delete goalCardCache[id]; });
 }
 
 // --- room: the conversation. askManager's tool names arrive as "mcp__kage__kage_dispatch";
@@ -798,7 +1036,7 @@ function renderHistoryTurns(turnsEl, turns) {
       var prev = turns[index - 1];
       var brk = h("div", "turnbreak");
       brk.appendChild(h("span", "rule"));
-      brk.appendChild(h("span", "label", prev.at ? "done · " + ago(prev.at) : "done"));
+      brk.appendChild(prev.at ? ageSpan("label", prev.at, "done · ") : h("span", "label", "done"));
       turnsEl.appendChild(brk);
     }
     // The entry animation is for turns arriving right now — replaying it on turns
@@ -916,6 +1154,7 @@ function renderRoom() {
   document.getElementById("room-send").disabled = state.room.busy;
   if (signature === roomSignature) return;
   roomSignature = signature;
+  bumpRenderCount("room");
 
   var scroll = document.querySelector("#v-room .room-scroll");
   var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
@@ -1028,6 +1267,9 @@ function renderMemory() {
   var list = document.getElementById("mem-list");
   var types = document.getElementById("mem-types");
   if (!hero || !mem) return;
+  var query = (document.getElementById("mem-search").value || "").trim().toLowerCase();
+  if (!revisionChanged("memory", { mem: mem, memType: state.memType, query: query })) return;
+  bumpRenderCount("memory");
 
   hero.textContent = "";
   health.textContent = "";
@@ -1120,7 +1362,6 @@ function renderMemory() {
     types.appendChild(chip);
   });
 
-  var query = (document.getElementById("mem-search").value || "").trim().toLowerCase();
   var shown = mem.packets.filter(function (packet) {
     if (state.memType && packet.type !== state.memType) return false;
     if (!query) return true;
@@ -1137,7 +1378,7 @@ function renderMemory() {
     if (packet.summary) row.appendChild(h("div", "s", packet.summary));
     var meta = h("div", "meta");
     meta.appendChild(h("span", "ty", packet.type));
-    if (packet.updated_at) meta.appendChild(h("span", null, ago(packet.updated_at) + " ago"));
+    if (packet.updated_at) meta.appendChild(ageSpan(null, packet.updated_at, "", " ago"));
     if (packet.paths.length) meta.appendChild(h("span", null, packet.paths.length + (packet.paths.length === 1 ? " file" : " files")));
     if (packet.status && packet.status !== "active") meta.appendChild(h("span", "stale", packet.status));
     row.appendChild(meta);
@@ -2019,7 +2260,7 @@ function renderDetailPanel(panel, d, run) {
       var row = h("div", "pnl-tl-row");
       row.appendChild(h("span", "pnl-tl-state", change.state));
       row.appendChild(h("span", "pnl-tl-by", change.by));
-      row.appendChild(h("span", "pnl-tl-at", ago(change.at)));
+      row.appendChild(ageSpan("pnl-tl-at", change.at));
       if (change.note) row.appendChild(h("div", "pnl-tl-note", change.note));
       timeline.appendChild(row);
     });
@@ -2063,10 +2304,29 @@ function renderClaimlessStoppedReceipt(body, run) {
   receiptActs.appendChild(receiptReject);
   body.appendChild(receiptActs);
 }
+// The detail pane's own revision, kept PER RUN ID (not one shared slot) — flipping
+// back to a run you already viewed, whose data hasn't moved since, must not repaint
+// either. Never touches lastRevision/revisionChanged: this needs a whole map, not one
+// remembered hash.
+var detailRevisionByRun = {};
+function detailRevisionPayload(d, run) {
+  return {
+    tab: state.tab, display_state: run.display_state, waiting_on: run.waiting_on, claim: d.claim, verdict: d.verdict,
+    taught: d.taught, steers: d.steers, receipt: d.receipt, rawText: d.rawText, diffText: d.diffText, brief: d.brief,
+    events: d.events, files: d.files, branch_landed: run.branch_landed, worktree_adoptable: run.worktree_adoptable,
+    spend: run.spend, tokens_used: run.tokens_used, confidence: run.confidence, blast: run.blast, activity: run.activity,
+    intent: run.intent, agent: run.agent, branch: run.branch, goal_id: run.goal_id,
+    detailIntentOpen: state.detailIntentOpen, diffView: state.diffView, workLayout: state.workLayout, dover: state.dover,
+    mobileDetailOpen: state.mobileDetailOpen, diffJumpTarget: state.diffJumpTarget, runTerminalActive: state.runTerminalActive,
+    pending: pendingActions[run.id] || null, suggestedNext: d.suggested_next,
+  };
+}
 function renderDetail() {
   var el = document.getElementById("run-detail");
-  el.textContent = "";
   if (!state.detail) {
+    if (!revisionChanged("detail", { empty: true, hasRuns: Boolean(state.runs.length) })) return;
+    bumpRenderCount("detail");
+    el.textContent = "";
     el.appendChild(state.runs.length
       ? emptyBlock("Nothing selected", "Pick a run on the left to follow its progress, read its receipt, or review the diff.", null)
       : emptyBlock("Nothing to review yet", "Dispatch a run and its progress, receipt and diff all land here.", "n"));
@@ -2074,6 +2334,25 @@ function renderDetail() {
   }
   var d = state.detail;
   var run = d.run;
+  var rev = stableStringify(detailRevisionPayload(d, run));
+  if (detailRevisionByRun[run.id] === rev) return;
+  detailRevisionByRun[run.id] = rev;
+  bumpRenderCount("detail");
+
+  // Never rebuild what the user is touching: the composer's typed text, cursor
+  // position and focus, and the pane's scroll offset all survive the rebuild below —
+  // pinned to bottom only if the pane already was, so a live Follow tab keeps
+  // auto-following without yanking a reader who scrolled up back down.
+  var composerBefore = document.getElementById("steer-input");
+  var hadFocus = Boolean(composerBefore && document.activeElement === composerBefore);
+  var savedValue = composerBefore ? composerBefore.value : "";
+  var savedSelStart = hadFocus && composerBefore.selectionStart !== undefined ? composerBefore.selectionStart : null;
+  var savedSelEnd = hadFocus && composerBefore.selectionEnd !== undefined ? composerBefore.selectionEnd : null;
+  var scrollBefore = document.querySelector("#run-detail .dbody");
+  var savedScroll = scrollBefore ? scrollBefore.scrollTop : 0;
+  var pinnedToBottom = scrollBefore ? (scrollBefore.scrollHeight - scrollBefore.scrollTop - scrollBefore.clientHeight < 40) : true;
+
+  el.textContent = "";
 
   var head = h("div", "dhead");
   // In Board layout the detail is a slide-over — give it a way out that isn't
@@ -2325,6 +2604,17 @@ function renderDetail() {
   fl.id = "flash";
   bar.appendChild(fl);
   el.appendChild(bar);
+
+  var composerAfter = document.getElementById("steer-input");
+  if (composerAfter) {
+    composerAfter.value = savedValue;
+    if (hadFocus) {
+      composerAfter.focus();
+      if (savedSelStart !== null && composerAfter.setSelectionRange) composerAfter.setSelectionRange(savedSelStart, savedSelEnd);
+    }
+  }
+  var scrollAfter = document.querySelector("#run-detail .dbody");
+  if (scrollAfter) scrollAfter.scrollTop = pinnedToBottom ? scrollAfter.scrollHeight : savedScroll;
 }
 
 function flash(text) {
@@ -2363,11 +2653,56 @@ function actOnRun(runId, action, body, workingLabel, doneLabel) {
 
 // --- board: the second ARRANGEMENT of the work surface, not a third door.
 // Cards select the same run the list would; the same detail slides over.
+var boardCardCache = {};
+function boardCardHash(run) {
+  return stableStringify({ display_state: run.display_state, branch: run.branch, updated_at: run.updated_at,
+    tokens_used: run.tokens_used, verdict_label: run.verdict_label, display_name: run.display_name, intent: run.intent });
+}
+function fillBoardCard(card, run) {
+  card.textContent = "";
+  var mid = h("div");
+  mid.appendChild(h("div", "at", displayName(run)));
+  var arow = h("div", "arow");
+  cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
+  var boardVerdict = verdictChipFor(run);
+  if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
+  arow.appendChild(ageSpan("tm", run.updated_at));
+  mid.appendChild(arow);
+  card.appendChild(mid);
+}
+function getOrPatchBoardCard(run) {
+  var cached = boardCardCache[run.id];
+  var hash = boardCardHash(run);
+  var card;
+  if (cached && cached.hash === hash) {
+    card = cached.card;
+  } else if (cached) {
+    fillBoardCard(cached.card, run);
+    cached.hash = hash;
+    card = cached.card;
+  } else {
+    // Trimmed to AO's five fields plus the verdict chip (docs/design/
+    // SESSIONS_SURFACE.md §5) — no harness avatar, no bespoke state phrasing.
+    card = h("div", "acard");
+    card.setAttribute("data-run", run.id);
+    card.tabIndex = 0;
+    card.onclick = function () { selectRun(run.id); };
+    card.onkeydown = function (ev) {
+      if (ev.target !== card) return;
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        selectRun(run.id);
+      }
+    };
+    fillBoardCard(card, run);
+    boardCardCache[run.id] = { card: card, hash: hash };
+  }
+  card.className = "acard" + (state.selected === run.id ? " sel" : "");
+  return card;
+}
 function renderBoard() {
   var el = document.getElementById("board-cols");
-  var scroller = document.getElementById("work-board");
-  var keepScroll = scroller ? scroller.scrollTop : 0;
-  el.textContent = "";
   // Compound columns with split counts, AO's pattern: pairing related states keeps a
   // terminal state visible without spending a whole column on it. It also fixes a real
   // hole — merged runs used to vanish from the board entirely, so the one outcome you
@@ -2380,53 +2715,59 @@ function renderBoard() {
     { hint: "Work the kernel checked and you have not merged yet.", parts: [["Ready", "var(--jade)", function (r) { return r.display_state === "ready"; }],
               ["Merged", "var(--text3)", function (r) { return r.display_state === "merged"; }]] },
   ];
-  cols.forEach(function (spec) {
+  var built = cols.map(function (spec) {
+    var members = [];
+    spec.parts.forEach(function (part) { members = members.concat(state.runs.filter(part[2])); });
+    var counts = spec.parts.map(function (part) { return state.runs.filter(part[2]).length; });
+    return { spec: spec, members: members, counts: counts };
+  });
+  // workOrder must stay correct for j/k navigation even on a gated (skipped) pass below.
+  state.workOrder = [];
+  built.forEach(function (col) { col.members.forEach(function (run) { state.workOrder.push(run.id); }); });
+
+  var payload = {
+    selected: state.selected,
+    cols: built.map(function (c) {
+      return {
+        counts: c.counts,
+        members: c.members.map(function (r) {
+          return { id: r.id, display_state: r.display_state, branch: r.branch, updated_at: r.updated_at,
+            tokens_used: r.tokens_used, verdict_label: r.verdict_label, display_name: r.display_name, intent: r.intent };
+        }),
+      };
+    }),
+  };
+  if (!revisionChanged("board", payload)) return;
+  bumpRenderCount("board");
+
+  var scroller = document.getElementById("work-board");
+  var keepScroll = scroller ? scroller.scrollTop : 0;
+  var desiredCols = [];
+  var liveIds = {};
+  built.forEach(function (colBuilt) {
+    var spec = colBuilt.spec;
     var col = h("div", "bcol");
     var head = h("div", "bh");
-    var members = [];
     spec.parts.forEach(function (part, i) {
       if (i) head.appendChild(h("span", "sep", "/"));
       var dot = h("i");
       dot.style.background = part[1];
       head.appendChild(dot);
       head.appendChild(document.createTextNode(part[0]));
-      members = members.concat(state.runs.filter(part[2]));
     });
-    var counts = spec.parts.map(function (part) { return state.runs.filter(part[2]).length; });
-    head.appendChild(h("span", "n", counts.join(" / ")));
+    head.appendChild(h("span", "n", colBuilt.counts.join(" / ")));
     col.appendChild(head);
     // An empty column should say what lands here, so the board teaches its own
     // vocabulary instead of showing four zeroes.
-    if (!members.length) col.appendChild(h("div", "bempty", spec.hint));
-    members.forEach(function (run) {
-      // Trimmed to AO's five fields plus the verdict chip (docs/design/
-      // SESSIONS_SURFACE.md §5) — no harness avatar, no bespoke state phrasing.
-      var card = h("div", "acard" + (state.selected === run.id ? " sel" : ""));
-      card.setAttribute("data-run", run.id);
-      card.tabIndex = 0;
-      var mid = h("div");
-      mid.appendChild(h("div", "at", displayName(run)));
-      var arow = h("div", "arow");
-      cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
-      var boardVerdict = verdictChipFor(run);
-      if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
-      arow.appendChild(h("span", "tm", ago(run.updated_at)));
-      mid.appendChild(arow);
-      card.appendChild(mid);
-      card.onclick = function () { selectRun(run.id); };
-      card.onkeydown = function (ev) {
-        if (ev.target !== card) return;
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectRun(run.id);
-        }
-      };
-      col.appendChild(card);
-      state.workOrder.push(run.id);
+    if (!colBuilt.members.length) col.appendChild(h("div", "bempty", spec.hint));
+    colBuilt.members.forEach(function (run) {
+      col.appendChild(getOrPatchBoardCard(run));
+      liveIds[run.id] = true;
     });
-    el.appendChild(col);
+    desiredCols.push(col);
   });
+  reconcileChildren(el, desiredCols);
+  Object.keys(boardCardCache).forEach(function (id) { if (!liveIds[id]) delete boardCardCache[id]; });
   if (scroller) scroller.scrollTop = keepScroll;
 }
 
@@ -2472,23 +2813,58 @@ function fleetDot(color) {
   dot.style.background = color;
   return dot;
 }
+// The fleet keeps its own persistent wrap and per-row cache, returned by reference on
+// every call — renderProjects() (below) still re-inserts this same wrap into a freshly
+// cleared projects list on every call (that container's own rebuild is out of this
+// run's scope), but the wrap's CHILDREN — the rows most likely to churn every poll —
+// are only touched when their own content actually changed.
+var sidebarFleetWrap = null;
+var sidebarFleetRowCache = {};
+function fleetRowHash(run) {
+  return stableStringify({ display_state: run.display_state, display_name: run.display_name, intent: run.intent });
+}
 function renderSidebarFleet() {
-  var wrap = h("div", "pfleet");
-  var orch = h("div", "pfleet-row orch" + (state.view === "room" ? " on" : ""));
-  orch.appendChild(fleetDot(state.room.live ? "var(--jade)" : "var(--text3)"));
-  orch.appendChild(h("span", "pfleet-n", "Orchestrator"));
-  orch.onclick = function () { setView("room"); };
-  wrap.appendChild(orch);
   var fleet = state.runs.filter(function (r) { return ["merged", "rejected"].indexOf(r.display_state) < 0; });
+  var payload = {
+    live: state.room.live, view: state.view, selected: state.selected,
+    fleet: fleet.map(function (r) { return { id: r.id, display_state: r.display_state, display_name: r.display_name, intent: r.intent }; }),
+  };
+  var changed = revisionChanged("sidebar", payload);
+  if (!sidebarFleetWrap) sidebarFleetWrap = h("div", "pfleet");
+  if (!changed) return sidebarFleetWrap;
+  bumpRenderCount("sidebar");
+
+  var orchRow = sidebarFleetRowCache.orch;
+  if (!orchRow) { orchRow = h("div"); sidebarFleetRowCache.orch = orchRow; }
+  orchRow.className = "pfleet-row orch" + (state.view === "room" ? " on" : "");
+  orchRow.textContent = "";
+  orchRow.appendChild(fleetDot(state.room.live ? "var(--jade)" : "var(--text3)"));
+  orchRow.appendChild(h("span", "pfleet-n", "Orchestrator"));
+  orchRow.onclick = function () { setView("room"); };
+  var desired = [orchRow];
+  var liveIds = { orch: true };
   fleet.forEach(function (run) {
-    var g = glyphFor(run);
-    var row = h("div", "pfleet-row" + (state.selected === run.id && state.view === "work" ? " on" : ""));
-    row.appendChild(fleetDot(STATE_DOT_COLOR[g[1]] || "var(--text3)"));
-    row.appendChild(h("span", "pfleet-n", displayName(run)));
-    row.onclick = function () { openRun(run.id); };
-    wrap.appendChild(row);
+    var cached = sidebarFleetRowCache[run.id];
+    var hash = fleetRowHash(run);
+    var row;
+    if (cached && cached.hash === hash) {
+      row = cached.row;
+    } else {
+      row = cached ? cached.row : h("div");
+      row.textContent = "";
+      var g = glyphFor(run);
+      row.appendChild(fleetDot(STATE_DOT_COLOR[g[1]] || "var(--text3)"));
+      row.appendChild(h("span", "pfleet-n", displayName(run)));
+      row.onclick = function () { openRun(run.id); };
+      sidebarFleetRowCache[run.id] = { row: row, hash: hash };
+    }
+    row.className = "pfleet-row" + (state.selected === run.id && state.view === "work" ? " on" : "");
+    desired.push(row);
+    liveIds[run.id] = true;
   });
-  return wrap;
+  reconcileChildren(sidebarFleetWrap, desired);
+  Object.keys(sidebarFleetRowCache).forEach(function (id) { if (!liveIds[id]) delete sidebarFleetRowCache[id]; });
+  return sidebarFleetWrap;
 }
 function renderProjects() {
   var list = document.getElementById("plist");
@@ -2891,7 +3267,7 @@ function renderQueue(body, runId, steers) {
     var row = h("div", "qrow" + (delivered ? " delivered" : ""));
     var head = h("div", "qrow-head");
     head.appendChild(h("span", "atom" + (delivered ? "" : " amber"), record.status));
-    head.appendChild(h("span", "", ago(delivered ? record.delivered_at : record.at)));
+    head.appendChild(ageSpan("", delivered ? record.delivered_at : record.at));
     row.appendChild(head);
     if (delivered) {
       row.appendChild(h("div", "qrow-text", record.message));
@@ -3226,7 +3602,7 @@ function renderNotifications() {
       ? (run.waiting_on.question || run.waiting_on.detail) : runTitle(run);
     mid.appendChild(h("div", "s", detail));
     row.appendChild(mid);
-    row.appendChild(h("span", "when", ago(run.updated_at)));
+    row.appendChild(ageSpan("when", run.updated_at));
     row.onclick = function () {
       document.getElementById("notif").classList.remove("on");
       openRun(run.id);
@@ -3567,6 +3943,14 @@ Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function 
 });
 
 // --- SSE: notifications, never state. Any run event triggers a re-read.
+var runEventDebounce = null;
+function scheduleRunRefresh() {
+  if (runEventDebounce) return;
+  runEventDebounce = setTimeout(function () {
+    runEventDebounce = null;
+    refresh();
+  }, 50);
+}
 function connect() {
   var source = new EventSource("/runs/events");
   source.onopen = function () {
@@ -3582,7 +3966,13 @@ function connect() {
     document.getElementById("conn").classList.remove("off");
     document.getElementById("st-left").textContent = "live";
   });
-  source.addEventListener("run", function () { refresh(); });
+  // Several "run" events can land in the same tick (a wave dispatching, an SSE
+  // reconnect replaying a burst) — each used to call refresh() on its own, so a burst
+  // of N events meant N full refreshes stacked back to back, each one racing the DOM
+  // work of the last. A 50ms trailing debounce (setTimeout, not requestAnimationFrame —
+  // this fires off a network fetch, not a paint, so there is no frame to align to)
+  // coalesces a burst into exactly one gated refresh() pass.
+  source.addEventListener("run", function () { scheduleRunRefresh(); });
   // Room deltas stream live text so replies feel like a reply, not a page reload —
   // but the "you" and "final" kinds always trigger a re-read, so a missed delta
   // never leaves the transcript out of sync with what the server actually persisted.
@@ -3656,4 +4046,7 @@ refreshRoom();
 connect();
 setTimeout(function () { document.getElementById("room-input").focus(); }, 0);
 setInterval(refresh, 30000);
-setInterval(refreshRoom, 15000);`;
+setInterval(refreshRoom, 15000);
+// Age labels ('17h', '2m ago') tick on their own clock, independent of every polling
+// cadence above — this is the only thing that touches them between real data changes.
+setInterval(tickAges, 15000);`;

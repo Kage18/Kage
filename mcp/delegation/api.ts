@@ -586,6 +586,73 @@ function queueRoomTurn(
 // that decision.
 const VERDICT_LIST_STATES = new Set<RunView["display_state"]>(["ready", "failed", "merged", "rejected"]);
 
+type DeadFields = { branch_landed?: boolean; worktree_adoptable?: boolean };
+
+// branch_landed/worktree_adoptable each shell out to git (contract.ts's isBranchLanded,
+// recovery.ts's isWorktreeAdoptable) and withActivity() used to recompute both on every
+// /runs poll for every stopped/failed run, live or not — the server-side half of the
+// flicker fix, per docs/design note folded into this run: a poll of a run whose
+// updated_at hasn't moved never needs to ask git again. Keyed on run id + updated_at
+// (not branch@HEAD like isBranchLanded's own cache) so it also invalidates the instant
+// THIS run's own record changes, independent of whether HEAD moved — same unbounded
+// Map-per-process shape contract.ts's own branchLandedCache already uses.
+const deadFieldsCache = new Map<string, DeadFields>();
+
+// isBranchLanded (contract.ts) is `git merge-base --is-ancestor branch HEAD` alone — a
+// run branch with ZERO commits beyond where it forked sits exactly AT that merge-base,
+// so the ancestor check passes VACUOUSLY for it (a commit is trivially its own
+// ancestor). That is precisely the shape of an orphaned run whose work never got
+// committed: the UI offered both "Adopt" (worktree_adoptable, correctly) and "Close as
+// landed" (branch_landed, wrongly) for the same run, and clicking the latter would
+// reject a record that was never actually landed.
+//
+// Comparing the branch tip against `git merge-base branch HEAD` does NOT distinguish
+// this — once isBranchLanded's own ancestor check has already passed (which is the only
+// time this function is even called, see computeDeadFields below), branch is BY
+// DEFINITION an ancestor of HEAD, and the merge-base of an ancestor and its descendant
+// is ALWAYS the ancestor itself. That makes tip === merge-base true for EVERY landed
+// branch, real commits or not — comparing against HEAD after a merge is comparing
+// against a value the merge itself already contaminated. Comparing commit TIMESTAMPS
+// against the run's own created_at was tried and dropped too: git's commit-date format
+// is second-precision while created_at is millisecond-precision, so a commit landing in
+// the same wall-clock second as run creation is a genuine race between two different
+// clocks, not a property of the branch.
+//
+// The robust signal instead: the branch's own reflog. `git worktree add -b branch
+// <start>` writes exactly one reflog entry ("branch: Created from ...") when nothing has
+// happened to it since; every real commit on the branch adds another entry on top. This
+// is unaffected by merges elsewhere (a branch's reflog only records updates to ITS OWN
+// ref) and by wall-clock timing entirely — it is git's own record of whether this ref
+// has ever moved.
+function branchHasRealCommits(projectDir: string, branch: string): boolean {
+  const reflog = git(projectDir, ["log", "-g", "--format=%H", branch]);
+  if (!reflog.ok || !reflog.stdout) return false;
+  const entries = reflog.stdout.split("\n").filter(Boolean);
+  return entries.length > 1;
+}
+
+function computeDeadFields(projectDir: string, run: RunView): DeadFields {
+  const cacheKey = `${run.id}@${run.updated_at}`;
+  const cached = deadFieldsCache.get(cacheKey);
+  if (cached) return cached;
+  // The zombie-record signal (finding 3): a stopped/failed run whose branch is
+  // already an ancestor of HEAD, AND actually diverged from it (see
+  // branchHasRealCommits above) — landed by hand or some other path, but the record
+  // never learned.
+  const dead: DeadFields =
+    (run.display_state === "stopped" || run.display_state === "failed") &&
+    isBranchLanded(projectDir, run.branch) &&
+    branchHasRealCommits(projectDir, run.branch)
+      ? { branch_landed: true }
+      : {};
+  // The Adopt affordance (finding 4): only for the orphan-shaped failed run
+  // isWorktreeAdoptable actually recognizes — a plainer "unrecognized failure" never
+  // grows this field, so the button never appears for a case Adopt can't cure.
+  if (run.display_state === "failed" && isWorktreeAdoptable(projectDir, run)) dead.worktree_adoptable = true;
+  deadFieldsCache.set(cacheKey, dead);
+  return dead;
+}
+
 /**
  * "What is it doing right now" — computed from the transcript the adapters already
  * write, never asserted by the agent. Attached only to in-flight runs so the list
@@ -602,18 +669,7 @@ function withActivity(
   branch_landed?: boolean;
   worktree_adoptable?: boolean;
 } {
-  // The zombie-record signal (finding 3): a stopped/failed run whose branch is
-  // already an ancestor of HEAD — landed by hand or some other path, but the record
-  // never learned. Cheap and cached per HEAD (contract.ts's isBranchLanded), so
-  // attaching it to every stopped/failed row here costs nothing on repeat serves.
-  const dead: { branch_landed?: boolean; worktree_adoptable?: boolean } =
-    (run.display_state === "stopped" || run.display_state === "failed") && isBranchLanded(projectDir, run.branch)
-      ? { branch_landed: true }
-      : {};
-  // The Adopt affordance (finding 4): only for the orphan-shaped failed run
-  // isWorktreeAdoptable actually recognizes — a plainer "unrecognized failure" never
-  // grows this field, so the button never appears for a case Adopt can't cure.
-  if (run.display_state === "failed" && isWorktreeAdoptable(projectDir, run)) dead.worktree_adoptable = true;
+  const dead = computeDeadFields(projectDir, run);
 
   if (VERDICT_LIST_STATES.has(run.display_state)) {
     const claim = readClaim(projectDir, run.id);
