@@ -330,6 +330,34 @@ function resolveCitedPath(worktreeDir: string, token: string, files: string[]): 
   return { ok: false };
 }
 
+// A token joined by '/' can be an enumeration an agent wrote as a shorthand list
+// ("contract.ts/ratify.ts/review.ts/review-contract.test.ts") rather than one path —
+// reproduced on four real claims before this existed, each failing citations on exactly
+// this shape. Tried only as a FALLBACK, after the token has already failed to resolve as
+// one real path via resolveCitedPath above: a genuine directory ("mcp/delegation") or a
+// real single file resolves there directly (existsSync/suffix match), so this is never
+// even reached for those — the guard's teeth stay intact for a real path shaped like one.
+// Every segment must independently resolve (directly or by the same unique-suffix rule) —
+// one invented segment keeps the whole token failing exactly as before splitting existed.
+function resolveEnumeration(worktreeDir: string, token: string, files: string[]): PathResolution {
+  const segments = token.split("/").filter(Boolean);
+  if (segments.length < 2) return { ok: false };
+  const resolvedSegments: string[] = [];
+  for (const segment of segments) {
+    const resolution = resolveCitedPath(worktreeDir, segment, files);
+    if (!resolution.ok) return { ok: false };
+    resolvedSegments.push(resolution.resolvedTo ?? segment);
+  }
+  return { ok: true, resolvedTo: resolvedSegments.join(", ") };
+}
+
+function resolveCitation(worktreeDir: string, token: string, files: string[]): PathResolution {
+  const direct = resolveCitedPath(worktreeDir, token, files);
+  if (direct.ok) return direct;
+  const enumeration = resolveEnumeration(worktreeDir, token, files);
+  return enumeration.ok ? enumeration : direct;
+}
+
 function describeResolution(path: string, resolution: PathResolution): string {
   if (resolution.ok) {
     return resolution.resolvedTo && resolution.resolvedTo !== path
@@ -347,8 +375,8 @@ function runCitationCheck(projectDir: string, runId: string, worktreeDir: string
   // A path already counted as a formal citation is not reported a second time as prose.
   const prose = citedPaths(claimText.prose).filter((path) => !citedSet.has(path));
 
-  const citedResolved = cited.map((path) => ({ path, resolution: resolveCitedPath(worktreeDir, path, files) }));
-  const proseResolved = prose.map((path) => ({ path, resolution: resolveCitedPath(worktreeDir, path, files) }));
+  const citedResolved = cited.map((path) => ({ path, resolution: resolveCitation(worktreeDir, path, files) }));
+  const proseResolved = prose.map((path) => ({ path, resolution: resolveCitation(worktreeDir, path, files) }));
   const missingCited = citedResolved.filter((entry) => !entry.resolution.ok);
   const missingProse = proseResolved.filter((entry) => !entry.resolution.ok);
 

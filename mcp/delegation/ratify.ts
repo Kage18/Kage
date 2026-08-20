@@ -12,6 +12,7 @@ import {
   type ClaimRecord,
   type RunActor,
   type RunState,
+  type RunType,
   type TaskRecord,
   appendRunLedger,
   onRunTransition,
@@ -113,6 +114,31 @@ export interface MergeResult {
   message: string;
 }
 
+// Types whose whole point is changing code — a branch of one of these with zero commits
+// beyond its fork point means the work was never committed, not that there was none to
+// do. chore/investigation can legitimately conclude "nothing needed changing", so those
+// two alone are allowed to merge empty.
+const REQUIRES_CONTENT_TYPES = new Set<RunType>(["feature", "bugfix", "refactor", "migration"]);
+
+// How many commits sit between the branch's own fork point and its tip — the same
+// question a merge is actually about answering "is there anything here to land". Zero
+// is exactly the shape that let a run merge reading VERIFIED 5/5 over nothing: every
+// check passed honestly (a suite with nothing to test is still green, an empty diff is
+// trivially under any cap), `git merge --no-ff` "succeeded" while landing no content, and
+// the worktree holding the only real copy of the work was then deleted by merge cleanup.
+// Counted directly via merge-base..tip rather than trusting `base` to already be an
+// ancestor of `branch` (it always should be, but a git rev-range computed from the actual
+// fork point is correct even if that assumption is ever violated).
+function commitsSinceFork(projectDir: string, base: string, branch: string): number {
+  const mergeBase = git(projectDir, ["merge-base", base, branch]);
+  const tip = mergeBase.ok ? mergeBase.stdout.trim() : "";
+  if (!tip) return 0;
+  const count = git(projectDir, ["rev-list", "--count", `${tip}..${branch}`]);
+  if (!count.ok) return 0;
+  const parsed = Number.parseInt(count.stdout.trim(), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function mergeRun(projectDir: string, runId: string, actor: RunActor = "user"): MergeResult {
   const task = readRun(projectDir, runId);
   // Opt-in gate (contract.ts's review_required): a run that never asked for review keeps
@@ -133,6 +159,25 @@ export function mergeRun(projectDir: string, runId: string, actor: RunActor = "u
   commitWorktree(projectDir, runId, `kage: review edits for ${runId}`);
 
   const base = currentBranch(projectDir);
+
+  // Refuse a feature/bugfix/refactor/migration branch that adds no commits — see
+  // commitsSinceFork above for the incident this closes. The worktree is left exactly as
+  // it is (no commit, no removeWorktree): if real work is still sitting there uncommitted,
+  // this refusal is what keeps it recoverable instead of deleted out from under the run.
+  const emptyDiff = commitsSinceFork(projectDir, base, task.branch) === 0;
+  if (emptyDiff && REQUIRES_CONTENT_TYPES.has(task.type)) {
+    const tip = git(projectDir, ["rev-parse", "--short", task.branch]).stdout.trim() || task.branch;
+    return {
+      ok: false,
+      merged: false,
+      ratified: 0,
+      message:
+        `Refusing to merge ${runId}: branch ${task.branch} (tip ${tip}) adds no commits beyond ${base} — ` +
+        "the work was never committed. The worktree may still hold it; do not merge-and-delete it. " +
+        `Commit the work on ${task.branch} (e.g. via \`kage open ${runId}\`), then re-run kage merge.`,
+    };
+  }
+
   // Refuse rather than let git spray a wall of red: a merge that would clobber the
   // reviewer's own uncommitted work is a decision for them, not for us.
   const collisions = dirtyPaths(projectDir);
@@ -169,9 +214,17 @@ export function mergeRun(projectDir: string, runId: string, actor: RunActor = "u
     git(projectDir, [...commitIdentityArgs(projectDir), "commit", "-m", `kage: ratify ${ratifiedFiles.length} learning(s) from ${runId}`]);
   }
 
+  // A chore/investigation run was allowed to merge with no commits above — a legitimate
+  // "nothing needed changing" conclusion, but one a human reading the receipt must never
+  // mistake for real landed work. Lead both the claim (the receipt renderClaimCard reads)
+  // and the merge output itself with "EMPTY DIFF" so it cannot be missed.
+  if (emptyDiff && !claim.statement.startsWith("EMPTY DIFF")) {
+    writeClaim(projectDir, runId, { ...claim, statement: `EMPTY DIFF — ${claim.statement}` });
+  }
+
   removeWorktree(projectDir, runId);
   transitionRun(projectDir, runId, "merged", actor);
-  appendRunLedger(projectDir, { kind: "merged", run_id: runId, type: task.type, ratified: ratifiedFiles.length });
+  appendRunLedger(projectDir, { kind: "merged", run_id: runId, type: task.type, ratified: ratifiedFiles.length, empty_diff: emptyDiff });
   try {
     refreshProject(projectDir);
   } catch {
@@ -181,7 +234,9 @@ export function mergeRun(projectDir: string, runId: string, actor: RunActor = "u
     ok: true,
     merged: true,
     ratified: ratifiedFiles.length,
-    message: `Merged ${task.branch} into ${base}.${ratifiedFiles.length ? ` Ratified ${ratifiedFiles.length} learning(s) — the next brief will carry them.` : ""}`,
+    message:
+      `${emptyDiff ? `EMPTY DIFF — ${task.type} run reached a no-change conclusion; branch ${task.branch} adds no commits. ` : ""}` +
+      `Merged ${task.branch} into ${base}.${ratifiedFiles.length ? ` Ratified ${ratifiedFiles.length} learning(s) — the next brief will carry them.` : ""}`,
   };
 }
 
