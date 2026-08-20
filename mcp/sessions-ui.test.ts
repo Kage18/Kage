@@ -475,3 +475,238 @@ test("piece 8h — api() is wired through apiRetryOnce with the real fetch, and 
   assert.match(script, /function api\(path, opts\) \{\s*return apiRetryOnce\(fetch, path, opts, TOKEN\)\.then\(function \(result\) \{\s*if \(result\.token\) TOKEN = result\.token;\s*return result\.json;\s*\}\);\s*\}/,
     "api() must delegate to the pure apiRetryOnce and persist any refreshed token onto the module-level TOKEN");
 });
+
+// --- goal detail overlay redesign -------------------------------------------------
+//
+// Reproduced from an owner screenshot review ("not a good view"): the overlay opened
+// on a wall of oversized text — #goal-title held the WHOLE goal.intent, styled by
+// ".packet .ph h3" as a 17px serif heading — before any structure appeared, and an
+// empty wave rendered as a bare centered "no runs yet" even though the goal record
+// already held that wave's planned run intents and (once the parallel goal-continuity
+// backend run lands) the reason nothing is running yet. See app-client.ts's
+// renderGoalDetail/fillGoalCard and app-styles.ts's #goal-title/.gd-wave-*/.chip.wave-due
+// rules for the fix.
+//
+// REVERT CHECK: reverting renderGoalDetail to set #goal-title.textContent = goal.intent
+// directly (no chip row, no foldrow, no wave-status handling) fails every test below —
+// the title test (full intent leaks into the title, no ".chips" child), the expander
+// test (no ".foldrow" child at all), the planned-rows test (a bare "no runs yet" node
+// instead of "gd-run-row gd-planned" rows), and the dispatch-button test (wave.status
+// is never read, so a due wave never grows a button to test hiding on 404 in the
+// first place).
+
+// vm-sandbox harness, same technique as loadClientSandbox/loadFlashSandbox above, but
+// with real fake elements behind #goal-title/#goal-body/#goal-overlay so
+// renderGoalDetail's DOM writes land somewhere real instead of throwing on a null
+// getElementById. #goal-body additionally simulates the real DOM's textContent="" ->
+// children-cleared behavior (fakeElement's plain textContent property does not do this
+// on its own), since renderGoalDetail is exercised more than once per test here (an
+// intent-fold toggle, or a dispatch-wave response) and each call rebuilds the body.
+function kids(el: Record<string, unknown>): Record<string, unknown>[] {
+  return (el.children as Record<string, unknown>[]) || [];
+}
+function makeOverlayElement(clearChildrenOnEmptyText: boolean): Record<string, unknown> {
+  const el = fakeElement("div") as Record<string, unknown> & { children: unknown[] };
+  let text = "";
+  Object.defineProperty(el, "textContent", {
+    get() { return text; },
+    set(v: string) {
+      text = v;
+      if (clearChildrenOnEmptyText && v === "") el.children.length = 0;
+    },
+  });
+  el.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+  return el;
+}
+function loadGoalSandbox(fetchImpl?: (path: string, opts: Record<string, unknown>) => Promise<{ status: number; json: () => Promise<unknown> }>) {
+  const elements: Record<string, Record<string, unknown>> = {
+    "goal-title": makeOverlayElement(false),
+    "goal-body": makeOverlayElement(true),
+    "goal-overlay": makeOverlayElement(false),
+  };
+  const sandbox: Record<string, unknown> = {
+    document: {
+      createElement: (tag: string) => fakeElement(tag),
+      createTextNode: (text: string) => ({ nodeType: 3, textContent: text }),
+      getElementById: (id: string) => elements[id] || null,
+      querySelectorAll: () => [],
+      body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } },
+    },
+    navigator: { userAgent: "" },
+    window: {},
+    console,
+    fetch: fetchImpl || (() => Promise.reject(new Error("fetch not stubbed in this goal-sandbox test"))),
+  };
+  try {
+    runInNewContext(APP_CLIENT, sandbox, { timeout: 2000 });
+  } catch {
+    // Expected — same DOM-less top-level abort every sandbox test in this file relies on.
+  }
+  return { sandbox, elements };
+}
+function makeGoal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "g1",
+    intent: "Ship the checkout redesign. It also needs a follow-up pass on mobile spacing and a second QA round before anyone merges it.",
+    state: "executing",
+    autonomy: "recommend",
+    created_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+    plan: { waves: [{ runs: [], run_ids: ["r1"] }] },
+    ...overrides,
+  };
+}
+
+// FAILS ON REVERT: the pre-fix renderGoalDetail set #goal-title.textContent to the
+// WHOLE goal.intent and built no chip row at all — #goal-title would read the full
+// multi-sentence string (failing the trimmed first-sentence assertion) and no ".chips"
+// child would exist under #goal-body.
+test("goal overlay header: the title is the intent's first sentence only, followed by one chip row (state, autonomy, wave N of M, spend, age)", () => {
+  const { sandbox, elements } = loadGoalSandbox();
+  const state = sandbox.state as Record<string, unknown>;
+  const goal = makeGoal();
+  state.goals = [goal];
+  state.runs = [{ id: "r1", display_state: "running", display_name: "Checkout redesign", intent: goal.intent, spend: { usd_est: 1.5 } }];
+  (sandbox.openGoalDetail as (id: string) => void)("g1");
+
+  assert.equal(elements["goal-title"].textContent, "Ship the checkout redesign",
+    "the title must be the intent's first sentence, not the whole intent");
+  assert.ok(!String(elements["goal-title"].textContent).includes("mobile spacing"),
+    "the rest of the intent must not leak into the title");
+
+  const chipsRow = kids(elements["goal-body"]).find((c) => String(c.className).indexOf("chips") >= 0);
+  assert.ok(chipsRow, "a chip row must exist directly under the goal body");
+  const chipTexts = kids(chipsRow!).map((c) => String(c.textContent));
+  assert.ok(chipTexts.indexOf("executing") >= 0, "the state chip must be present");
+  assert.ok(chipTexts.indexOf("recommend") >= 0, "the autonomy chip must be present");
+  assert.ok(chipTexts.some((t) => /^wave \d+ of \d+$/.test(t)), "a \"wave N of M\" chip must be present");
+  assert.ok(chipTexts.indexOf("$1.50") >= 0, "a spend chip must be present");
+  assert.ok(chipTexts.some((t) => / ago$/.test(t)), "an age chip must be present");
+});
+
+// FAILS ON REVERT: the pre-fix header rendered goal.intent directly as the title with
+// no fold/expander at all — there would be no ".foldrow" child under #goal-body.
+test("goal overlay: the full intent is collapsed behind the same foldrow/rawpane expander run detail uses, not shown by default", () => {
+  const { sandbox, elements } = loadGoalSandbox();
+  const state = sandbox.state as Record<string, unknown>;
+  const goal = makeGoal();
+  state.goals = [goal];
+  state.runs = [];
+  (sandbox.openGoalDetail as (id: string) => void)("g1");
+
+  const fold = kids(elements["goal-body"]).find((c) => c.className === "foldrow");
+  assert.ok(fold, "a foldrow button must exist — the same expander pattern as run detail's Full intent");
+  assert.equal(typeof fold!.onclick, "function");
+  assert.ok(!kids(elements["goal-body"]).some((c) => c.className === "rawpane"), "the full intent must be collapsed by default");
+
+  // Toggling it open must reveal the raw intent text, same as run detail.
+  (fold!.onclick as () => void)();
+  const raw = kids(elements["goal-body"]).find((c) => c.className === "rawpane");
+  assert.ok(raw, "opening the fold must render the full intent in a .rawpane");
+  assert.equal(raw!.textContent, goal.intent);
+});
+
+// FAILS ON REVERT: the pre-fix wave block for an empty wave rendered exactly one
+// child, h("div", "empty", "no runs yet") — there would be no "gd-run-row gd-planned"
+// rows, and the block's own text would literally read "no runs yet".
+test("goal overlay: a wave with no runs renders its PLANNED run intents as muted rows, never the bare 'no runs yet' void — with or without a wave-status field", () => {
+  const withoutStatus = makeGoal({
+    plan: { waves: [
+      { runs: [], run_ids: ["r1"] },
+      { runs: [
+        { intent: "Add the retry-queue worker.", type: "feature", files_scope: [] },
+        { intent: "Wire the dead-letter alert.", type: "chore", files_scope: [] },
+      ], run_ids: [] },
+    ] },
+  });
+  {
+    const { sandbox, elements } = loadGoalSandbox();
+    const state = sandbox.state as Record<string, unknown>;
+    state.goals = [withoutStatus];
+    state.runs = [{ id: "r1", display_state: "merged", display_name: "wave 1 run" }];
+    (sandbox.openGoalDetail as (id: string) => void)("g1");
+
+    const blocks = kids(elements["goal-body"]).filter((c) => c.className === "gd-wave-block");
+    assert.equal(blocks.length, 2, "both waves must render their own block");
+    const wave2 = blocks[1];
+    const planned = kids(wave2).filter((c) => c.className === "gd-run-row gd-planned");
+    assert.equal(planned.length, 2, "both of wave 2's planned run specs must render as their own row");
+    assert.equal(kids(planned[0])[0].textContent, "Add the retry-queue worker");
+    assert.equal(kids(planned[0])[1].textContent, "planned");
+    assert.equal(kids(planned[1])[0].textContent, "Wire the dead-letter alert");
+    assert.ok(!JSON.stringify(wave2).includes("no runs yet"), "the old bare void copy must never appear, status field or not");
+    assert.ok(!kids(wave2).some((c) => String(c.className).indexOf("gd-wave-status") >= 0),
+      "absent the API's wave-status field, no waiting/due line must be invented");
+  }
+
+  // Same fixture, now WITH a wave-status field on wave 2 — the waiting/due sentence
+  // must appear alongside the (still-rendered) planned rows.
+  const withStatus = makeGoal({
+    plan: { waves: [
+      { runs: [], run_ids: ["r1"] },
+      { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [], status: { due: false } },
+    ] },
+  });
+  {
+    const { sandbox, elements } = loadGoalSandbox();
+    const state = sandbox.state as Record<string, unknown>;
+    state.goals = [withStatus];
+    state.runs = [{ id: "r1", display_state: "merged", display_name: "wave 1 run" }];
+    (sandbox.openGoalDetail as (id: string) => void)("g1");
+    const blocks = kids(elements["goal-body"]).filter((c) => c.className === "gd-wave-block");
+    const wave2 = blocks[1];
+    const planned = kids(wave2).filter((c) => c.className === "gd-run-row gd-planned");
+    assert.equal(planned.length, 1, "planned rows must still render even once a status field exists");
+    const statusLine = kids(wave2).find((c) => String(c.className).indexOf("gd-wave-status") >= 0);
+    assert.ok(statusLine, "a waiting/due status line must render once the API supplies wave.status");
+    assert.match(String(statusLine!.textContent), /waiting.*wave 1 merges/);
+  }
+});
+
+// FAILS ON REVERT: today's renderGoalDetail never reads wave.status at all, so a due
+// wave never grows a "Dispatch wave" button — the presence assertion below would fail.
+// There is no prior behavior for the "hidden after a not_found response" half either:
+// it is new, so reverting it means the button (once it exists at all) never hides.
+test("goal overlay: the Dispatch wave button appears only for a due, run-less wave with the endpoint present, and hides itself once the endpoint answers 404", async () => {
+  function waveGoal(status: { due: boolean } | undefined): Record<string, unknown> {
+    return makeGoal({ plan: { waves: [
+      { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [], status },
+    ] } });
+  }
+
+  // due:false — no button offered.
+  {
+    const { sandbox, elements } = loadGoalSandbox();
+    const state = sandbox.state as Record<string, unknown>;
+    state.goals = [waveGoal({ due: false })];
+    state.runs = [];
+    (sandbox.openGoalDetail as (id: string) => void)("g1");
+    const wave = kids(elements["goal-body"]).find((c) => c.className === "gd-wave-block")!;
+    assert.ok(!kids(wave).some((c) => c.textContent === "Dispatch wave"), "a waiting (not due) wave must not offer the button");
+  }
+
+  // due:true, endpoint presence unknown — button present; firing it against a 404
+  // must hide it on the next render rather than leave a dead button behind.
+  const calls: Array<{ path: string; opts: Record<string, unknown> }> = [];
+  const { sandbox, elements } = loadGoalSandbox((path, opts) => {
+    calls.push({ path, opts });
+    return Promise.resolve({ status: 404, json: () => Promise.resolve({ ok: false, error: "not_found" }) });
+  });
+  const state = sandbox.state as Record<string, unknown>;
+  state.goals = [waveGoal({ due: true })];
+  state.runs = [];
+  (sandbox.openGoalDetail as (id: string) => void)("g1");
+  let wave = kids(elements["goal-body"]).find((c) => c.className === "gd-wave-block")!;
+  const dispatchBtn = kids(wave).find((c) => c.textContent === "Dispatch wave");
+  assert.ok(dispatchBtn, "a due, run-less wave must offer Dispatch wave while the endpoint's presence is unknown");
+  assert.equal(typeof dispatchBtn!.onclick, "function");
+
+  const dispatchWaveClick = sandbox.dispatchWaveClick as (goal: Record<string, unknown>, idx: number, btn: Record<string, unknown>) => Promise<void>;
+  await dispatchWaveClick((state.goals as Record<string, unknown>[])[0], 0, dispatchBtn!);
+
+  assert.equal(calls.length, 1, "exactly one dispatch-wave call must fire");
+  assert.equal(calls[0].path, "/goals/g1/dispatch-wave");
+  assert.equal(calls[0].opts.method, "POST");
+  assert.equal(state.dispatchWaveUnsupported, true, "a not_found response must be remembered so later waves never offer a dead button either");
+  wave = kids(elements["goal-body"]).find((c) => c.className === "gd-wave-block")!;
+  assert.ok(!kids(wave).some((c) => c.textContent === "Dispatch wave"), "the button must be gone once the endpoint is known 404");
+});
