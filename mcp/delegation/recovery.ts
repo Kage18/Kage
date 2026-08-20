@@ -191,6 +191,30 @@ export interface AdoptResult {
 }
 
 /**
+ * Whether a failed run is the orphan-shaped case adoptOrphanedRun exists for — its
+ * agent gone, its note the kernel's own "agent process gone" (reapRun's default,
+ * contract.ts), and a worktree still sitting there with real changes. Extracted so
+ * api.ts can expose it (worktree_adoptable) as a display hint without running the
+ * actual verify-and-transition adopt does just to find out; deliberately narrower than
+ * what adoptOrphanedRun itself will accept (it takes any failed run with no claim and
+ * a dirty worktree, orphan-shaped or not) — this is only the "show the Adopt button"
+ * signal, not the route's own gate.
+ */
+export function isWorktreeAdoptable(projectDir: string, task: TaskRecord): boolean {
+  if (task.state !== "failed") return false;
+  if (isProcessAlive(task.agent_pid)) return false;
+  if (readClaim(projectDir, task.id)) return false;
+  const lastNote = [...task.state_history].reverse().find((change) => change.note)?.note ?? "";
+  if (!/agent process gone/i.test(lastNote)) return false;
+  const worktree = worktreePath(projectDir, task.id);
+  if (!existsSync(worktree)) return false;
+  const branchDiff = git(projectDir, ["diff", "--name-only", "HEAD", task.branch]);
+  const worktreeStatus = git(worktree, ["status", "--porcelain"]);
+  const hasUncommitted = worktreeStatus.ok && worktreeStatus.stdout.trim().length > 0;
+  return hasUncommitted || (branchDiff.ok && Boolean(branchDiff.stdout.trim()));
+}
+
+/**
  * Verify an orphaned run's worktree when no agent claim was ever written — the gap
  * `kage reverify` cannot cross, since it re-checks an EXISTING claim's declared checks
  * and this run's supervisor died before one existed. Builds a claim from the brief's

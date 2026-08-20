@@ -16,6 +16,7 @@ import { basename, join, resolve } from "node:path";
 
 import {
   createRun,
+  isBranchLanded,
   listRuns,
   readClaim,
   readRun,
@@ -46,7 +47,7 @@ import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type
 import { sendControl, isRunLive } from "./control.js";
 import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
-import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./recovery.js";
+import { adoptOrphanedRun, isWorktreeAdoptable, killOrphanedAgent, resumeStoppedRun } from "./recovery.js";
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
 import { claimVerdict, renderClaimCard } from "./verify.js";
@@ -593,7 +594,27 @@ const VERDICT_LIST_STATES = new Set<RunView["display_state"]>(["ready", "failed"
 function withActivity(
   projectDir: string,
   run: RunView,
-): RunView & { activity?: ReturnType<typeof readActivity>; claim_summary?: string; blast?: BlastRadius; verdict_label?: string } {
+): RunView & {
+  activity?: ReturnType<typeof readActivity>;
+  claim_summary?: string;
+  blast?: BlastRadius;
+  verdict_label?: string;
+  branch_landed?: boolean;
+  worktree_adoptable?: boolean;
+} {
+  // The zombie-record signal (finding 3): a stopped/failed run whose branch is
+  // already an ancestor of HEAD — landed by hand or some other path, but the record
+  // never learned. Cheap and cached per HEAD (contract.ts's isBranchLanded), so
+  // attaching it to every stopped/failed row here costs nothing on repeat serves.
+  const dead: { branch_landed?: boolean; worktree_adoptable?: boolean } =
+    (run.display_state === "stopped" || run.display_state === "failed") && isBranchLanded(projectDir, run.branch)
+      ? { branch_landed: true }
+      : {};
+  // The Adopt affordance (finding 4): only for the orphan-shaped failed run
+  // isWorktreeAdoptable actually recognizes — a plainer "unrecognized failure" never
+  // grows this field, so the button never appears for a case Adopt can't cure.
+  if (run.display_state === "failed" && isWorktreeAdoptable(projectDir, run)) dead.worktree_adoptable = true;
+
   if (VERDICT_LIST_STATES.has(run.display_state)) {
     const claim = readClaim(projectDir, run.id);
     if (claim) {
@@ -618,12 +639,13 @@ function withActivity(
         const blast = blastRadiusFor(projectDir, claim.diff?.paths ?? []);
         return {
           ...run,
+          ...dead,
           verdict_label: verdictLabel,
           claim_summary: `${change} · ${passed}/${claim.checks.length} checks`,
           ...(blast ? { blast } : {}),
         };
       }
-      return { ...run, verdict_label: verdictLabel };
+      return { ...run, ...dead, verdict_label: verdictLabel };
     }
   }
   const inFlight =
@@ -631,9 +653,9 @@ function withActivity(
     run.display_state === "dispatched" ||
     run.display_state === "verifying" ||
     run.display_state === "orphaned";
-  if (!inFlight) return run;
+  if (!inFlight) return { ...run, ...dead };
   const activity = readActivity(runTranscriptPath(projectDir, run.id));
-  return { ...run, activity };
+  return { ...run, ...dead, activity };
 }
 
 /**

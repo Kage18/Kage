@@ -170,6 +170,12 @@ ${APP_STYLES}
       </div>
     </div>
   </div>
+  <div class="overlay" id="goal-overlay">
+    <div class="packet">
+      <div class="ph"><h3 id="goal-title"></h3><button class="btn" id="goal-close">Close</button></div>
+      <div class="pbody" id="goal-body"></div>
+    </div>
+  </div>
 </main>
 </div>
 <div class="status">
