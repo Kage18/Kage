@@ -264,6 +264,47 @@ export class SqliteStoreBackend implements StoreBackend {
     return rows.map(rowToCallEdge);
   }
 
+  replaceFileGraphRows(entries: Array<{ file: FileRow; symbols: SymbolRow[]; importEdges: ImportEdgeRow[] }>): void {
+    const db = this.conn();
+    db.exec("BEGIN");
+    try {
+      const fileStmt = db.prepare(
+        "INSERT INTO files(path, sha, mtime, kind, language) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET sha=excluded.sha, mtime=excluded.mtime, kind=excluded.kind, language=excluded.language",
+      );
+      const deleteSymbolsStmt = db.prepare("DELETE FROM symbols WHERE file = ?");
+      const deleteImportsStmt = db.prepare("DELETE FROM import_edges WHERE from_file = ?");
+      const symbolStmt = db.prepare(
+        "INSERT INTO symbols(id, file, name, kind, sha) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file=excluded.file, name=excluded.name, kind=excluded.kind, sha=excluded.sha",
+      );
+      const importStmt = db.prepare("INSERT INTO import_edges(from_file, to_file, kind) VALUES (?, ?, ?)");
+      for (const entry of entries) {
+        fileStmt.run(entry.file.path, entry.file.sha, entry.file.mtime, entry.file.kind, entry.file.language);
+        deleteSymbolsStmt.run(entry.file.path);
+        deleteImportsStmt.run(entry.file.path);
+        for (const symbol of entry.symbols) symbolStmt.run(symbol.id, symbol.file, symbol.name, symbol.kind, symbol.sha);
+        for (const edge of entry.importEdges) importStmt.run(edge.fromFile, edge.toFile, edge.kind);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  replaceCallEdgesForRepo(edges: CallEdgeRow[]): void {
+    const db = this.conn();
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM call_edges");
+      const stmt = db.prepare("INSERT INTO call_edges(from_symbol, to_symbol, kind) VALUES (?, ?, ?)");
+      for (const edge of edges) stmt.run(edge.fromSymbol, edge.toSymbol, edge.kind);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   // -- packets ---------------------------------------------------------------
 
   upsertPackets(packets: PacketRow[]): void {
@@ -441,6 +482,17 @@ export class SqliteStoreBackend implements StoreBackend {
     return rows.map(rowToKgEdge);
   }
 
+  // Indexed `IN (...)` scan over kg_edges_from/kg_edges_to (SCHEMA_STATEMENTS
+  // above) -- one query for the whole entity set, never a full-table load.
+  queryKgEdgesForEntities(entityIds: string[]): KgEdgeRow[] {
+    if (!entityIds.length) return [];
+    const placeholders = entityIds.map(() => "?").join(", ");
+    const rows = this.conn()
+      .prepare(`SELECT from_id, to_id, kind, weight FROM kg_edges WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`)
+      .all(...entityIds, ...entityIds);
+    return rows.map(rowToKgEdge);
+  }
+
   upsertKgEpisodes(episodes: KgEpisodeRow[]): void {
     const stmt = this.conn().prepare(
       "INSERT INTO kg_episodes(id, ts, summary) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, summary=excluded.summary",
@@ -450,6 +502,26 @@ export class SqliteStoreBackend implements StoreBackend {
 
   listKgEpisodes(): KgEpisodeRow[] {
     return this.conn().prepare("SELECT id, ts, summary FROM kg_episodes ORDER BY id").all().map(rowToKgEpisode);
+  }
+
+  replaceKnowledgeGraph(entities: KgEntityRow[], edges: KgEdgeRow[], episodes: KgEpisodeRow[]): void {
+    const db = this.conn();
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM kg_entities");
+      db.exec("DELETE FROM kg_edges");
+      db.exec("DELETE FROM kg_episodes");
+      const entityStmt = db.prepare("INSERT INTO kg_entities(id, kind, label) VALUES (?, ?, ?)");
+      for (const entity of entities) entityStmt.run(entity.id, entity.kind, entity.label);
+      const edgeStmt = db.prepare("INSERT INTO kg_edges(from_id, to_id, kind, weight) VALUES (?, ?, ?, ?)");
+      for (const edge of edges) edgeStmt.run(edge.fromId, edge.toId, edge.kind, edge.weight);
+      const episodeStmt = db.prepare("INSERT INTO kg_episodes(id, ts, summary) VALUES (?, ?, ?)");
+      for (const episode of episodes) episodeStmt.run(episode.id, episode.ts, episode.summary);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // -- counts ---------------------------------------------------------------------

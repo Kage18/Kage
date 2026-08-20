@@ -379,6 +379,32 @@ export class JsonStoreBackend implements StoreBackend {
     );
   }
 
+  // Structural files/symbols/import edges, on the JSON backend, read directly
+  // from structural/files.json/symbols.json/imports.json (this.dir()) -- the
+  // SAME files mcp/kernel.ts's buildStructuralIndex already writes in full,
+  // unconditionally, on EVERY build, immediately before calling this method
+  // (docs/design/MEMORY_STORE.md M3: those writeJson calls stay direct,
+  // byte-compatible with today). By the time this runs, those files already
+  // hold the complete, correct, current set for every file in the repo, not
+  // just the touched ones. Reconstructing symbols/imports here from the
+  // reduced SymbolRow/ImportEdgeRow shape (no export/language/parser/
+  // signature/specifier/imported-names fields) would silently blow away
+  // fields those rows don't carry -- a real bug this method had until a repo
+  // test caught it (kageCleanupCandidates stopped seeing any symbol as
+  // exported). upsertFiles is safe to call here because it MERGES against
+  // the existing on-disk record (see its own implementation above); symbols
+  // and imports are left untouched -- reading them via listSymbols/
+  // listImportEdges is already correct without any write here, since
+  // kernel.ts's own writeJson is the one write that matters for this
+  // backend's structural data.
+  replaceFileGraphRows(entries: Array<{ file: FileRow; symbols: SymbolRow[]; importEdges: ImportEdgeRow[] }>): void {
+    this.upsertFiles(entries.map((entry) => entry.file));
+  }
+
+  replaceCallEdgesForRepo(edges: CallEdgeRow[]): void {
+    writeJsonFile(structuralPath(this.dir(), CALL_EDGES_FILE.replace("structural/", "")), edges);
+  }
+
   // -- packets -------------------------------------------------------------
 
   upsertPackets(packets: PacketRow[]): void {
@@ -570,6 +596,14 @@ export class JsonStoreBackend implements StoreBackend {
       .map(graphEdgeToRow);
   }
 
+  queryKgEdgesForEntities(entityIds: string[]): KgEdgeRow[] {
+    const wanted = new Set(entityIds);
+    if (!wanted.size) return [];
+    return readJsonFile<GraphEdgeLike[]>(graphPath(this.dir(), "edges.json"), [])
+      .filter((edge) => wanted.has(edge.from) || wanted.has(edge.to))
+      .map(graphEdgeToRow);
+  }
+
   upsertKgEpisodes(episodes: KgEpisodeRow[]): void {
     const path = graphPath(this.dir(), "episodes.json");
     const existing = readJsonFile<GraphEpisodeLike[]>(path, []);
@@ -583,6 +617,24 @@ export class JsonStoreBackend implements StoreBackend {
 
   listKgEpisodes(): KgEpisodeRow[] {
     return readJsonFile<GraphEpisodeLike[]>(graphPath(this.dir(), "episodes.json"), []).map(graphEpisodeToRow);
+  }
+
+  // entities.json/edges.json/episodes.json, on the JSON backend, are the
+  // SAME real files mcp/kernel.ts's buildKnowledgeGraph already writes in
+  // full immediately before calling this method -- the exact reasoning
+  // replaceFileGraphRows documents above (and the exact bug that method had
+  // until a repo test caught it: reconstructing from the reduced KgEntityRow/
+  // KgEdgeRow/KgEpisodeRow shape here would blow away aliases/summary/
+  // evidence/fact/valid_from, fields those rows don't carry). upsertKgEntities/
+  // upsertKgEpisodes are safe to call because they MERGE against the existing
+  // on-disk record (see their own implementations above); edges.json is left
+  // untouched entirely -- kg_edges has no natural unique key (the same reason
+  // import/call edges are append-only), so there is no safe merge strategy
+  // for it, and none is needed: kernel.ts's direct write already replaced the
+  // whole file with the correct, complete edge set.
+  replaceKnowledgeGraph(entities: KgEntityRow[], edges: KgEdgeRow[], episodes: KgEpisodeRow[]): void {
+    this.upsertKgEntities(entities);
+    this.upsertKgEpisodes(episodes);
   }
 
   // -- counts ---------------------------------------------------------------------

@@ -214,6 +214,41 @@ export interface StoreBackend {
   /** Returns call edges, optionally restricted to a symbol-id-prefix scope on `fromSymbol`. */
   listCallEdges(scope?: string): CallEdgeRow[];
 
+  /**
+   * Row-level structural refresh (docs/design/MEMORY_STORE.md M3,
+   * "(d) Incrementality"): for EXACTLY the file paths present in `entries`,
+   * replaces that file's own row plus every symbol/import-edge row scoped
+   * to it, leaving every other file's rows untouched. A `kage refresh` that
+   * finds N cache-miss files (mcp/kernel.ts's buildStructuralFile already
+   * knows, per file, whether its content hash changed) calls this with N
+   * entries and upserts only those files' rows, not the whole corpus --
+   * unlike upsertImportEdges/upsertCallEdges, which are append-only and
+   * would duplicate a changed file's edges on a second push, this method
+   * clears a file's prior rows before inserting its fresh ones.
+   */
+  replaceFileGraphRows(entries: Array<{ file: FileRow; symbols: SymbolRow[]; importEdges: ImportEdgeRow[] }>): void;
+
+  /**
+   * Replaces the ENTIRE call-edges table in one call. Call edges have no
+   * per-file cache upstream -- mcp/kernel.ts's buildCodeGraph re-extracts
+   * calls from source on every non-cached build, so (unlike
+   * replaceFileGraphRows, which can scope to cache-miss files because
+   * structural analysis IS file-cached) there is no smaller correct scope
+   * than "every call edge this build produced."
+   */
+  replaceCallEdgesForRepo(edges: CallEdgeRow[]): void;
+
+  /**
+   * Bulk indexed lookup: every kg_edges row touching ANY of `entityIds` as
+   * either endpoint, in one query -- the same "one call, not N" shape as
+   * queryVectorCandidates. On the sqlite backend this is a single indexed
+   * `WHERE from_id IN (...) OR to_id IN (...)` scan over kg_edges_from/
+   * kg_edges_to (mcp/store/sqlite.ts's SCHEMA_STATEMENTS), never a load of
+   * the whole kg_edges table. On the JSON backend this returns the same
+   * rows getKgEdges would return for each id, just gathered in one call.
+   */
+  queryKgEdgesForEntities(entityIds: string[]): KgEdgeRow[];
+
   // -- packets -------------------------------------------------------------
 
   /** Upserts packet rows keyed by `id`. Last write wins per id. */
@@ -320,6 +355,15 @@ export interface StoreBackend {
   upsertKgEpisodes(episodes: KgEpisodeRow[]): void;
   /** Returns every known episode. */
   listKgEpisodes(): KgEpisodeRow[];
+
+  /**
+   * Replaces the ENTIRE knowledge graph (entities + edges + episodes) in
+   * one call. mcp/kernel.ts's buildKnowledgeGraph recomputes the whole
+   * graph from packets plus the code graph on every call -- there is no
+   * per-entity cache to scope a smaller upsert to, the same reason
+   * replaceCallEdgesForRepo exists instead of a row-level alternative.
+   */
+  replaceKnowledgeGraph(entities: KgEntityRow[], edges: KgEdgeRow[], episodes: KgEpisodeRow[]): void;
 
   // -- counts, for the manifest and `kage store status` (M2) ------------------
 
