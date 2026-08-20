@@ -115,8 +115,15 @@ export interface MergeResult {
 
 export function mergeRun(projectDir: string, runId: string, actor: RunActor = "user"): MergeResult {
   const task = readRun(projectDir, runId);
-  if (task.state !== "ready") {
-    return { ok: false, merged: false, ratified: 0, message: `Run ${runId} is ${task.state}, not ready. Only a verified claim can be merged.` };
+  // Opt-in gate (contract.ts's review_required): a run that never asked for review keeps
+  // the exact precondition and message it always had ("ready"). One that did must clear
+  // review.ts's reviewRun first — "approved" is the only state that proves it did.
+  const mergeableState: RunState = task.review_required ? "approved" : "ready";
+  if (task.state !== mergeableState) {
+    const message = task.review_required
+      ? `Run ${runId} is ${task.state}, not approved. This run requires review before it can merge.`
+      : `Run ${runId} is ${task.state}, not ready. Only a verified claim can be merged.`;
+    return { ok: false, merged: false, ratified: 0, message };
   }
   const claim = readClaim(projectDir, runId);
   if (!claim) return { ok: false, merged: false, ratified: 0, message: `Run ${runId} has no claim to merge.` };
@@ -195,6 +202,11 @@ export function maybeAutoMerge(projectDir: string, runId: string): void {
   if (!goal || goal.autonomy !== "merge") return;
   const task = readRun(projectDir, runId);
   if (task.state !== "ready") return;
+  // A review_required run reaching "ready" has not cleared the review gate yet —
+  // mergeRun would refuse it (it needs "approved"), so there is nothing to attempt here.
+  // Auto-merging a review_required run once it IS approved is a follow-up, not part of
+  // this kernel contract: no caller transitions "approved" runs through this hook yet.
+  if (task.review_required) return;
   const claim = readClaim(projectDir, runId);
   // Every check passing is NOT enough. In a repo with no test command the only checks
   // that run are non-executing ones (diff size, citations, reachability) — they all pass
