@@ -30,6 +30,12 @@ export const RUN_STATES = [
   "running",
   "verifying",
   "ready",
+  // Opt-in review gate (review.ts's reviewRun) — see the comment on LEGAL_TRANSITIONS'
+  // `ready` entry and on TaskRecord's `review_required` field. Absent for every run that
+  // does not set review_required; a run that never opts in never visits these three.
+  "reviewing",
+  "approved",
+  "changes_requested",
   "blocked",
   "stopped",
   "failed",
@@ -52,7 +58,24 @@ const LEGAL_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   stopped: ["running", "failed", "rejected"],
   // `verifying` here is `kage reverify`: re-checking an already-ready run before merging
   // is legitimate (the worktree may have been hand-edited since), not a wasted step.
-  ready: ["merged", "rejected", "verifying"],
+  // `reviewing` is structurally legal from `ready` for every run, but review.ts's
+  // reviewRun refuses to actually make the move unless the run's own review_required is
+  // set — LEGAL_TRANSITIONS only says what CAN happen, not what a given run has opted
+  // into, the same split assertConcurrencyAllows already draws for `running`. A run that
+  // never sets review_required only ever takes the merged/rejected/verifying exits it
+  // always had.
+  ready: ["merged", "rejected", "verifying", "reviewing"],
+  // A reviewer agent's verdict, and nothing else — see review.ts's REVIEW_PROTOCOL_VERSION.
+  reviewing: ["approved", "changes_requested"],
+  // Same two exits as `ready` — an approved run is a ready run that has additionally
+  // cleared the opt-in review gate (ratify.ts's mergeRun requires this state instead of
+  // `ready` for any run with review_required set).
+  approved: ["merged", "rejected"],
+  // No new resume mechanism: this reuses the SAME running-from-failed/blocked/stopped
+  // path (steer.ts) those three already have, just from a fourth state name. steer.ts's
+  // own resumability check must recognize this state too before a resume actually
+  // succeeds from here — that wiring is a follow-up, not part of this kernel contract.
+  changes_requested: ["running"],
   merged: [],
   rejected: [],
   // A failed verification is not the end of the story: retry with steering (-> running),
@@ -139,6 +162,14 @@ export interface TaskRecord {
   brief_memory_ids?: string[];
   /** The question the agent is waiting on, in its own words. */
   waiting_on?: { detail: string; needs: string };
+  /**
+   * Opt-in review gate. Absent/false (the default) leaves the run's path completely
+   * unchanged: ready -> merged, exactly as before this field existed. Set true and a
+   * ready run additionally requires reviewing -> approved (review.ts's reviewRun)
+   * before ratify.ts's mergeRun will accept it — see LEGAL_TRANSITIONS above. Nothing
+   * in this module sets it yet; that wiring (kage_dispatch et al.) is a follow-up.
+   */
+  review_required?: boolean;
   state_history: RunStateChange[];
   created_at: string;
   updated_at: string;
@@ -271,6 +302,66 @@ export function parseReportFence(text: string): ReportFence | null {
   const question = typeof body.question === "string" ? body.question.trim() : "";
   if (!need && !question) return null;
   return { kind: "blocked", need: need || undefined, question: question || undefined, unsure: [], learned: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Review protocol: how an independently hired reviewer agent ends its pass over
+// another run's claim + diff (review.ts's reviewRun). Embedded verbatim in the review
+// brief, same reasoning as CLAIM_PROTOCOL_INSTRUCTIONS above — a malformed or missing
+// fence never crashes anything, it degrades to changes_requested with protocol_ok:false.
+//
+// This is a DIFFERENT mechanism from mcp/index.ts's kage_review_run tool / manager.ts's
+// ReviewRecord (verdict "approve" | "request_changes", written to review.json): that one
+// is the delegation MANAGER's own advisory note on a "ready" run — it never moves kernel
+// state, and mergeRun never consults it. This protocol is an independently hired REVIEWER
+// AGENT's verdict, and it does move kernel state (LEGAL_TRANSITIONS' reviewing entry, and
+// ratify.ts's mergeRun requiring "approved" over "ready" for a review_required run). The
+// two verdict vocabularies are deliberately distinct (approved/changes_requested here,
+// matching the state names it drives; approve/request_changes there, an advisory verb)
+// so the two records — and the two review.json-shaped files, agent-review.json here vs.
+// review.json there — can never be mistaken for one another on disk or in a diff.
+export const REVIEW_PROTOCOL_VERSION = "kage-review-v1";
+
+export const REVIEW_PROTOCOL_INSTRUCTIONS = `## Review protocol (${REVIEW_PROTOCOL_VERSION})
+
+You are reviewing another agent's finished run — its claim and its diff — not writing code
+yourself. End your FINAL message with exactly one fenced block:
+
+\`\`\`kage-review
+{"verdict": "approved" | "changes_requested", "findings": ["<specific, actionable note>", ...]}
+\`\`\`
+
+"approved" means the diff matches the claim and is sound to merge as-is. "changes_requested"
+means something needs another pass before merge — say what, in findings, so the fix is
+specific rather than a vague "looks off". Never approve on a guess: if you cannot verify a
+claim against the diff and evidence given, request changes and say what you could not confirm.`;
+
+export type ReviewVerdict = "approved" | "changes_requested";
+
+export interface ReviewFence {
+  verdict: ReviewVerdict;
+  findings: string[];
+}
+
+// Same deterministic-extraction and never-throw shape as parseReportFence: the LAST
+// kage-review fence wins, malformed JSON or an unrecognized verdict returns null so the
+// caller can degrade to changes_requested rather than crash or silently auto-approve.
+export function parseReviewFence(text: string): ReviewFence | null {
+  const matches = [...text.matchAll(/```kage-review\s*\n([\s\S]*?)```/g)];
+  const last = matches[matches.length - 1];
+  if (!last) return null;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(last[1]) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const verdict = body.verdict;
+  if (verdict !== "approved" && verdict !== "changes_requested") return null;
+  const findings = Array.isArray(body.findings)
+    ? body.findings.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  return { verdict, findings };
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +1019,21 @@ function assertConcurrencyAllows(projectDir: string, task: TaskRecord, to: RunSt
   if (!status.admits) throw new ConcurrencyLimitError(status.limit);
 }
 
+// The opt-in half of the review gate. LEGAL_TRANSITIONS says "reviewing" is structurally
+// reachable from "ready" for every run — this is the policy check that actually reserves
+// it for runs that asked for it (review_required), same split assertConcurrencyAllows
+// draws for "running" vs. the concurrency limit. review.ts's reviewRun already checks
+// review_required itself before calling transitionRun; this is the belt-and-braces
+// version that holds even for a caller that skips reviewRun and calls transitionRun
+// directly — the same guarantee an illegal-transition error already gives every other
+// state in this table.
+function assertReviewOptIn(task: TaskRecord, to: RunState): void {
+  if (to !== "reviewing") return;
+  if (!task.review_required) {
+    throw new Error(`Run ${task.id} has not opted into review (review_required is not set) — cannot enter reviewing.`);
+  }
+}
+
 // Duplicates config.ts's own max_concurrent parsing rather than calling it directly —
 // contract.ts importing config.ts (see configuredBudgets above) is safe and one-directional,
 // so this could call config.ts's maxConcurrent() instead; left as its own reader only to
@@ -983,6 +1089,7 @@ export function transitionRun(
   if (!legal.includes(to)) {
     throw new Error(`Illegal transition for ${runId}: ${task.state} → ${to} (legal: ${legal.join(", ") || "none — terminal state"})`);
   }
+  assertReviewOptIn(task, to);
   if (!options?.skipConcurrencyCheck) assertConcurrencyAllows(projectDir, task, to);
   const at = nowIso();
   const change: RunStateChange = { state: to, at, by, ...(note ? { note } : {}) };
