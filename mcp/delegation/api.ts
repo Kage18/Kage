@@ -55,7 +55,8 @@ import { git } from "./git.js";
 import { worktreePath } from "./worktree.js";
 import { askManager } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
-import { askRoomSupervisor, dispatchRoomSupervisor, isRoomSupervisorLive, type RoomStreamEvent } from "./room-supervisor.js";
+import { askRoomSupervisor, dispatchRoomSupervisor, isRoomSupervisorLive, readRoomSessionMeta, type RoomStreamEvent } from "./room-supervisor.js";
+import { readNativeTranscriptPage, waitForNewAssistantTurns, TRANSCRIPT_PAGE_CAP } from "./room-transcript.js";
 import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
@@ -63,7 +64,15 @@ import { addProject, installedAgents, resolveProjectPath, type AddProjectRefused
 import { ensureAppDaemon } from "./app-daemon.js";
 import { packetFlywheel, packetsTaughtByRun, readMemoryOverview, readMemoryPacket, recordMemoryFeedback } from "./memory-view.js";
 import { blastRadiusFor, type BlastRadius } from "./blast-radius.js";
-import { attachRoomPty, dispatchRoomPtySupervisor, isRoomPtyLive, retirePtyRoom, retireStructuredRoom, type RoomPtyAttachment } from "./room-pty.js";
+import {
+  attachRoomPty,
+  dispatchRoomPtySupervisor,
+  frameChatInputForPty,
+  isRoomPtyLive,
+  retirePtyRoom,
+  retireStructuredRoom,
+  type RoomPtyAttachment,
+} from "./room-pty.js";
 import {
   DEFAULT_SESSION,
   closeRoomSession,
@@ -332,19 +341,27 @@ const PTY_STARTUP_TIMEOUT_MS = 8000;
 
 /**
  * Ensures the daemon holds a live, attached connection to the room's pty supervisor,
- * spawning one if needed, and reuses it across calls — one held duplex socket for the
- * daemon's whole life, not one per keystroke. Concurrent callers (a write racing a
- * resize) share the same in-flight connect attempt via `connecting` rather than each
- * spawning their own supervisor.
+ * reusing one across calls — one held duplex socket for the daemon's whole life, not
+ * one per keystroke. Concurrent callers (a write racing a resize) share the same
+ * in-flight connect attempt via `connecting` rather than each spawning their own
+ * supervisor.
+ *
+ * `spawnIfNeeded` (default true, matching every pre-existing caller below) dispatches a
+ * fresh pty supervisor and waits up to PTY_STARTUP_TIMEOUT_MS for it to come up when
+ * none is live — correct for the explicit Terminal-open routes, where a person just
+ * asked for a session. resolveRoomReply (api routing for chat) passes `false`: pty
+ * preference must be decided QUICKLY, and a random chat message must never implicitly
+ * start a brand-new interactive claude session — attachRoomPty's own existsSync check
+ * already resolves null near-instantly when nothing is listening.
  */
-async function ensurePtyAttached(ctx: DelegationApiContext, session?: string): Promise<RoomPtyAttachment | null> {
+async function ensurePtyAttached(ctx: DelegationApiContext, session?: string, spawnIfNeeded = true): Promise<RoomPtyAttachment | null> {
   const { projectDir, feed } = ctx;
   const key = normalizeSessionKey(session);
   const pty = ptyStateFor(ctx, key);
   if (pty.attachment) return pty.attachment;
   if (pty.connecting) return pty.connecting;
   pty.connecting = (async () => {
-    if (!(await isRoomPtyLive(projectDir, key))) {
+    if (spawnIfNeeded && !(await isRoomPtyLive(projectDir, key))) {
       dispatchRoomPtySupervisor(projectDir, key);
       const deadline = Date.now() + PTY_STARTUP_TIMEOUT_MS;
       while (Date.now() < deadline && !(await isRoomPtyLive(projectDir, key))) {
@@ -378,24 +395,83 @@ async function ensurePtyAttached(ctx: DelegationApiContext, session?: string): P
 }
 
 const ROOM_SUPERVISOR_STARTUP_TIMEOUT_MS = 8000;
+// Matches ROOM_ASK_TIMEOUT_MS's own ceiling below — pty and headless give a human the
+// same patience before this endpoint reports the message as sent-but-pending.
+const PTY_REPLY_TIMEOUT_MS = 6 * 60_000;
+const PTY_REPLY_POLL_MS = 400;
+// A turn can arrive as several jsonl lines (thinking, a tool call, its result, more
+// text) — how long the transcript must stop growing before it's treated as settled.
+const PTY_REPLY_QUIET_MS = 1200;
+
+type RoomManagerLabel = "pty" | "headless";
+interface RoomReply {
+  text: string;
+  tools: string[];
+  corrections?: string[];
+  manager?: RoomManagerLabel;
+}
 
 /**
- * The live path, then an honest fallback. Only claude's protocol is verified to
- * support a held-open multi-turn session (proven empirically before this was built:
- * a live claude process given a second stdin frame after the first turn's `result`,
- * with stdin never closed in between, answers with real memory of the first turn) —
- * so this is the ONLY agent that gets tried live. Anything else, or any failure at
- * any step, falls through to askManager's one-shot-with-replayed-history path, which
- * already works and already has its own tests. No conflating "detected" with "proven
- * to hold a session live" — that gap is exactly what this whole session has been
- * about closing everywhere else.
+ * Writes the message into the SAME interactive session Terminal shows (no second
+ * channel), then waits for claude's own native transcript to grow with a new assistant
+ * turn. Returns null — quickly, never spawning a new session to find out — when no pty
+ * is ALREADY live, or its identity hasn't been recorded yet; either way the caller
+ * falls back to headless honestly, never guessing at a reply and never blocking a chat
+ * message behind a fresh interactive claude spawn (see ensurePtyAttached's
+ * `spawnIfNeeded` doc — that spawn is for the explicit Terminal-open routes only).
  */
-async function resolveRoomReply(
+export async function resolvePtyReply(ctx: DelegationApiContext, message: string, session?: string): Promise<RoomReply | null> {
+  const { projectDir } = ctx;
+  const key = normalizeSessionKey(session);
+  const ensureAttached = ctx.ensurePtyAttachedFn ?? ensurePtyAttached;
+  const attachment = await ensureAttached(ctx, key, false);
+  if (!attachment) return null;
+
+  // One session, two views: if the structured (headless) side currently holds this
+  // thread's session, retire it before pty takes over — two live processes resuming
+  // one session id would fork its context and race each other's writes.
+  retireStructuredRoom(projectDir, key);
+
+  const meta = readRoomSessionMeta(projectDir, key);
+  if (!meta.session_id || !meta.native_transcript_path) {
+    // The pty is live but superviseRoomPty hasn't (yet) recorded its identity — a
+    // startup race. The message still reaches the real session; there is just nothing
+    // to poll a reply out of this turn.
+    attachment.write(frameChatInputForPty(message));
+    return { text: "", tools: [], manager: "pty" };
+  }
+
+  const readPage = () => readNativeTranscriptPage(meta.native_transcript_path as string, { limit: TRANSCRIPT_PAGE_CAP });
+  const beforeTotal = readPage().total;
+  attachment.write(frameChatInputForPty(message));
+  const newTurns = await waitForNewAssistantTurns(readPage, {
+    beforeTotal,
+    timeoutMs: PTY_REPLY_TIMEOUT_MS,
+    pollMs: PTY_REPLY_POLL_MS,
+    quietMs: PTY_REPLY_QUIET_MS,
+  });
+  const text = newTurns
+    .map((turn) => turn.text)
+    .filter(Boolean)
+    .join("\n\n");
+  const tools = [...new Set(newTurns.flatMap((turn) => turn.tools))];
+  return { text, tools, manager: "pty" };
+}
+
+/**
+ * The live path, then an honest fallback. Pty is tried first whenever this is a real
+ * (non-test) request: it is the ONE real interactive session Terminal already shows,
+ * so routing chat there is what makes Chat a view of that session, not a second
+ * manager. Headless — a live -p supervisor, proven to support a held-open multi-turn
+ * session — is the fallback used only when pty is unavailable, and the one-shot
+ * askManager path is the fallback of THAT fallback.
+ */
+export async function resolveRoomReply(
   ctx: DelegationApiContext,
   message: string,
   historyBefore: RoomHistoryTurn[],
   session?: string,
-): Promise<{ text: string; tools: string[]; corrections?: string[] }> {
+): Promise<RoomReply> {
   const { projectDir, feed } = ctx;
   const key = normalizeSessionKey(session);
   // Deltas carry their thread so a client watching thread A never animates typing
@@ -406,15 +482,21 @@ async function resolveRoomReply(
   if (ctx.askRoomFn) return ctx.askRoomFn(message, historyBefore, onDelta);
 
   // A test that sets askManagerFn is explicitly asking to exercise the fallback path
-  // without touching a real CLI — every existing room test relies on exactly that.
-  // Respecting it here matters more than "try live first": this machine has claude
-  // genuinely on PATH, so skipping this check would make those tests spawn a real
-  // detached supervisor process instead of calling the fake they injected.
+  // without touching a real CLI — every existing room test relies on exactly that, so
+  // this gate gets checked before EITHER live path (pty or headless). A test that wants
+  // pty routing instead injects ensurePtyAttachedFn, still only reached when isProduction
+  // is true.
   const isProduction = !ctx.askManagerFn;
+  if (isProduction) {
+    const ptyReply = await resolvePtyReply(ctx, message, key);
+    if (ptyReply) return ptyReply;
+    // node-pty unavailable, or the pty never came up within its own startup window —
+    // fall through to headless, honestly, never a fabricated pty reply.
+  }
   if (isProduction && isAgentInstalled("claude")) {
-    // One session, two views: if the terminal view currently holds the room's claude
-    // session, retire it before the structured side resumes the same id. Two live
-    // processes on one session fork its context and race each other's writes.
+    // One session, two views, reversed direction: if pty currently holds this thread's
+    // session (it just failed to answer above, or died between calls), retire it
+    // before headless resumes the same id.
     const ptyState = ptyStateFor(ctx, key);
     if (ptyState.attachment || (await isRoomPtyLive(projectDir, key))) {
       retirePtyRoom(projectDir, key);
@@ -430,7 +512,14 @@ async function resolveRoomReply(
       }
       live = await askRoomSupervisor(projectDir, message, onDelta, key);
     }
-    if (live?.kind === "final") return { text: live.text, tools: live.tools, ...(live.corrections?.length ? { corrections: live.corrections } : {}) };
+    if (live?.kind === "final") {
+      return {
+        text: live.text,
+        tools: live.tools,
+        ...(live.corrections?.length ? { corrections: live.corrections } : {}),
+        manager: "headless",
+      };
+    }
     // live?.kind === "error", or still null after the startup wait — fall through.
   }
 
@@ -441,7 +530,7 @@ async function resolveRoomReply(
     history: historyBefore.map((turn) => ({ role: turn.role, text: turn.text })),
     onEvent: onDelta,
   });
-  return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}) };
+  return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}), manager: "headless" };
 }
 
 /**
@@ -469,6 +558,7 @@ function queueRoomTurn(
         text: reply.text,
         tools: reply.tools,
         ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
+        ...(reply.manager ? { manager: reply.manager } : {}),
       }, key);
     } catch (error) {
       appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}` }, key);
@@ -907,6 +997,33 @@ export async function handleDelegationRoute(
     // 202: accepted, not answered — the reply streams over SSE and lands in /room
     // when the manager (a real, possibly slow, CLI process) finishes.
     json(res, 202, { ok: true, accepted: true });
+    return true;
+  }
+
+  // Claude's own native transcript for the thread's pty session, parsed into turns —
+  // what makes Chat a VIEW of the real session Terminal shows. Response-capped at
+  // TRANSCRIPT_PAGE_CAP turns per page (room-transcript.ts), same precedent as
+  // eventsSincePage (report.ts). No recorded pty session gets an honest empty page,
+  // never a 404 — the room itself already exists even when this session doesn't.
+  if (path === "/room/transcript" && method === "GET") {
+    const key = normalizeSessionKey(url.searchParams.get("session"));
+    const meta = readRoomSessionMeta(projectDir, key);
+    const limitParam = Number(url.searchParams.get("limit"));
+    const cursorParam = url.searchParams.get("cursor");
+    const cursor = cursorParam != null && cursorParam !== "" ? Number(cursorParam) : undefined;
+    const page = meta.native_transcript_path
+      ? readNativeTranscriptPage(meta.native_transcript_path, {
+          ...(Number.isFinite(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
+          ...(cursor != null && Number.isFinite(cursor) ? { cursor } : {}),
+        })
+      : { turns: [], cursor: null, total: 0 };
+    json(res, 200, {
+      ok: true,
+      session_id: meta.session_id ?? null,
+      native_transcript_path: meta.native_transcript_path ?? null,
+      cap: TRANSCRIPT_PAGE_CAP,
+      ...page,
+    });
     return true;
   }
 

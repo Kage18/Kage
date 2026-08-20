@@ -86,9 +86,15 @@ export function readRoomSupervisorRecord(projectDir: string, session?: string): 
 }
 
 export interface RoomSessionMeta {
+  /** The live agent's own session id — AO calls this agent_session_id; Kage's version
+   * doubles as the --resume handle both the pty and headless managers share. */
   session_id?: string;
   /** roomPermissionDigest() at the moment this session was (re)started — see resolveRoomResumeId. */
   permission_digest?: string;
+  /** Where claude's own native jsonl for `session_id` lives — AO's native_transcript_path.
+   * Set only by the pty manager (room-pty.ts), which knows its cwd; the headless
+   * manager's stream-json protocol has no equivalent file to point at. */
+  native_transcript_path?: string;
 }
 
 export function readRoomSessionMeta(projectDir: string, session?: string): RoomSessionMeta {
@@ -101,10 +107,26 @@ export function readRoomSessionMeta(projectDir: string, session?: string): RoomS
   }
 }
 
+/**
+ * Merges onto whatever is already on disk rather than overwriting outright — a caller
+ * that only knows about a subset of fields (or a field this file's own type has never
+ * heard of, added by some future extension) must not silently wipe the rest just
+ * because it wrote next. Only the keys actually present in `meta` change; every other
+ * field already on disk survives untouched.
+ */
 export function writeRoomSessionMeta(projectDir: string, meta: RoomSessionMeta, session?: string): void {
   const path = roomSessionPath(projectDir, session);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+  let existing: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      existing = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    } catch {
+      existing = {};
+    }
+  }
+  const merged = { ...existing, ...meta };
+  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
 export function readRoomSessionId(projectDir: string, session?: string): string | undefined {
