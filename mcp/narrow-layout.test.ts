@@ -39,12 +39,11 @@ function composedScript(): string {
   return inline!;
 }
 
-// Extracts the single narrow-width media block by counting braces from its opening
-// `{` — the block itself nests one level of rule braces, so a naive first-`}` match
-// would truncate it.
-function narrowMediaBlock(style: string): string {
-  const at = style.indexOf("@media (max-width:900px)");
-  assert.ok(at >= 0, "app-styles.ts must define the @media (max-width:900px) narrow breakpoint");
+// Extracts a media block by counting braces from its opening `{` — a block can nest
+// one level of rule braces, so a naive first-`}` match would truncate it.
+function mediaBlockAt(style: string, marker: string): string {
+  const at = style.indexOf(marker);
+  assert.ok(at >= 0, "app-styles.ts must define " + marker);
   const open = style.indexOf("{", at);
   assert.ok(open >= 0);
   let depth = 0;
@@ -55,7 +54,10 @@ function narrowMediaBlock(style: string): string {
       if (depth === 0) return style.slice(open + 1, i);
     }
   }
-  throw new Error("unbalanced braces in the narrow media block");
+  throw new Error("unbalanced braces in the " + marker + " media block");
+}
+function narrowMediaBlock(style: string): string {
+  return mediaBlockAt(style, "@media (max-width:900px)");
 }
 
 test("exactly one narrow breakpoint exists — a real narrow design, not a second patch stacked on the first", () => {
@@ -142,4 +144,57 @@ test("the composed app page still parses as valid JS after the narrow-layout cha
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- defect 4: the topbar overflows by ~38px at a real 390px device width -----------
+// Measured live (mobile emulation, page reloaded): .top scrollWidth 428 vs
+// clientWidth 390. Children measured: seg 166px + iconbtns 38+35+35+31 + bellwrap
+// 36 + logo 24 + paddings/gaps.
+
+test("defect 4 fixed: a phone-width (<=430px) breakpoint further trims the topbar's own padding and inter-icon gaps below the 900px block's values, and drops the theme icon", () => {
+  const style = composedStyle();
+  const block900 = narrowMediaBlock(style);
+  const block430 = mediaBlockAt(style, "@media (max-width:430px)");
+
+  const gap900 = block900.match(/\.top\s*\{[^}]*gap:\s*(\d+)px/);
+  const pad900 = block900.match(/\.top\s*\{[^}]*padding:\s*0\s*(\d+)px/);
+  assert.ok(gap900, "the 900px block must set .top's gap (the baseline this narrower block must trim below)");
+  assert.ok(pad900, "the 900px block must set .top's horizontal padding");
+
+  const gap430 = block430.match(/\.top\s*\{[^}]*gap:\s*(\d+)px/);
+  const pad430 = block430.match(/\.top\s*\{[^}]*padding:\s*0\s*(\d+)px/);
+  assert.ok(gap430, "the <=430px block must further tighten .top's gap");
+  assert.ok(pad430, "the <=430px block must further tighten .top's horizontal padding");
+  assert.ok(Number(gap430![1]) < Number(gap900![1]), "the narrower gap must be strictly smaller than the 900px block's own");
+  assert.ok(Number(pad430![1]) < Number(pad900![1]), "the narrower padding must be strictly smaller than the 900px block's own");
+
+  assert.match(block430, /\.iconbtn\s*\{[^}]*padding:/, "icon button padding must also tighten at <=430px");
+  assert.match(block430, /#m-theme\s*\{[^}]*display:\s*none/, "the theme icon button — the fifth icon this width cannot afford — must be dropped");
+});
+
+test("defect 4 fixed: the theme control dropped from the narrow topbar is never orphaned — the settings modal carries the SAME cycle the topbar button used, not a second implementation", () => {
+  const script = composedScript();
+  assert.match(script, /function cycleTheme\(\)/, "theme-cycling must be a shared, named function, not only inlined in the topbar button's onclick");
+  assert.match(script, /document\.getElementById\("m-theme"\)\.onclick = cycleTheme;/, "the topbar button must use the shared cycle");
+  assert.match(script, /row\("Theme",[\s\S]{0,200}?themeBtn\)/, "the settings modal must render a Theme row");
+  assert.match(script, /themeBtn\.onclick = function \(\) \{ cycleTheme\(\); renderSettings\(\); \};/,
+    "the settings-modal theme control must call the SAME cycleTheme() the topbar button does, not a second, divergent implementation");
+});
+
+// --- defect 5: the Room live-rail never ellipsizes at narrow width ------------------
+// Measured live: span.li elements inside .liverow/.liverail measure scrollWidth up to
+// 3612px, forcing horizontal overflow at narrow.
+
+test("defect 5 fixed: the live-rail's whole flex ancestor chain carries min-width:0, so .li's own overflow:hidden/ellipsis has a constrained box to clip against", () => {
+  const style = composedStyle();
+  // A single missing min-width:0 anywhere in this chain is enough to let the row grow
+  // to the widest UNBROKEN activity label's min-content width instead of shrinking to
+  // the rail's real width — exactly the measured defect (.li scrollWidth up to 3612px).
+  assert.match(style, /#room-chat-pane\s*\{[^}]*min-width:0/, "#room-chat-pane must carry min-width:0 — its sibling #room-term-pane already documents exactly why");
+  assert.match(style, /\.view\s*\{[^}]*min-width:0/, "the .view flex item (a column-flex child of main) must carry min-width:0");
+  assert.match(style, /\.liverail\s*\{[^}]*min-width:0/, ".liverail must carry min-width:0");
+  assert.match(style, /\.liverow\s*\{[^}]*min-width:0[^}]*\}/, ".liverow itself — not just its .li child — must carry min-width:0");
+  // .li's own single-line ellipsis treatment (already correct on this row; kept intact).
+  assert.match(style, /\.liverow \.li\s*\{[^}]*overflow:hidden[^}]*text-overflow:ellipsis[^}]*white-space:nowrap[^}]*flex:1[^}]*min-width:0/,
+    ".li must keep its single-line ellipsis treatment: overflow hidden, ellipsis, nowrap, flex:1, min-width:0");
 });

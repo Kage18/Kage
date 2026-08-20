@@ -140,7 +140,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      main used to own the height itself; it now fills whatever the split gives it. */
   .split { display:flex; height:calc(100% - 46px - 28px); min-height:0; }
   main { flex:1; min-width:0; overflow:hidden; display:flex; flex-direction:column; }
-  .view { display:none; flex:1; min-height:0; }
+  .view { display:none; flex:1; min-height:0; min-width:0; }
 
   /* ---- projects rail ----
      Only the CURRENT project can show live counts: its daemon is the one we are talking
@@ -192,8 +192,14 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   /* Live runs, surfaced in the Room. Work dispatched from here used to vanish: the
      only sign an agent was running was a count in the status bar, and you had to know
      to navigate to Runs to find it. */
-  .liverail { flex:none; display:flex; flex-direction:column; gap:6px; padding:10px 24px 0; }
-  .liverow { display:flex; align-items:center; gap:10px; padding:9px 13px; cursor:pointer;
+  .liverail { flex:none; display:flex; flex-direction:column; gap:6px; padding:10px 24px 0; min-width:0; }
+  /* min-width:0 on the row itself, not just .li below — without it, the row (and
+     .liverail, and every flex ancestor up to #room-chat-pane) sizes to the widest
+     UNBROKEN activity label's min-content width instead of shrinking to the rail's
+     actual width, so .li's own overflow:hidden/text-overflow:ellipsis never has a
+     constrained box to clip against. Measured live at 390px: span.li scrollWidth up
+     to 3612px. Same fix #room-term-pane already documents for the same reason. */
+  .liverow { display:flex; align-items:center; gap:10px; padding:9px 13px; cursor:pointer; min-width:0;
     border:1px solid color-mix(in srgb, var(--green) 26%, var(--line));
     background:var(--green-soft); border-radius:var(--r-panel); }
   .liverow:hover { border-color:var(--green); }
@@ -1021,6 +1027,20 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     .room-banner { flex-wrap:wrap; }
   }
 
+  /* Phone-width topbar trim, one breakpoint narrower than the 900px block above.
+     Measured live at a real 390px device width: .top scrollWidth 428 vs clientWidth
+     390, a ~38px overflow forcing horizontal scroll on the one bar that should never
+     need it. Tighter padding and inter-icon gaps claw back most of it; the rest comes
+     from dropping the theme icon button — the fifth icon this width cannot afford.
+     Theme is never orphaned: the settings modal (already the narrow-width home for
+     the project switcher) carries the same three-state cycle, same localStorage key,
+     wired through the shared cycleTheme() in app-client.ts. */
+  @media (max-width:430px) {
+    .top { padding:0 8px; gap:5px; }
+    .iconbtn { padding:7px 9px; }
+    #m-theme { display:none; }
+  }
+
   /* Terminal mode — a REAL claude session, not our own chat rendering of one */
   .room-toggle { display:flex; gap:2px; padding:9px 24px 0; flex:none; }
   .room-toggle button { font-family:var(--mono); font-size:11px; padding:6px 13px; border-radius:var(--r-panel) var(--r-panel) 0 0;
@@ -1040,7 +1060,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .thread.on .tx, .thread:hover .tx { display:block; }
   .thread .tx:hover { color:var(--crimson); }
   .room-toggle .tadd { color:var(--text3); padding:6px 9px; flex:none; }
-  #room-chat-pane { display:flex; flex-direction:column; flex:1; min-height:0; }
+  #room-chat-pane { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
   #room-term-pane { display:none; flex:1; min-height:0; min-width:0; background:var(--code-bg); padding:10px 14px; }
   /* flex:1 + min-width:0 matter: as a flex item this would otherwise size to its
      content, and xterm's fit addon would measure a near-zero box and pick cols=2 —
