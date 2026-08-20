@@ -16,6 +16,13 @@
 // the doc, or reword the doc so it no longer states the JSON-fallback law or the
 // zero-new-dependencies law in a greppable form — any of those fails a test in this file.
 //
+// M1 landed 2026-08-20 (mcp/store/{types,sqlite,json,manifest,rebuild}.ts,
+// mcp/store-layer.test.ts): the guard below is now bidirectional, not a
+// single "doesn't exist yet" check. It fails if mcp/store/ or any of its
+// five files goes missing, or if the doc stops saying M1 landed, or if
+// mcp/kernel.ts starts importing from mcp/store/ or referencing
+// StoreBackend before M2/M3 actually wire the seam in.
+//
 // __dirname is mcp/dist/ at runtime (compiled test) — one ".." reaches sibling mcp/
 // sources, two reaches the repo root. Same convention as readme-claims.test.ts,
 // context-doc.test.ts, and sessions-doc.test.ts.
@@ -49,10 +56,10 @@ function citedPaths(doc: string): string[] {
 // Every `Symbol` this doc cites as existing code, paired with the file it names for
 // that symbol — hand-curated against the doc's own "Exists"/prose citations (verified
 // against the real source before landing, not derived mechanically from the markdown).
-// Proposed-but-not-yet-real names (StoreBackend, SqliteStoreBackend, JsonStoreBackend,
-// the new mcp/store/ files, the SQL table names) are deliberately absent — they are the
-// design, not shipped code, and are checked instead by the "does not yet exist" test
-// below.
+// The M1 store-layer symbols below (StoreBackend through rebuildStore) were
+// proposed-but-not-yet-real when this file was first written; M1 landed
+// 2026-08-20 and they are real exported symbols in mcp/store/ now, verified
+// the same way as every kernel.ts citation above them.
 const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "writeJson", file: "mcp/kernel.ts" },
   { symbol: "readJson", file: "mcp/kernel.ts" },
@@ -80,6 +87,14 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "queryGraph", file: "mcp/kernel.ts" },
   { symbol: "truthReport", file: "mcp/kernel.ts" },
   { symbol: "initProject", file: "mcp/kernel.ts" },
+  // M1 store layer, landed 2026-08-20 -- see the "M1 seam exists" test below
+  // for the directory/file-level half of this guard.
+  { symbol: "StoreBackend", file: "mcp/store/types.ts" },
+  { symbol: "SqliteStoreBackend", file: "mcp/store/sqlite.ts" },
+  { symbol: "detect", file: "mcp/store/sqlite.ts" },
+  { symbol: "JsonStoreBackend", file: "mcp/store/json.ts" },
+  { symbol: "openStore", file: "mcp/store/manifest.ts" },
+  { symbol: "rebuildStore", file: "mcp/store/rebuild.ts" },
 ];
 
 test("docs/design/MEMORY_STORE.md exists and is a substantial design doc", () => {
@@ -116,12 +131,39 @@ test("every symbol MEMORY_STORE.md cites as existing code is a real identifier i
   }
 });
 
-test("the doc's proposed store seam does not already exist as shipped code", () => {
-  // The whole design rests on mcp/store/ being new work. If a store seam now exists,
-  // the doc's M1 phase (and its "nothing existing moves yet" framing) is stale.
-  assert.ok(!existsSync(repoPath("mcp", "store")), "expected no mcp/store/ directory yet — if one now exists, the doc's M1 phase is stale");
+test("M1's store seam exists as shipped code, and the doc says M1 landed", () => {
+  // M1 landed 2026-08-20: mcp/store/ is real work now, not a proposal. This
+  // guard is the mirror image of what it used to check -- it now fails if
+  // the seam disappears out from under the doc, or if the doc stops saying
+  // M1 landed while the code still exists (the doc would then be stale in
+  // the other direction: undercounting what has actually shipped).
+  assert.ok(existsSync(repoPath("mcp", "store")), "expected mcp/store/ to exist -- M1 landed 2026-08-20 and this doc says so");
+  for (const file of ["types.ts", "sqlite.ts", "json.ts", "manifest.ts", "rebuild.ts"]) {
+    assert.ok(existsSync(repoPath("mcp", "store", file)), `expected mcp/store/${file} to exist -- it's one of the five files M1's row in the rollout table names`);
+  }
+  assert.ok(existsSync(repoPath("mcp", "store-layer.test.ts")), "expected mcp/store-layer.test.ts to exist -- M1's own test file");
+
+  const doc = readDoc();
+  assert.ok(doc.includes("M1 — the store layer") && doc.includes("Landed 2026-08-20"), "doc's M1 row should say M1 landed 2026-08-20, not just describe it as proposed");
+  for (const symbol of ["StoreBackend", "SqliteStoreBackend", "JsonStoreBackend", "openStore", "rebuildStore"]) {
+    assert.ok(doc.includes(symbol), `doc's M1 row should name the real exported symbol "${symbol}" it landed`);
+  }
+});
+
+test("M2/M3 have not wired the store seam into mcp/kernel.ts yet, and the doc still marks them not built", () => {
+  // The other half of the same guard: M1 landing must not be mistaken for
+  // M2/M3 landing. mcp/kernel.ts must still own every artifact this design
+  // is meant to eventually move behind the seam -- if StoreBackend (or an
+  // import from mcp/store/) shows up in kernel.ts, M2/M3 have started and
+  // this doc's "Not yet built" rows are now stale.
   const kernelSource = readFileSync(repoPath("mcp", "kernel.ts"), "utf8");
-  assert.ok(!/\bStoreBackend\b/.test(kernelSource), "expected no StoreBackend identifier in mcp/kernel.ts yet — if one now exists, the doc's seam design is stale");
+  assert.ok(!/\bStoreBackend\b/.test(kernelSource), "expected no StoreBackend identifier in mcp/kernel.ts yet -- that's M2/M3's job, not M1's");
+  assert.ok(!/from\s+["']\.\/store\//.test(kernelSource) && !/require\(["']\.\/store\//.test(kernelSource), "expected mcp/kernel.ts to not import from mcp/store/ yet -- that's M2/M3's job, not M1's");
+
+  const doc = readDoc();
+  assert.ok(/M2 — the memory-side port\*\*\s*\|\s*Not yet built/.test(doc), "doc's M2 row should still say Not yet built");
+  assert.ok(/M3 — the graph-side port\*\*\s*\|\s*Not yet built/.test(doc), "doc's M3 row should still say Not yet built");
+  assert.ok(/M4 — benchmarks and the scale guard\*\*\s*\|\s*Not yet built/.test(doc), "doc's M4 row should still say Not yet built");
 });
 
 test("the doc states the JSON-fallback law in a greppable form", () => {

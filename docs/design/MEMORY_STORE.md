@@ -321,10 +321,21 @@ here too).
 
 | Phase | What ships | Acceptance |
 |---|---|---|
-| **M1 — the store layer** | `mcp/store/`: `StoreBackend` interface, `SqliteStoreBackend`, `JsonStoreBackend` (wrapping today's `readJson`/`writeJson`), the manifest, `kage store rebuild`. No existing call site changes yet. | Unit tests in `mcp/store/` pass, including a feature-detect fallback test that mocks `node:sqlite` absent (e.g. stubs `require("node:sqlite")` to throw) and asserts `JsonStoreBackend` is selected with byte-identical output to today's `writeJson`. |
-| **M2 — the memory-side port** | `catalog`, `by-path`/`by-tag`/`by-type`, docs FTS, vectors move behind the seam; `mcp/kernel.ts` reads/writes through `StoreBackend` for these artifacts. | `recall` and `searchDocs` return identical results (same packet ids, same order, same `score_breakdown` values) against both backends on this repo's own packet set — a golden-output test, not a new ranking test. |
-| **M3 — the graph-side port** | Structural graph and knowledge graph move behind the seam, with lazy walks (`kg_edges` traversal via indexed join instead of `hydrateKnowledgeGraphArtifact`'s whole-array hydration). | `queryCodeGraph` and `queryGraph` (`mcp/kernel.ts:14995`) return identical results against both backends; a `kage refresh` touching one file measurably upserts O(1) rows, not O(files). |
-| **M4 — benchmarks and the scale guard** | A generated 10,000-file synthetic fixture; before/after numbers published in `docs/BENCHMARKS.md`; §(f)'s guard wired into `kage scan`/`kage install`. Targets, **labeled as targets, not measured results**: cold index in minutes not hours; warm refresh in seconds; recall under 100ms; peak heap under 500MB during a cold index. | `docs/BENCHMARKS.md` exists, states real before/after numbers from the fixture (not projections), and each target above is marked met or not-yet-met — never silently omitted. |
+| **M1 — the store layer** | **Landed 2026-08-20.** `mcp/store/`: the `StoreBackend` interface (`mcp/store/types.ts`), `SqliteStoreBackend` and its `detect()` feature-probe (`mcp/store/sqlite.ts`), `JsonStoreBackend` wrapping today's whole-file read/write behavior (`mcp/store/json.ts`), `openStore()` and the manifest (`mcp/store/manifest.ts`), and `rebuildStore()` (`mcp/store/rebuild.ts`). No existing call site changed — `mcp/kernel.ts` does not import from `mcp/store/` yet, and nothing routes through it; that wiring is M2/M3, not built. | **Met.** `mcp/store-layer.test.ts` (17 tests, all green) covers a feature-detect fallback test that injects a `require` seam reporting `node:sqlite` absent and asserts `JsonStoreBackend` is selected, plus round-trip, migration, FTS, scope, and `rebuildStore()`-idempotency coverage beyond the acceptance bar this row originally set. |
+| **M2 — the memory-side port** | Not yet built. `catalog`, `by-path`/`by-tag`/`by-type`, docs FTS, vectors move behind the seam; `mcp/kernel.ts` reads/writes through `StoreBackend` for these artifacts. | `recall` and `searchDocs` return identical results (same packet ids, same order, same `score_breakdown` values) against both backends on this repo's own packet set — a golden-output test, not a new ranking test. |
+| **M3 — the graph-side port** | Not yet built. Structural graph and knowledge graph move behind the seam, with lazy walks (`kg_edges` traversal via indexed join instead of `hydrateKnowledgeGraphArtifact`'s whole-array hydration). | `queryCodeGraph` and `queryGraph` (`mcp/kernel.ts:14995`) return identical results against both backends; a `kage refresh` touching one file measurably upserts O(1) rows, not O(files). |
+| **M4 — benchmarks and the scale guard** | Not yet built. A generated 10,000-file synthetic fixture; before/after numbers published in `docs/BENCHMARKS.md`; §(f)'s guard wired into `kage scan`/`kage install`. Targets, **labeled as targets, not measured results**: cold index in minutes not hours; warm refresh in seconds; recall under 100ms; peak heap under 500MB during a cold index. | `docs/BENCHMARKS.md` exists, states real before/after numbers from the fixture (not projections), and each target above is marked met or not-yet-met — never silently omitted. |
+
+M1's actual schema deviates from the sketch in §(b) in a few places, each for a
+concrete reason discovered while building it, not a rewrite of the design:
+`packet_paths`/`packet_symbols` are keyed upserts (`UNIQUE(packet_id, path)` /
+`UNIQUE(packet_id, symbol)`, last write wins) rather than plain appends, so a
+re-upserted citation doesn't duplicate; `import_edges`/`call_edges`/`kg_edges`
+have no natural unique key in either today's artifacts or this sketch, so both
+backends treat them as append-only rather than half-deduplicating; `symbols.id`
+is `TEXT PRIMARY KEY`, not `INTEGER`, because structural symbol ids in this repo
+are already strings; and the `vectors` table carries no `norm` column — cosine
+scoring stays entirely with the caller, per §(c)'s ranking-stays-with-callers rule.
 
 The JSON backend is not retired at M4 — it is retired **no earlier than two releases
 after M4 proves parity**, giving any installation still on a pre-23.4 Node, or any

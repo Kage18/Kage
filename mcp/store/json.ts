@@ -233,6 +233,18 @@ function defaultGraphEpisode(row: KgEpisodeRow): GraphEpisodeLike {
   return { id: row.id, kind: "repo_manifest", source_refs: [], observed_at: row.ts, branch: null, commit: null, summary: row.summary };
 }
 
+// Empty-artifact shapes, shared by every read-with-fallback and reset() call
+// site below instead of repeating the literal at each one.
+function emptyCatalog(): CatalogLike {
+  return { schema_version: 2, generated_from_updated_at: null, packet_count: 0, packets: [] };
+}
+function emptyDocsIndex(): DocsIndexArtifactLike {
+  return { schema_version: 1, generated_at: "", source: "repo-docs", doc_count: 0, chunk_count: 0, chunks: [] };
+}
+function emptyVectorIndex(): SparseVectorIndexLike {
+  return { schema_version: 1, generated_from_updated_at: null, packet_count: 0, documents: [] };
+}
+
 export class JsonStoreBackend implements StoreBackend {
   readonly kind: BackendKind = "json";
   private projectDir: string | null = null;
@@ -268,11 +280,11 @@ export class JsonStoreBackend implements StoreBackend {
     writeJsonFile(structuralPath(dir, "symbols.json"), []);
     writeJsonFile(structuralPath(dir, "imports.json"), []);
     writeJsonFile(structuralPath(dir, CALL_EDGES_FILE.replace("structural/", "")), []);
-    writeJsonFile(indexesPath(dir, "catalog.json"), { schema_version: 2, generated_from_updated_at: null, packet_count: 0, packets: [] });
+    writeJsonFile(indexesPath(dir, "catalog.json"), emptyCatalog());
     writeJsonFile(indexesPath(dir, PACKET_PATHS_FILE.replace("indexes/", "")), []);
     writeJsonFile(indexesPath(dir, PACKET_SYMBOLS_FILE.replace("indexes/", "")), []);
-    writeJsonFile(indexesPath(dir, "docs-index.json"), { schema_version: 1, generated_at: "", source: "repo-docs", doc_count: 0, chunk_count: 0, chunks: [] });
-    writeJsonFile(indexesPath(dir, "vector-local.json"), { schema_version: 1, generated_from_updated_at: null, packet_count: 0, documents: [] });
+    writeJsonFile(indexesPath(dir, "docs-index.json"), emptyDocsIndex());
+    writeJsonFile(indexesPath(dir, "vector-local.json"), emptyVectorIndex());
     writeJsonFile(graphPath(dir, "entities.json"), []);
     writeJsonFile(graphPath(dir, "edges.json"), []);
     writeJsonFile(graphPath(dir, "episodes.json"), []);
@@ -370,7 +382,7 @@ export class JsonStoreBackend implements StoreBackend {
 
   upsertPackets(packets: PacketRow[]): void {
     const path = indexesPath(this.dir(), "catalog.json");
-    const existing = readJsonFile<CatalogLike>(path, { schema_version: 2, generated_from_updated_at: null, packet_count: 0, packets: [] });
+    const existing = readJsonFile<CatalogLike>(path, emptyCatalog());
     const byId = new Map(existing.packets.map((entry) => [entry.id, entry]));
     for (const row of packets) {
       const prior = byId.get(row.id);
@@ -398,7 +410,7 @@ export class JsonStoreBackend implements StoreBackend {
   }
 
   private readCatalogPackets(): CatalogPacketLike[] {
-    return readJsonFile<CatalogLike>(indexesPath(this.dir(), "catalog.json"), { schema_version: 2, generated_from_updated_at: null, packet_count: 0, packets: [] }).packets;
+    return readJsonFile<CatalogLike>(indexesPath(this.dir(), "catalog.json"), emptyCatalog()).packets;
   }
 
   upsertPacketPaths(rows: PacketPathRow[]): void {
@@ -428,7 +440,7 @@ export class JsonStoreBackend implements StoreBackend {
 
   upsertDocsFtsDoc(doc: DocsFtsDoc): void {
     const path = indexesPath(this.dir(), "docs-index.json");
-    const existing = readJsonFile<DocsIndexArtifactLike>(path, { schema_version: 1, generated_at: "", source: "repo-docs", doc_count: 0, chunk_count: 0, chunks: [] });
+    const existing = readJsonFile<DocsIndexArtifactLike>(path, emptyDocsIndex());
     const byId = new Map(existing.chunks.map((chunk) => [docsChunkId(chunk), chunk]));
     byId.set(doc.id, { doc_path: doc.docPath, heading: doc.heading, anchor: doc.id, text: doc.body, line: 0 });
     const chunks = [...byId.values()];
@@ -443,14 +455,7 @@ export class JsonStoreBackend implements StoreBackend {
   queryDocsFts(term: string, scope?: string): DocsFtsHit[] {
     const needle = term.trim().toLowerCase();
     if (!needle) return [];
-    const artifact = readJsonFile<DocsIndexArtifactLike>(indexesPath(this.dir(), "docs-index.json"), {
-      schema_version: 1,
-      generated_at: "",
-      source: "repo-docs",
-      doc_count: 0,
-      chunk_count: 0,
-      chunks: [],
-    });
+    const artifact = readJsonFile<DocsIndexArtifactLike>(indexesPath(this.dir(), "docs-index.json"), emptyDocsIndex());
     return artifact.chunks
       .filter((chunk) => !scope || chunk.doc_path.startsWith(scope))
       .filter((chunk) => chunk.heading.toLowerCase().includes(needle) || chunk.text.toLowerCase().includes(needle))
@@ -461,7 +466,7 @@ export class JsonStoreBackend implements StoreBackend {
 
   upsertVectorChunks(packetId: string, terms: VectorChunkRow[]): void {
     const path = indexesPath(this.dir(), "vector-local.json");
-    const existing = readJsonFile<SparseVectorIndexLike>(path, { schema_version: 1, generated_from_updated_at: null, packet_count: 0, documents: [] });
+    const existing = readJsonFile<SparseVectorIndexLike>(path, emptyVectorIndex());
     const norm = Math.sqrt(terms.reduce((sum, term) => sum + term.weight * term.weight, 0));
     const document: SparseVectorDocumentLike = { packet_id: packetId, terms: terms.map((term) => [term.term, term.weight]), norm };
     const documents = [...existing.documents.filter((doc) => doc.packet_id !== packetId), document].sort((a, b) => a.packet_id.localeCompare(b.packet_id));
@@ -471,12 +476,7 @@ export class JsonStoreBackend implements StoreBackend {
   queryVectorCandidates(terms: string[], scope?: string): VectorCandidate[] {
     if (!terms.length) return [];
     const wanted = new Set(terms);
-    const index = readJsonFile<SparseVectorIndexLike>(indexesPath(this.dir(), "vector-local.json"), {
-      schema_version: 1,
-      generated_from_updated_at: null,
-      packet_count: 0,
-      documents: [],
-    });
+    const index = readJsonFile<SparseVectorIndexLike>(indexesPath(this.dir(), "vector-local.json"), emptyVectorIndex());
     const scopedPacketIds = scope ? new Set(this.listPackets(scope).map((packet) => packet.id)) : null;
     const candidates: VectorCandidate[] = [];
     for (const document of index.documents) {
@@ -549,20 +549,8 @@ export class JsonStoreBackend implements StoreBackend {
   // -- counts ---------------------------------------------------------------------
 
   counts(): Record<string, number> {
-    const docs = readJsonFile<DocsIndexArtifactLike>(indexesPath(this.dir(), "docs-index.json"), {
-      schema_version: 1,
-      generated_at: "",
-      source: "repo-docs",
-      doc_count: 0,
-      chunk_count: 0,
-      chunks: [],
-    });
-    const vectors = readJsonFile<SparseVectorIndexLike>(indexesPath(this.dir(), "vector-local.json"), {
-      schema_version: 1,
-      generated_from_updated_at: null,
-      packet_count: 0,
-      documents: [],
-    });
+    const docs = readJsonFile<DocsIndexArtifactLike>(indexesPath(this.dir(), "docs-index.json"), emptyDocsIndex());
+    const vectors = readJsonFile<SparseVectorIndexLike>(indexesPath(this.dir(), "vector-local.json"), emptyVectorIndex());
     return {
       files: this.readStructuralFiles().length,
       symbols: this.readStructuralSymbols().length,
