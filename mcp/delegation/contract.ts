@@ -65,8 +65,12 @@ const LEGAL_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   // never sets review_required only ever takes the merged/rejected/verifying exits it
   // always had.
   ready: ["merged", "rejected", "verifying", "reviewing"],
-  // A reviewer agent's verdict, and nothing else — see review.ts's REVIEW_PROTOCOL_VERSION.
-  reviewing: ["approved", "changes_requested"],
+  // A reviewer agent's verdict is the normal exit — plus `rejected`, because without it
+  // `reviewing` is a TRAP STATE: if the reviewer agent dies mid-review, the run has no
+  // exit at all and sits stuck forever, exactly the stuck-state class stopped/failed/
+  // blocked all avoid by keeping a `rejected` exit of their own. The review gate governs
+  // MERGING, never a human's right to close the record.
+  reviewing: ["approved", "changes_requested", "rejected"],
   // Same two exits as `ready` — an approved run is a ready run that has additionally
   // cleared the opt-in review gate (ratify.ts's mergeRun requires this state instead of
   // `ready` for any run with review_required set).
@@ -75,7 +79,10 @@ const LEGAL_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   // path (steer.ts) those three already have, just from a fourth state name. steer.ts's
   // own resumability check must recognize this state too before a resume actually
   // succeeds from here — that wiring is a follow-up, not part of this kernel contract.
-  changes_requested: ["running"],
+  // `rejected` is also an exit for the same trap-state reason `reviewing` needs one: a
+  // human must always be able to close a changes_requested run instead of being forced
+  // to resume it first just to reject it.
+  changes_requested: ["running", "rejected"],
   merged: [],
   rejected: [],
   // A failed verification is not the end of the story: retry with steering (-> running),
@@ -884,8 +891,16 @@ export function ownership(task: TaskRecord): Ownership {
   // "orphaned" joins the list for the same reason: nothing is coming back to finish
   // this run's bookkeeping on its own (its supervisor is gone), even though the agent
   // itself may still be working unsupervised — a human has to adopt or kill it.
+  //
+  // "approved" behaves like "ready" for this purpose too — review.ts's reviewRun landed
+  // it there instead of a human, but merging it is still a human's call. "changes_requested"
+  // behaves like "stopped"/"failed": the reviewer left a verdict and the run itself is not
+  // making progress until a human tells/steers it back to running (steer.ts). "reviewing"
+  // is deliberately absent — an agent is actively working on it, same as "running".
   if (
     shown === "ready" ||
+    shown === "approved" ||
+    shown === "changes_requested" ||
     shown === "blocked" ||
     shown === "failed" ||
     shown === "dropped" ||

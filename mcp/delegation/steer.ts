@@ -35,8 +35,10 @@ export interface SteerResult {
   task: TaskRecord;
 }
 
-/** States a reattached supervisor can legally re-enter `running` from. */
-const REENTRANT_STATES = new Set(["blocked", "stopped", "failed"]);
+/** States a reattached supervisor can legally re-enter `running` from. `changes_requested`
+ * (review.ts's reviewRun) reuses this exact resume path — see LEGAL_TRANSITIONS in
+ * contract.ts, which already allows changes_requested -> running for this reason. */
+const REENTRANT_STATES = new Set(["blocked", "stopped", "failed", "changes_requested"]);
 
 /**
  * Steering is always recorded, and its delivery state is always reported honestly —
@@ -86,7 +88,12 @@ export async function steerRun(
     };
   }
 
-  const resumable = task.state === "blocked" || task.state === "stopped" || task.state === "failed" || !isProcessAlive(task.agent_pid);
+  const resumable =
+    task.state === "blocked" ||
+    task.state === "stopped" ||
+    task.state === "failed" ||
+    task.state === "changes_requested" ||
+    !isProcessAlive(task.agent_pid);
   if (!resumable) {
     return { delivery: "refused", task, message: `${runId} is ${task.state} — nothing to steer.` };
   }

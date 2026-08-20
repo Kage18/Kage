@@ -250,12 +250,15 @@ function costLabel(run) {
 
 function glyphFor(run) {
   var s = run.display_state;
-  if (s === "ready") return ["✓", "jade"];
+  if (s === "ready" || s === "approved") return ["✓", "jade"];
   if (s === "blocked") return ["?", "amber"];
+  if (s === "changes_requested") return ["↺", "amber"];
   if (s === "failed" || s === "dropped") return ["■", "crimson"];
   if (s === "merged") return ["✓", "dim"];
   if (s === "rejected") return ["✕", "dim"];
-  if (s === "running" || s === "verifying" || s === "dispatched") return ["▶", "dim"];
+  // reviewing: an independently hired reviewer agent is working, same family as
+  // running/verifying/dispatched — never "jade"/"amber", those read as a verdict.
+  if (s === "running" || s === "verifying" || s === "dispatched" || s === "reviewing") return ["▶", "dim"];
   if (s === "stopped") return ["⏸", "amber"];
   return ["▸", "dim"];
 }
@@ -267,7 +270,7 @@ function isPlanApproval(run) {
 // recount showed VERIFIED for a run the kernel had already failed). The list/board
 // endpoint now carries it verbatim as run.verdict_label (withActivity, api.ts), so a
 // card reads it directly — no per-card detail fetch, no cache to invalidate.
-var VERDICT_CARD_STATES = ["ready", "merged", "failed", "rejected"];
+var VERDICT_CARD_STATES = ["ready", "merged", "failed", "rejected", "reviewing", "approved", "changes_requested"];
 function verdictChipFor(run) {
   if (VERDICT_CARD_STATES.indexOf(run.display_state) < 0) return null;
   return run.verdict_label ? { label: run.verdict_label } : null;
@@ -354,10 +357,11 @@ function tellRun(runId, message) {
 }
 function decisionText(run) {
   var s = run.display_state;
-  if (s === "ready") return "Merge: " + runTitle(run);
+  if (s === "ready" || s === "approved") return "Merge: " + runTitle(run);
   if (s === "blocked" && isPlanApproval(run)) return "Plan review: " + runTitle(run);
   if (s === "blocked" && run.waiting_on) return "“" + (run.waiting_on.question || run.waiting_on.detail || run.waiting_on.needs || "waiting on you") + "”";
   if (s === "blocked") return "Waiting on you: " + runTitle(run);
+  if (s === "changes_requested") return "Changes requested — resume or reject: " + runTitle(run);
   if (s === "stopped") return "Stopped — resume or reject: " + runTitle(run);
   return "Lost, resumable: " + runTitle(run);
 }
@@ -522,7 +526,9 @@ function patchWorkRow(row, run, needsYou) {
   if (actHost) {
     var oldBtns = actHost.querySelector(".qbtns");
     if (oldBtns) actHost.removeChild(oldBtns);
-    if (run.display_state === "ready") actHost.appendChild(buildMergeBtnGroup(run));
+    // approved behaves like ready for merge purposes — it is a ready run that has
+    // additionally cleared the opt-in review gate (ratify.ts's mergeRun).
+    if (run.display_state === "ready" || run.display_state === "approved") actHost.appendChild(buildMergeBtnGroup(run));
   }
 }
 
@@ -562,8 +568,12 @@ function renderWorkList() {
   // only waiting for a click — and everything else is either working or history.
   var sections = [
     ["Asks you", function (r) { return r.display_state === "blocked"; }],
-    ["Needs a decision", function (r) { return r.ownership === "needs_you" && r.display_state !== "blocked" && r.display_state !== "ready"; }],
-    ["Ready to merge", function (r) { return r.display_state === "ready"; }],
+    ["Needs a decision", function (r) {
+      return r.ownership === "needs_you" && r.display_state !== "blocked" && r.display_state !== "ready" && r.display_state !== "approved";
+    }],
+    // approved joins ready here — a run that cleared the opt-in review gate is exactly
+    // as mergeable as one that never needed review (ratify.ts's mergeRun).
+    ["Ready to merge", function (r) { return r.display_state === "ready" || r.display_state === "approved"; }],
     ["Working", function (r) { return r.ownership === "working"; }],
     ["Done", function (r) { return r.ownership === "done"; }],
   ];
@@ -1086,16 +1096,18 @@ function renderLiveRail() {
   if (!rail) return;
   rail.textContent = "";
   var live = state.runs.filter(function (r) {
-    return ["running", "dispatched", "verifying"].indexOf(r.display_state) >= 0;
+    return ["running", "dispatched", "verifying", "reviewing"].indexOf(r.display_state) >= 0;
   });
-  var waiting = state.runs.filter(function (r) { return r.display_state === "blocked" || r.display_state === "ready"; });
+  var waiting = state.runs.filter(function (r) {
+    return r.display_state === "blocked" || r.display_state === "ready" || r.display_state === "approved" || r.display_state === "changes_requested";
+  });
   var all = live.concat(waiting);
   all.slice(0, 4).forEach(function (run) {
     var row = h("div", "liverow");
-    var working = ["running", "dispatched", "verifying"].indexOf(run.display_state) >= 0;
+    var working = ["running", "dispatched", "verifying", "reviewing"].indexOf(run.display_state) >= 0;
     if (working) row.appendChild(h("span", "dot"));
-    row.appendChild(h("span", "la", working ? (run.display_state === "verifying" ? "verifying" : "working") :
-      (run.display_state === "ready" ? "ready" : "asks you")));
+    row.appendChild(h("span", "la", working ? (run.display_state === "verifying" ? "verifying" : run.display_state === "reviewing" ? "reviewing" : "working") :
+      (run.display_state === "ready" || run.display_state === "approved" ? "ready" : "asks you")));
     row.appendChild(h("span", "li", runTitle(run)));
     // The live activity line is the whole point — say what it is doing, not just that
     // it is doing something.
@@ -2334,7 +2346,10 @@ function jumpToDiffFile(path) {
 // design's own order — RECEIPT, SESSION CONTROLS, ACTIVITY, FILES. The Follow/Queue/
 // Receipt/Diff/Brief/Raw tabs stay for deep inspection; this panel is what a glance
 // needs without switching tabs.
-var FINISHED_RECEIPT_STATES = ["ready", "merged", "failed"];
+// reviewing/approved/changes_requested all carry the SAME claim ready did (review.ts's
+// reviewRun only ever runs against a run that already reached "ready") — the receipt is
+// exactly as real for them, just with a reviewer's own verdict layered on top.
+var FINISHED_RECEIPT_STATES = ["ready", "merged", "failed", "reviewing", "approved", "changes_requested"];
 
 // --- what-now (finding 6): one line under the state chips naming the next move for
 // every terminal-or-stuck state. Driven only by fields the API already serves
@@ -2374,6 +2389,18 @@ function whatNowLine(run, d) {
   }
   if (s === "ready") {
     return "verified — review the receipt and merge.";
+  }
+  if (s === "reviewing") {
+    return "verified — an independent reviewer agent is judging this diff now.";
+  }
+  if (s === "approved") {
+    return "verified and approved by the reviewer — merge when ready.";
+  }
+  if (s === "changes_requested") {
+    var findings = d && d.agent_review && d.agent_review.findings.length ? d.agent_review.findings[0] : null;
+    return findings
+      ? "the reviewer requested changes: " + findings + ". Steer a fix, or reject."
+      : "the reviewer requested changes — see the receipt for what. Steer a fix, or reject.";
   }
   return null;
 }
@@ -2435,6 +2462,23 @@ function renderDetailPanel(panel, d, run) {
   if (d.claim && FINISHED_RECEIPT_STATES.indexOf(run.display_state) >= 0) {
     var receiptSec = panelSection(panel, "Receipt");
     renderReceipt(receiptSec, d.claim, run, d.verdict, d.taught);
+  }
+
+  // 1b. REVIEWER — the independently hired reviewer agent's verdict (review.ts's
+  // reviewRun), a DIFFERENT record from the claim's own kernel verdict above. Absent
+  // for any run that never opted into review_required, or is still mid-review with no
+  // verdict written yet — never a guessed or re-derived word.
+  if (d.agent_review) {
+    var reviewerSec = panelSection(panel, "Reviewer");
+    reviewerSec.appendChild(h("div", "pnl-review-verdict chip state-" + d.agent_review.verdict, d.agent_review.verdict.split("_").join(" ")));
+    if (!d.agent_review.protocol_ok) {
+      reviewerSec.appendChild(h("div", "pnl-review-note", "malformed review fence — degraded to changes_requested"));
+    }
+    if (d.agent_review.findings.length) {
+      var findingsList = h("div", "pnl-review-findings");
+      d.agent_review.findings.forEach(function (item) { findingsList.appendChild(h("div", "pnl-review-finding", item)); });
+      reviewerSec.appendChild(findingsList);
+    }
   }
 
   // 2. SESSION CONTROLS — the deliver-now/queue toggle, relocated from the composer
@@ -2508,6 +2552,7 @@ var detailRevisionByRun = {};
 function detailRevisionPayload(d, run) {
   return {
     tab: state.tab, display_state: run.display_state, waiting_on: run.waiting_on, claim: d.claim, verdict: d.verdict,
+    agentReview: d.agent_review,
     taught: d.taught, steers: d.steers, receipt: d.receipt, rawText: d.rawText, diffText: d.diffText, brief: d.brief,
     events: d.events, files: d.files, branch_landed: run.branch_landed, worktree_adoptable: run.worktree_adoptable,
     spend: run.spend, tokens_used: run.tokens_used, confidence: run.confidence, blast: run.blast, activity: run.activity,
@@ -2730,7 +2775,9 @@ function renderDetail() {
 
   var bar = h("div", "actionbar");
   var pendingLabel = pendingActions[run.id];
-  if (run.display_state === "ready") {
+  // approved behaves like ready for merge purposes (ratify.ts's mergeRun requires
+  // "approved" instead of "ready" only for a run whose review was required).
+  if (run.display_state === "ready" || run.display_state === "approved") {
     var merge = h("button", "btn primary", pendingLabel || "Merge & ratify");
     if (pendingLabel) merge.disabled = true;
     merge.onclick = function () { actOnRun(run.id, "merge", null, "Merging…", "merged"); };
@@ -2911,11 +2958,15 @@ function renderBoard() {
   // hole — merged runs used to vanish from the board entirely, so the one outcome you
   // most want confirmed had nowhere to appear.
   var cols = [
-    { hint: "Briefed and waiting, or working right now.", parts: [["Idle", "var(--text3)", function (r) { return r.display_state === "briefed" || r.display_state === "draft"; }],
-              ["Working", "var(--jade)", function (r) { return r.display_state === "running" || r.display_state === "dispatched" || r.display_state === "verifying"; }]] },
-    { hint: "An agent stopped to ask you something.", parts: [["Needs you", "var(--amber)", function (r) { return r.display_state === "blocked"; }]] },
+    { hint: "Briefed and waiting, working right now, or under independent review.", parts: [["Idle", "var(--text3)", function (r) { return r.display_state === "briefed" || r.display_state === "draft"; }],
+              ["Working", "var(--jade)", function (r) { return r.display_state === "running" || r.display_state === "dispatched" || r.display_state === "verifying"; }],
+              ["Reviewing", "var(--memory)", function (r) { return r.display_state === "reviewing"; }]] },
+    { hint: "An agent stopped to ask you something, or a reviewer sent work back.", parts: [["Needs you", "var(--amber)", function (r) { return r.display_state === "blocked"; }],
+              ["Changes requested", "var(--amber)", function (r) { return r.display_state === "changes_requested"; }]] },
     { hint: "Runs that failed, were stopped, or lost their process.", parts: [["Lost", "var(--crimson)", function (r) { return r.display_state === "failed" || r.display_state === "dropped" || r.display_state === "stopped"; }]] },
-    { hint: "Work the kernel checked and you have not merged yet.", parts: [["Ready", "var(--jade)", function (r) { return r.display_state === "ready"; }],
+    // approved joins ready — a run that cleared the opt-in review gate is exactly as
+    // mergeable as one that never needed review (ratify.ts's mergeRun).
+    { hint: "Work the kernel checked (and a reviewer approved, if required) and you have not merged yet.", parts: [["Ready", "var(--jade)", function (r) { return r.display_state === "ready" || r.display_state === "approved"; }],
               ["Merged", "var(--text3)", function (r) { return r.display_state === "merged"; }]] },
   ];
   var built = cols.map(function (spec) {

@@ -15,6 +15,7 @@ import { readJudgment, renderJudgment } from "../manager.js";
 import { askManager } from "../manager-client.js";
 import { formatElapsed, readActivity } from "../progress.js";
 import { mergeRun, rejectRun } from "../ratify.js";
+import { readAgentReview } from "../review.js";
 import { steerRun } from "../steer.js";
 import { claimVerdict } from "../verify.js";
 import { wrap } from "./ansi.js";
@@ -67,6 +68,17 @@ export function loadRunRows(projectDir: string): RunRow[] {
     } else if (task.state === "ready" || task.state === "failed") {
       const claim = readClaim(projectDir, task.id);
       detail = claim ? claimVerdict(claim).label.toLowerCase() : lastNote(task) || task.state;
+    } else if (task.state === "reviewing") {
+      // No supervised process is tracked for a reviewer agent yet (dispatch/supervisor
+      // wiring is a separate follow-up) — say what is true without claiming activity
+      // this surface cannot actually observe.
+      detail = "an independent reviewer agent is judging this diff";
+    } else if (task.state === "approved") {
+      const claim = readClaim(projectDir, task.id);
+      detail = (claim ? claimVerdict(claim).label.toLowerCase() + " · " : "") + "approved by reviewer — ready to merge";
+    } else if (task.state === "changes_requested") {
+      const review = readAgentReview(projectDir, task.id);
+      detail = (review && review.findings[0]) || lastNote(task) || "reviewer requested changes";
     } else {
       detail = lastNote(task) || task.intent;
     }
@@ -153,6 +165,25 @@ function verboseReceipt(projectDir: string, task: TaskRecord, claim: ClaimRecord
   push(`VERDICT    ${verdict.label}`);
   push(`           ${verdict.executed ? "at least one check was executed by Kage" : "nothing was executed — this was inspected, not verified"}`);
   push();
+
+  // REVIEWER — an independently hired reviewer agent's verdict (review.ts's reviewRun),
+  // a DIFFERENT record from the kernel's own claim verdict above. Absent for any run
+  // that never opted into review_required, or is still mid-review with no verdict
+  // written yet.
+  const agentReview = readAgentReview(projectDir, task.id);
+  if (agentReview) {
+    push(`REVIEWER   ${agentReview.verdict}${agentReview.protocol_ok ? "" : " (malformed fence — degraded)"}`);
+    if (agentReview.findings.length) {
+      push(`FINDINGS (${agentReview.findings.length})`);
+      for (const item of agentReview.findings) {
+        const wrapped = wrap(item, 88);
+        push(`  - ${wrapped[0] ?? ""}`);
+        for (const line of wrapped.slice(1)) push(`     ${line}`);
+      }
+    }
+    push();
+  }
+
   push("CLAIM (the agent's words — not evidence)");
   for (const line of wrap(claim.statement, 92)) push(`  ${line}`);
   if (!claim.protocol_ok) push(`  ! the agent skipped the ${CLAIM_PROTOCOL_VERSION} fence; this was derived from the diff`);
