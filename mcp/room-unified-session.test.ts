@@ -71,6 +71,25 @@ test("resolvePtyReply returns null when the pty is unavailable — the signal re
   ctx.feed.close();
 });
 
+test("resolvePtyReply against the REAL ensurePtyAttached (no test seam) resolves fast when no pty is live, and never spawns one — reverting spawnIfNeeded to always-true fails this test with an 8s+ stall", async () => {
+  // The regression this guards: chat routing must decide pty availability QUICKLY and
+  // definitively. A version that dispatches a fresh pty supervisor and waits up to
+  // PTY_STARTUP_TIMEOUT_MS (8s) whenever none is live — correct for the explicit
+  // Terminal-open routes, wrong for a random chat message — turned every headless-only
+  // room test in this repo into an 8s+ stall, and in an environment where node-pty IS
+  // installed, into an attempt to actually spawn a real interactive claude session.
+  const project = tempProject();
+  const ctx = baseCtx(project);
+  // No ensurePtyAttachedFn: exercises the real ensurePtyAttached(ctx, key, false).
+  const started = Date.now();
+  const reply = await resolvePtyReply(ctx, "hello", undefined);
+  const elapsedMs = Date.now() - started;
+
+  assert.equal(reply, null, "no pty session is live, and routing must never spawn one implicitly");
+  assert.ok(elapsedMs < 2000, `resolved in ${elapsedMs}ms — a spawn-and-wait attempt would take 8000ms+`);
+  ctx.feed.close();
+});
+
 test("resolveRoomReply still honors askManagerFn alone by skipping pty entirely — no ensurePtyAttachedFn call, matching the pre-existing headless-only test contract", async () => {
   const project = tempProject();
   const ctx = baseCtx(project);
@@ -183,7 +202,7 @@ test("readNativeTranscriptPage on a missing file returns an honest empty page, n
 // ---------------------------------------------------------------------------
 // GET /room/transcript — the HTTP surface, response-capped the same way.
 
-async function startTranscriptOnlyServer(projectDir: string): Promise<{ server: Server; port: number }> {
+async function startTranscriptOnlyServer(projectDir: string): Promise<{ server: Server; port: number; ctx: DelegationApiContext }> {
   const ctx = baseCtx(projectDir);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -192,7 +211,10 @@ async function startTranscriptOnlyServer(projectDir: string): Promise<{ server: 
     res.end(JSON.stringify({ ok: false, error: "not_found" }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, port: (server.address() as AddressInfo).port };
+  // ctx.feed opens an un-unref'd fs.watch — a caller that closes only `server` leaves
+  // the test runner's process alive forever with nothing left to do (this is exactly
+  // what looked like a hang before this fix). Callers must close ctx.feed too.
+  return { server, port: (server.address() as AddressInfo).port, ctx };
 }
 
 test("GET /room/transcript returns the native jsonl parsed into turns, capped, with the recorded session id", async () => {
@@ -209,7 +231,7 @@ test("GET /room/transcript returns the native jsonl parsed into turns, capped, w
   );
   writeRoomSessionMeta(project, { session_id: "sess-xyz", native_transcript_path: transcriptPath });
 
-  const { server, port } = await startTranscriptOnlyServer(project);
+  const { server, port, ctx } = await startTranscriptOnlyServer(project);
   try {
     const body = (await (await fetch(`http://127.0.0.1:${port}/room/transcript`)).json()) as {
       ok: boolean;
@@ -233,6 +255,7 @@ test("GET /room/transcript returns the native jsonl parsed into turns, capped, w
     );
   } finally {
     server.close();
+    ctx.feed.close();
   }
 });
 
@@ -247,7 +270,7 @@ test("GET /room/transcript never returns more than TRANSCRIPT_PAGE_CAP turns eve
   writeFileSync(transcriptPath, lines.join("\n"), "utf8");
   writeRoomSessionMeta(project, { session_id: "sess-abc", native_transcript_path: transcriptPath });
 
-  const { server, port } = await startTranscriptOnlyServer(project);
+  const { server, port, ctx } = await startTranscriptOnlyServer(project);
   try {
     const uncapped = (await (await fetch(`http://127.0.0.1:${port}/room/transcript`)).json()) as { turns: unknown[]; total: number };
     assert.equal(uncapped.turns.length, TRANSCRIPT_PAGE_CAP, "the response cap must hold even though the file has more");
@@ -257,12 +280,13 @@ test("GET /room/transcript never returns more than TRANSCRIPT_PAGE_CAP turns eve
     assert.equal(limited.turns.length, 5, "an explicit smaller limit must be honored, never exceeded");
   } finally {
     server.close();
+    ctx.feed.close();
   }
 });
 
 test("GET /room/transcript on a thread with no recorded pty session returns an honest empty page, not a 404", async () => {
   const project = tempProject();
-  const { server, port } = await startTranscriptOnlyServer(project);
+  const { server, port, ctx } = await startTranscriptOnlyServer(project);
   try {
     const body = (await (await fetch(`http://127.0.0.1:${port}/room/transcript`)).json()) as {
       ok: boolean;
@@ -276,6 +300,7 @@ test("GET /room/transcript on a thread with no recorded pty session returns an h
     assert.equal(body.total, 0);
   } finally {
     server.close();
+    ctx.feed.close();
   }
 });
 

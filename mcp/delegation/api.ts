@@ -341,19 +341,27 @@ const PTY_STARTUP_TIMEOUT_MS = 8000;
 
 /**
  * Ensures the daemon holds a live, attached connection to the room's pty supervisor,
- * spawning one if needed, and reuses it across calls — one held duplex socket for the
- * daemon's whole life, not one per keystroke. Concurrent callers (a write racing a
- * resize) share the same in-flight connect attempt via `connecting` rather than each
- * spawning their own supervisor.
+ * reusing one across calls — one held duplex socket for the daemon's whole life, not
+ * one per keystroke. Concurrent callers (a write racing a resize) share the same
+ * in-flight connect attempt via `connecting` rather than each spawning their own
+ * supervisor.
+ *
+ * `spawnIfNeeded` (default true, matching every pre-existing caller below) dispatches a
+ * fresh pty supervisor and waits up to PTY_STARTUP_TIMEOUT_MS for it to come up when
+ * none is live — correct for the explicit Terminal-open routes, where a person just
+ * asked for a session. resolveRoomReply (api routing for chat) passes `false`: pty
+ * preference must be decided QUICKLY, and a random chat message must never implicitly
+ * start a brand-new interactive claude session — attachRoomPty's own existsSync check
+ * already resolves null near-instantly when nothing is listening.
  */
-async function ensurePtyAttached(ctx: DelegationApiContext, session?: string): Promise<RoomPtyAttachment | null> {
+async function ensurePtyAttached(ctx: DelegationApiContext, session?: string, spawnIfNeeded = true): Promise<RoomPtyAttachment | null> {
   const { projectDir, feed } = ctx;
   const key = normalizeSessionKey(session);
   const pty = ptyStateFor(ctx, key);
   if (pty.attachment) return pty.attachment;
   if (pty.connecting) return pty.connecting;
   pty.connecting = (async () => {
-    if (!(await isRoomPtyLive(projectDir, key))) {
+    if (spawnIfNeeded && !(await isRoomPtyLive(projectDir, key))) {
       dispatchRoomPtySupervisor(projectDir, key);
       const deadline = Date.now() + PTY_STARTUP_TIMEOUT_MS;
       while (Date.now() < deadline && !(await isRoomPtyLive(projectDir, key))) {
@@ -406,14 +414,17 @@ interface RoomReply {
 /**
  * Writes the message into the SAME interactive session Terminal shows (no second
  * channel), then waits for claude's own native transcript to grow with a new assistant
- * turn. Returns null when the pty is unavailable or not yet identified — either way
- * the caller falls back to headless honestly, never guessing at a reply.
+ * turn. Returns null — quickly, never spawning a new session to find out — when no pty
+ * is ALREADY live, or its identity hasn't been recorded yet; either way the caller
+ * falls back to headless honestly, never guessing at a reply and never blocking a chat
+ * message behind a fresh interactive claude spawn (see ensurePtyAttached's
+ * `spawnIfNeeded` doc — that spawn is for the explicit Terminal-open routes only).
  */
 export async function resolvePtyReply(ctx: DelegationApiContext, message: string, session?: string): Promise<RoomReply | null> {
   const { projectDir } = ctx;
   const key = normalizeSessionKey(session);
   const ensureAttached = ctx.ensurePtyAttachedFn ?? ensurePtyAttached;
-  const attachment = await ensureAttached(ctx, key);
+  const attachment = await ensureAttached(ctx, key, false);
   if (!attachment) return null;
 
   // One session, two views: if the structured (headless) side currently holds this
