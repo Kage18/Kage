@@ -238,8 +238,8 @@ test("piece 7 — presence banner and the dispatch-modal fixes: an explicit Star
     "Start must wire into the SAME pty-attach path the Terminal tab already uses, not a new mechanism");
   assert.match(style, /\.modal \.preflight \{[^}]*visibility:hidden/, "the modal's forecast box must reserve its space via visibility, not display:none");
   assert.match(style, /\.modal \.preflight \{[^}]*min-height:/);
-  assert.match(script, /document\.getElementById\("dispatch-flash"\)\.textContent = "";/,
-    "reopening the modal must clear the previous dispatch's transient status text");
+  assert.match(script, /if \(on\) \{[\s\S]*?clearFlash\(\);[\s\S]*?\}/,
+    "reopening the modal must clear the previous dispatch's transient status text (now via the shared clearFlash() helper — see the flash-TTL tests below)");
 });
 
 test("the composed page still parses as valid JavaScript after the renderer pass", () => {
@@ -257,4 +257,221 @@ test("the composed page still parses as valid JavaScript after the renderer pass
 test("the client script still never assigns innerHTML, even after the renderer pass added a right panel, a fleet list and a transcript view", () => {
   const script = composedScript();
   assert.ok(!script.includes("innerHTML"), "every new element must be built with h(), never a string of HTML");
+});
+
+// --- three topbar/app-shell defects, all confirmed live in the running app -----------
+//
+// 1. THE GEAR OPENED THE WRONG SURFACE — clicking #m-settings (title "project
+//    settings") opened the New-run modal instead of the Project-settings overlay.
+// 2. TRANSIENT FLASH TEXT SURVIVED INTO A FRESH MODAL — a freshly opened New-run
+//    modal still showed .flash text ("dispatched") from a run dispatched an hour
+//    earlier.
+// 3. A STALE MUTATION TOKEN TURNED EVERY ACTION INTO A BARE "refused" — the daemon
+//    restarting under an open tab left every mutating call 401ing with no recovery.
+
+test("piece 8a — the topbar gear (#m-settings, title \"project settings\") opens Project settings, not the New-run modal — the two are bound to distinct openers", () => {
+  const script = composedScript();
+  const html = composedHtml();
+  assert.match(html, /<button class="iconbtn" id="m-settings" title="project settings">/, "the gear button must carry its documented title");
+
+  assert.match(script, /document\.getElementById\("m-new"\)\.onclick = function \(\) \{ showOverlay\(true\); \};/,
+    "New-run's own icon button must open showOverlay(true)");
+  assert.match(script, /document\.getElementById\("m-settings"\)\.onclick = function \(\) \{ showSettings\(true\); \};/,
+    "the gear must open showSettings(true) — reproduced live: it opened the New-run modal instead, twice");
+
+  // Generalized per the fix: no OTHER topbar icon button's own onclick wiring may
+  // ALSO reference showOverlay(true) or showSettings(true) — two buttons silently
+  // sharing one opener is exactly how the gear ended up on New-run's handler.
+  ["m-palette", "m-theme", "m-bell"].forEach((id) => {
+    const assignAt = script.indexOf("document.getElementById(\"" + id + "\").onclick");
+    assert.ok(assignAt >= 0, "#" + id + " must have its own top-level onclick wiring");
+    const nextAssignAt = script.indexOf("\ndocument.getElementById(", assignAt + 1);
+    const body = script.slice(assignAt, nextAssignAt >= 0 ? nextAssignAt : assignAt + 400);
+    assert.ok(!body.includes("showOverlay(true)"), "#" + id + " must not also open the New-run modal");
+    assert.ok(!body.includes("showSettings(true)"), "#" + id + " must not also open Project settings");
+  });
+});
+
+test("piece 8b — every overlay/modal-open path clears the stale flash, not just the dispatch modal it was first found in", () => {
+  const script = composedScript();
+  // Every gap is bounded (not open-ended [\s\S]*) so a revert that DROPS clearFlash()
+  // from one function cannot pass by accidentally matching some unrelated, much later
+  // clearFlash() call elsewhere in the script.
+  const openers: Array<[string, RegExp]> = [
+    ["showOverlay(true) — New-run modal", /function showOverlay\(on\) \{[\s\S]{0,200}?if \(on\) \{[\s\S]{0,400}?clearFlash\(\);/],
+    ["showSettings(true) — Project settings", /function showSettings\(on\) \{[\s\S]{0,250}?clearFlash\(\);/],
+    ["showAddProject(true) — Add project", /function showAddProject\(on\) \{[\s\S]{0,300}?clearFlash\(\);/],
+    ["showPalette(true) — command palette", /function showPalette\(on\) \{[\s\S]{0,200}?if \(on\) \{[\s\S]{0,50}?clearFlash\(\);/],
+    ["openGoalDetail — goal detail overlay", /function openGoalDetail\(goalId\) \{[\s\S]{0,50}?clearFlash\(\);/],
+    ["openPacket — memory packet overlay", /function openPacket\(id\) \{[\s\S]{0,50}?clearFlash\(\);/],
+  ];
+  openers.forEach(([name, pattern]) => assert.match(script, pattern, name + " must clear stale flash content on open"));
+});
+
+// vm-sandbox harness for the pure flash-TTL functions, same technique as
+// loadClientSandbox above — a fake document (with a real dispatch-flash stand-in) and
+// FAKE, manually-fired timers so the TTL is provable without an actual wait.
+function loadFlashSandbox() {
+  const flashEl = { textContent: "" };
+  const timers: Array<{ id: number; fn: () => void }> = [];
+  let nextId = 1;
+  const sandbox: Record<string, unknown> = {
+    document: {
+      createElement: (tag: string) => fakeElement(tag),
+      createTextNode: (text: string) => ({ nodeType: 3, textContent: text }),
+      getElementById: (id: string) => (id === "dispatch-flash" ? flashEl : null),
+      querySelectorAll: () => [],
+      body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } },
+    },
+    navigator: { userAgent: "" },
+    window: {},
+    console,
+    setTimeout: (fn: () => void) => { const id = nextId++; timers.push({ id, fn }); return id; },
+    clearTimeout: (id: number) => { const at = timers.findIndex((t) => t.id === id); if (at >= 0) timers.splice(at, 1); },
+  };
+  try {
+    runInNewContext(APP_CLIENT, sandbox, { timeout: 2000 });
+  } catch {
+    // Expected — same DOM-less top-level abort every sandbox test in this file relies
+    // on; setFlash/clearFlash/FLASH_TTL_MS are all defined well before the abort point.
+  }
+  return { sandbox, flashEl, pendingCount: () => timers.length, fireTimers: () => timers.splice(0).forEach((t) => t.fn()) };
+}
+
+// FAILS ON REVERT: dropping the TTL (setFlash back to a bare el.textContent = text,
+// with no setTimeout) makes the "self-clears once its TTL elapses" assertion fail —
+// firing the fake timers would find nothing scheduled and the text would still read
+// "dispatched" forever, exactly the live-app defect for any path that never reopens
+// the New-run modal at all (e.g. a dispatch fired from elsewhere).
+test("piece 8c — the flash helper installs a real expiry: setFlash self-clears after FLASH_TTL_MS even if nothing ever reopens the modal", () => {
+  const { sandbox, flashEl, fireTimers } = loadFlashSandbox();
+  const setFlash = sandbox.setFlash as (el: unknown, text: string) => void;
+  const ttl = sandbox.FLASH_TTL_MS as number;
+  assert.equal(typeof ttl, "number", "FLASH_TTL_MS must be defined");
+  assert.ok(ttl > 0 && ttl <= 10000, "the TTL must read as \"a few seconds\", not zero and not minutes");
+
+  setFlash(flashEl, "dispatched");
+  assert.equal(flashEl.textContent, "dispatched");
+  fireTimers();
+  assert.equal(flashEl.textContent, "", "the flash must self-clear once its own TTL timer fires");
+});
+
+test("piece 8c — clearFlash cancels a pending TTL timer immediately, and a later setFlash never leaves TWO timers racing to clear the same element", () => {
+  const { sandbox, flashEl, fireTimers, pendingCount } = loadFlashSandbox();
+  const setFlash = sandbox.setFlash as (el: unknown, text: string) => void;
+  const clearFlash = sandbox.clearFlash as () => void;
+
+  setFlash(flashEl, "dispatched");
+  clearFlash();
+  assert.equal(flashEl.textContent, "", "clearFlash must clear the text immediately, not wait for the TTL");
+  assert.equal(pendingCount(), 0, "clearFlash must cancel the pending TTL timer, not just blank the text and leave it scheduled");
+
+  // A second setFlash while a first is still pending must cancel the first's timer,
+  // not stack a second one alongside it — otherwise a later, unrelated setFlash call
+  // could be stomped by an earlier call's leaked timer.
+  setFlash(flashEl, "first");
+  setFlash(flashEl, "second");
+  assert.equal(pendingCount(), 1, "setFlash must cancel any previous pending timer before installing its own");
+  fireTimers();
+  assert.equal(flashEl.textContent, "", "the one remaining timer still clears the element once its TTL elapses");
+});
+
+test("piece 8d — extractTokenFromHtml pulls the token out of a served page's own inline script, the exact shape /app serves at boot", () => {
+  const sandbox = loadClientSandbox();
+  const extractTokenFromHtml = sandbox.extractTokenFromHtml as (html: string) => string | null;
+  assert.equal(extractTokenFromHtml(composedHtml()), "test-token", "must extract the real token app-html.ts embeds at serve time");
+  assert.equal(extractTokenFromHtml(delegationAppHtml("a-different-token-99")), "a-different-token-99");
+  assert.equal(extractTokenFromHtml("<html>no token in this page</html>"), null, "absent must mean null, not a crash or an empty-string false positive");
+});
+
+// FAILS ON REVERT: reverting apiRetryOnce to the old bare fetch-then-.json() (no
+// status check, no retry) makes the "retried call's response is returned, not the
+// original refused body" assertion fail — the caller would see {ok:false,
+// error:"refused"} straight from the first, stale-token call instead.
+test("piece 8e — apiRetryOnce: a mutating 401 re-fetches the token the SAME way the page boots with one (GET /app), retries ONCE, and adopts the fresh token on success", async () => {
+  const sandbox = loadClientSandbox();
+  const apiRetryOnce = sandbox.apiRetryOnce as (
+    fetchImpl: (path: string, opts: Record<string, unknown>) => Promise<{ status: number; json?: () => Promise<unknown>; text?: () => Promise<string> }>,
+    path: string, opts: Record<string, unknown>, token: string,
+  ) => Promise<{ json: unknown; token: string | null }>;
+
+  const calls: Array<{ path: string; opts: Record<string, unknown> }> = [];
+  const freshHtml = delegationAppHtml("fresh-token");
+  const fetchImpl = (path: string, opts: Record<string, unknown>) => {
+    calls.push({ path, opts });
+    const headers = (opts.headers || {}) as Record<string, string>;
+    if (path === "/runs" && headers.authorization === "Bearer stale-token") {
+      return Promise.resolve({ status: 401, json: () => Promise.resolve({ ok: false, error: "refused" }) });
+    }
+    if (path === "/app") return Promise.resolve({ status: 200, text: () => Promise.resolve(freshHtml) });
+    if (path === "/runs" && headers.authorization === "Bearer fresh-token") {
+      return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, run: { id: "r1" } }) });
+    }
+    throw new Error("unexpected fetch call: " + path + " " + JSON.stringify(opts));
+  };
+
+  const result = await apiRetryOnce(fetchImpl, "/runs", { method: "POST", body: { intent: "x" } }, "stale-token");
+  assert.deepEqual(result.json, { ok: true, run: { id: "r1" } }, "the retried call's response must win, not the original 401's refused body");
+  assert.equal(result.token, "fresh-token", "the fresh token must be surfaced so api() can adopt it for later calls");
+  assert.equal(calls.length, 3, "exactly three fetches: the failed original, the /app re-fetch, and the retry");
+  assert.equal(calls[1].path, "/app");
+  assert.equal(calls[1].opts.method, "GET", "the re-fetch must be a plain read — the same unauthenticated mechanism the page boots through");
+});
+
+test("piece 8f — apiRetryOnce: still-refused after the retry surfaces an honest message, never the raw \"refused\" body — reproduced live as the Dispatch button's only feedback", async () => {
+  const sandbox = loadClientSandbox();
+  const apiRetryOnce = sandbox.apiRetryOnce as (
+    fetchImpl: (path: string, opts: Record<string, unknown>) => Promise<{ status: number; json?: () => Promise<unknown>; text?: () => Promise<string> }>,
+    path: string, opts: Record<string, unknown>, token: string,
+  ) => Promise<{ json: unknown; token: string | null }>;
+
+  const stillRefused = (path: string) => {
+    if (path === "/runs") return Promise.resolve({ status: 401, json: () => Promise.resolve({ ok: false, error: "refused" }) });
+    if (path === "/app") return Promise.resolve({ status: 200, text: () => Promise.resolve(delegationAppHtml("fresh-token-2")) });
+    throw new Error("unexpected fetch call: " + path);
+  };
+  const result = await apiRetryOnce(stillRefused, "/runs", { method: "POST" }, "stale-token");
+  // The honest-message object is constructed INSIDE apiRetryOnce, which runs in the vm
+  // sandbox's own realm — JSON.parse(JSON.stringify(...)) normalizes it back into this
+  // realm before comparing, the same cross-realm fix render-calm.test.ts documents for
+  // keyedListPlan's return value (deepStrictEqual is a prototype-identity check, not a
+  // structural one, so a same-shaped cross-realm object otherwise fails it).
+  assert.deepEqual(JSON.parse(JSON.stringify(result.json)), { ok: false, error: "the daemon restarted - reload the page" });
+  assert.equal(result.token, null, "no token to adopt when the retry itself still failed");
+
+  // The honest-version escape hatch this brief allows: if the token is only ever
+  // embedded in page HTML and the /app re-fetch cannot yield one (a malformed or
+  // unexpected response), the same message must come back WITHOUT a second /runs
+  // call ever firing with an empty token.
+  let secondRunsCallMade = false;
+  const noTokenRecoverable = (path: string) => {
+    if (path === "/runs") {
+      if (secondRunsCallMade) throw new Error("must not retry /runs a second time with no recovered token");
+      secondRunsCallMade = true;
+      return Promise.resolve({ status: 401, json: () => Promise.resolve({ ok: false, error: "refused" }) });
+    }
+    if (path === "/app") return Promise.resolve({ status: 200, text: () => Promise.resolve("<html>no token here</html>") });
+    throw new Error("unexpected fetch call: " + path);
+  };
+  const result2 = await apiRetryOnce(noTokenRecoverable, "/runs", { method: "POST" }, "stale-token");
+  assert.deepEqual(JSON.parse(JSON.stringify(result2.json)), { ok: false, error: "the daemon restarted - reload the page" });
+});
+
+test("piece 8g — apiRetryOnce never enters the retry dance for a GET, even on a 401: reads are unauthenticated, so a GET 401 is a different failure and must pass through as-is", async () => {
+  const sandbox = loadClientSandbox();
+  const apiRetryOnce = sandbox.apiRetryOnce as (
+    fetchImpl: (path: string, opts: Record<string, unknown>) => Promise<{ status: number; json: () => Promise<unknown> }>,
+    path: string, opts: Record<string, unknown>, token: string,
+  ) => Promise<{ json: unknown; token: string | null }>;
+  let calls = 0;
+  const fetchImpl = () => { calls += 1; return Promise.resolve({ status: 401, json: () => Promise.resolve({ ok: false, error: "refused" }) }); };
+  const result = await apiRetryOnce(fetchImpl, "/runs", { method: "GET" }, "stale-token");
+  assert.equal(calls, 1, "a GET's 401 must never trigger the retry-refetch dance");
+  assert.deepEqual(result.json, { ok: false, error: "refused" });
+});
+
+test("piece 8h — api() is wired through apiRetryOnce with the real fetch, and adopts a refreshed token onto TOKEN for future calls", () => {
+  const script = composedScript();
+  assert.match(script, /function api\(path, opts\) \{\s*return apiRetryOnce\(fetch, path, opts, TOKEN\)\.then\(function \(result\) \{\s*if \(result\.token\) TOKEN = result\.token;\s*return result\.json;\s*\}\);\s*\}/,
+    "api() must delegate to the pure apiRetryOnce and persist any refreshed token onto the module-level TOKEN");
 });

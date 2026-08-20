@@ -173,15 +173,69 @@ function midTruncate(text, head, tail) {
   if (text.length <= cap) return text;
   return text.slice(0, head) + "…" + text.slice(text.length - tail);
 }
-function api(path, opts) {
-  opts = opts || {};
+// Pulls the mutation token out of a served /app page's own inline script — the same
+// place the page gets its FIRST token from at boot (app-html.ts's delegationAppHtml
+// embeds it as the literal statement var TOKEN = "..."; ). This is the only place a
+// token is ever handed out; there is no separate token endpoint, so a stale token is
+// refreshed by re-reading the page itself, not a second channel.
+function extractTokenFromHtml(html) {
+  var match = /var TOKEN = "([^"]*)";/.exec(html || "");
+  return match ? match[1] : null;
+}
+function requestJson(fetchImpl, path, method, token, body) {
   var headers = { "content-type": "application/json" };
-  if (opts.method && opts.method !== "GET") headers.authorization = "Bearer " + TOKEN;
-  return fetch(path, {
-    method: opts.method || "GET",
+  if (method && method !== "GET") headers.authorization = "Bearer " + token;
+  return fetchImpl(path, {
+    method: method || "GET",
     headers: headers,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  }).then(function (res) { return res.json(); });
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(function (res) { return res.json().then(function (json) { return { status: res.status, json: json }; }); });
+}
+// The pure retry policy — fetch is injected so this is testable without a real
+// network or DOM. Reproduced live: the daemon restarted while a tab stayed open, its
+// cached token went stale, and Dispatch 401'd with a bare {error:"refused"} and no
+// recovery. A mutating call (never a GET — reads are unauthenticated, see guard.ts,
+// so a 401 there is a different failure and is returned as-is) that comes back 401
+// gets ONE retry against a freshly re-fetched token before giving up with an honest
+// message instead of the raw "refused" body.
+function apiRetryOnce(fetchImpl, path, opts, token) {
+  opts = opts || {};
+  var method = opts.method || "GET";
+  return requestJson(fetchImpl, path, method, token, opts.body).then(function (first) {
+    if (first.status !== 401 || method === "GET") return { json: first.json, token: null };
+    return fetchImpl("/app", { method: "GET" }).then(function (res) { return res.text(); }).then(function (html) {
+      var freshToken = extractTokenFromHtml(html);
+      if (!freshToken) return { json: { ok: false, error: "the daemon restarted - reload the page" }, token: null };
+      return requestJson(fetchImpl, path, method, freshToken, opts.body).then(function (second) {
+        if (second.status === 401) return { json: { ok: false, error: "the daemon restarted - reload the page" }, token: null };
+        return { json: second.json, token: freshToken };
+      });
+    });
+  });
+}
+function api(path, opts) {
+  return apiRetryOnce(fetch, path, opts, TOKEN).then(function (result) {
+    if (result.token) TOKEN = result.token;
+    return result.json;
+  });
+}
+
+// A "flash" is transient, of-the-moment status text (dispatch-flash's "compiling
+// brief…" -> "dispatched"). Reproduced live: a freshly opened New-run modal still
+// read "dispatched" from a run dispatched an hour earlier. Two floors under that now:
+// every overlay-open path clears it (see the calls at each showX(true)/openX below),
+// and it self-clears after FLASH_TTL_MS regardless of whether any modal ever reopens.
+var FLASH_TTL_MS = 6000;
+var flashTimer = null;
+function setFlash(el, text) {
+  if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
+  el.textContent = text || "";
+  if (text) flashTimer = setTimeout(function () { el.textContent = ""; flashTimer = null; }, FLASH_TTL_MS);
+}
+function clearFlash() {
+  if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
+  var el = document.getElementById("dispatch-flash");
+  if (el) el.textContent = "";
 }
 
 // --- derived truth (rendered, never re-decided: display_state/ownership come from the kernel)
@@ -820,6 +874,7 @@ function renderGoalDetail() {
   body.appendChild(foot);
 }
 function openGoalDetail(goalId) {
+  clearFlash();
   state.selectedGoal = goalId;
   renderGoalDetail();
   document.getElementById("goal-overlay").classList.add("on");
@@ -1456,6 +1511,7 @@ function renderPacketFlywheel(el, out) {
 }
 
 function openPacket(id) {
+  clearFlash();
   var overlay = document.getElementById("packet-overlay");
   document.getElementById("packet-title").textContent = "Loading…";
   document.getElementById("packet-body").textContent = "";
@@ -2982,6 +3038,7 @@ function addProject() { showAddProject(true); }
 function showAddProject(on) {
   document.getElementById("addproject-overlay").classList.toggle("on", on);
   if (!on) { addProjectState = null; return; }
+  clearFlash();
   addProjectState = { path: "", dir: null, name: null, candidates: null, error: "", busy: false };
   var input = document.getElementById("addproject-path");
   input.value = "";
@@ -3612,12 +3669,16 @@ function applyTheme(mode) {
   btn.title = "theme: " + mode + " (click to cycle)";
   try { localStorage.setItem("kageTheme", mode); } catch (e) {}
 }
-document.getElementById("m-theme").onclick = function () {
+// Shared by the topbar icon button and the settings-modal row below — #m-theme is
+// hidden under the ~430px topbar-trim breakpoint (narrow phone widths cannot afford
+// a fifth icon), so the control must stay reachable somewhere that never hides.
+function cycleTheme() {
   var order = ["system", "light", "dark"];
   var current = "system";
   try { current = localStorage.getItem("kageTheme") || "system"; } catch (e) {}
   applyTheme(order[(order.indexOf(current) + 1) % order.length]);
-};
+}
+document.getElementById("m-theme").onclick = cycleTheme;
 document.getElementById("m-bell").onclick = function (ev) {
   ev.stopPropagation();
   // First click also asks for OS permission — after that the bell is purely the
@@ -3667,7 +3728,7 @@ function showOverlay(on) {
     // The standing defect: a prior dispatch's transient status text ("dispatched",
     // "failed") used to still be sitting there the next time this modal opened,
     // read as if it were about the run someone is about to describe.
-    document.getElementById("dispatch-flash").textContent = "";
+    clearFlash();
     document.getElementById("intent").focus();
   }
 }
@@ -3682,9 +3743,9 @@ function dispatchNow() {
     agent: document.getElementById("agent").value || composerPrefs.agent,
     type: document.getElementById("rtype").value || composerPrefs.type,
   };
-  document.getElementById("dispatch-flash").textContent = "compiling brief…";
+  setFlash(document.getElementById("dispatch-flash"), "compiling brief…");
   api("/runs", { method: "POST", body: body }).then(function (out) {
-    document.getElementById("dispatch-flash").textContent = out.ok ? "dispatched" : (out.error || "failed");
+    setFlash(document.getElementById("dispatch-flash"), out.ok ? "dispatched" : (out.error || "failed"));
     if (out.ok) {
       document.getElementById("intent").value = "";
       schedulePreflight("", "modal-preflight");
@@ -3775,6 +3836,18 @@ function renderSettings() {
   row("Strict verification", "Any non-passing check blocks a run from reaching ready. Turning this off lets unverified work look finished — honesty over convenience.",
     toggle(s.strict_verify, function (on) { s.strict_verify = on; }));
 
+  // The topbar's own theme toggle (#m-theme) is hidden under the narrow topbar-trim
+  // breakpoint (~430px) — never orphan a control the rail already relies on losing,
+  // so it stays reachable here too, same three-state cycle, same localStorage key.
+  (function () {
+    var mode = "system";
+    try { mode = localStorage.getItem("kageTheme") || "system"; } catch (e) {}
+    var label = mode === "light" ? "☀ Light" : mode === "dark" ? "☾ Dark" : "◐ Follow system";
+    var themeBtn = h("button", "btn", label);
+    themeBtn.onclick = function () { cycleTheme(); renderSettings(); };
+    row("Theme", "Light, dark, or follow the system — the same toggle the topbar carries, narrow width just hides that copy of it.", themeBtn);
+  })();
+
   // The projects rail (.side) goes display:none below the same 900px width this
   // modal has to work under, taking its switch-project and remove-project
   // controls with it. Rather than invent a narrow-only rail, this reuses the
@@ -3807,6 +3880,7 @@ function renderSettings() {
 function showSettings(on) {
   document.getElementById("settings-overlay").classList.toggle("on", on);
   if (!on) return;
+  clearFlash();
   document.getElementById("settings-msg").textContent = "";
   api("/settings").then(function (out) {
     if (!out.ok) return;
@@ -3877,7 +3951,7 @@ function paletteCommands(query) {
     { grp: "do", name: "Work: board layout", run: function () { setView("work"); setWorkLayout("board"); } },
     { grp: "do", name: "Room: chat view", run: function () { setView("room"); setRoomMode("chat"); } },
     { grp: "do", name: "Room: terminal view", run: function () { setView("room"); setRoomMode("terminal"); } },
-    { grp: "do", name: "Cycle theme", run: function () { document.getElementById("m-theme").onclick(); } },
+    { grp: "do", name: "Cycle theme", run: cycleTheme },
     { grp: "do", name: "Project settings…", run: function () { showSettings(true); } },
     { grp: "do", name: "Notifications", run: function () { document.getElementById("m-bell").onclick({ stopPropagation: function () {} }); } },
     { grp: "do", name: "Open another project…", run: function () { addProject(); } },
@@ -3936,6 +4010,7 @@ function renderPalette() {
 function showPalette(on) {
   document.getElementById("palette-overlay").classList.toggle("on", on);
   if (on) {
+    clearFlash();
     paletteSel = 0;
     var input = document.getElementById("palette-input");
     input.value = "";
