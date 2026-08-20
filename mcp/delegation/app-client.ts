@@ -32,6 +32,111 @@ function h(tag, cls, text) {
   if (text !== undefined) el.textContent = text;
   return el;
 }
+
+// --- render-calm: the seam that kills the whole-page repaint. AO's own renderer does
+// keyed, targeted updates off a change feed instead of repainting on every poll tick —
+// this is that discipline for Kage's vanilla DOM, no framework. Three pieces:
+//   1. revisionChanged() gates a whole section's DOM work behind a cheap stable-hash
+//      compare, so an unchanged poll response touches nothing.
+//   2. keyedListPlan() is the pure add/remove/reorder DECISION for a keyed list — never
+//      says to touch a key that is neither added nor removed.
+//   3. reconcileChildren() is the thin DOM APPLIER: it moves/keeps real node identity
+//      for anything still wanted, so an unaffected row's node is never destroyed and
+//      recreated (which is what causes focus loss and paint flicker).
+// RENDER_COUNTS is the proof seam: every section's actual DOM-writing function bumps
+// its own counter exactly once per real paint, never on a gated skip — tests (and the
+// console, via window.__kageRenderCounts) read it directly.
+var RENDER_COUNTS = { runs: 0, board: 0, sidebar: 0, goalRail: 0, room: 0, memory: 0, detail: 0 };
+try { window.__kageRenderCounts = RENDER_COUNTS; } catch (e) {}
+function bumpRenderCount(name) { RENDER_COUNTS[name] = (RENDER_COUNTS[name] || 0) + 1; }
+
+// Deterministic stringify — object keys sorted, so two payloads differing only in key
+// insertion order still hash identically. This repo's run/goal lists run to tens of
+// entries, not thousands, so a full stringify per poll costs far less than the DOM
+// rebuild it exists to skip.
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  var keys = Object.keys(value).sort();
+  return "{" + keys.map(function (k) { return JSON.stringify(k) + ":" + stableStringify(value[k]); }).join(",") + "}";
+}
+
+// One remembered revision per section — a plain object keyed by section name, not a
+// per-caller closure, so every polling refresh path shares the same tiny gate.
+var lastRevision = { runs: null, board: null, sidebar: null, goalRail: null, memory: null };
+// True (and remembers the new hash) the first time this exact payload is seen for this
+// section; false — meaning "skip the DOM work" — every time after, until the payload
+// actually differs.
+function revisionChanged(section, payload) {
+  var rev = stableStringify(payload);
+  if (lastRevision[section] === rev) return false;
+  lastRevision[section] = rev;
+  return true;
+}
+
+// The patch-vs-rebuild decision for a keyed list: given the keys currently painted (in
+// order) and the keys that should be painted now, say which existing keys to drop,
+// which new keys to create, and whether the surviving keys' order itself moved. Never
+// names a key that is neither added nor removed — a caller that only adds "removed" and
+// "added" nodes and reorders on "reordered" never touches an untouched row.
+function keyedListPlan(existingKeys, nextKeys) {
+  var nextSet = {};
+  nextKeys.forEach(function (k) { nextSet[k] = true; });
+  var existingSet = {};
+  existingKeys.forEach(function (k) { existingSet[k] = true; });
+  var removed = existingKeys.filter(function (k) { return !nextSet[k]; });
+  var added = nextKeys.filter(function (k) { return !existingSet[k]; });
+  var kept = existingKeys.filter(function (k) { return nextSet[k]; });
+  var expected = nextKeys.filter(function (k) { return existingSet[k]; });
+  var reordered = false;
+  for (var i = 0; i < kept.length; i += 1) {
+    if (kept[i] !== expected[i]) { reordered = true; break; }
+  }
+  return { removed: removed, added: added, reordered: reordered };
+}
+
+// Reconciles a container's children to `desiredNodes`, in order. Keeps real DOM node
+// identity for anything already wanted (moving, not recreating it), removes only nodes
+// no longer wanted, and inserts only genuinely new ones — the DOM-side twin of
+// keyedListPlan's decision, generic over whatever node list a section builds.
+function reconcileChildren(container, desiredNodes) {
+  var existing = Array.prototype.slice.call(container.childNodes || []);
+  existing.forEach(function (node) {
+    if (desiredNodes.indexOf(node) < 0) container.removeChild(node);
+  });
+  var ref = container.firstChild;
+  desiredNodes.forEach(function (node) {
+    if (ref !== node) container.insertBefore(node, ref);
+    ref = node.nextSibling;
+  });
+}
+
+// A single age label, wired for the ticker below: the visible text is set once here,
+// but tickAges() repaints it every 15s from the `data-age` (+ optional prefix/suffix)
+// attributes alone — no section re-render, no DOM rebuild, just the text node.
+function ageSpan(cls, iso, prefix, suffix) {
+  var el = h("span", cls);
+  el.setAttribute("data-age", iso);
+  if (prefix) el.setAttribute("data-age-prefix", prefix);
+  if (suffix) el.setAttribute("data-age-suffix", suffix);
+  el.textContent = (prefix || "") + ago(iso) + (suffix || "");
+  return el;
+}
+// Patches every live age label's text in place from its own `data-age` attribute —
+// timers tick without repaints, per the discipline this file exists to enforce. Never
+// calls bumpRenderCount: this is not a section render, just a text-node refresh.
+function tickAges() {
+  var nodes = document.querySelectorAll ? document.querySelectorAll("[data-age]") : [];
+  for (var i = 0; i < nodes.length; i += 1) {
+    var el = nodes[i];
+    var iso = el.getAttribute("data-age");
+    if (!iso) continue;
+    var prefix = el.getAttribute("data-age-prefix") || "";
+    var suffix = el.getAttribute("data-age-suffix") || "";
+    el.textContent = prefix + ago(iso) + suffix;
+  }
+}
+
 function ago(iso) {
   var s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return Math.floor(s) + "s";
@@ -244,7 +349,7 @@ function workRow(run) {
   }
   row.appendChild(mid);
   var right = h("div", "qact");
-  right.appendChild(h("span", "qtime", ago(run.updated_at)));
+  right.appendChild(ageSpan("qtime", run.updated_at));
   if (run.display_state === "ready") {
     var acts = h("div", "qbtns");
     var pending = pendingActions[run.id];
@@ -798,7 +903,7 @@ function renderHistoryTurns(turnsEl, turns) {
       var prev = turns[index - 1];
       var brk = h("div", "turnbreak");
       brk.appendChild(h("span", "rule"));
-      brk.appendChild(h("span", "label", prev.at ? "done · " + ago(prev.at) : "done"));
+      brk.appendChild(prev.at ? ageSpan("label", prev.at, "done · ") : h("span", "label", "done"));
       turnsEl.appendChild(brk);
     }
     // The entry animation is for turns arriving right now — replaying it on turns
@@ -1137,7 +1242,7 @@ function renderMemory() {
     if (packet.summary) row.appendChild(h("div", "s", packet.summary));
     var meta = h("div", "meta");
     meta.appendChild(h("span", "ty", packet.type));
-    if (packet.updated_at) meta.appendChild(h("span", null, ago(packet.updated_at) + " ago"));
+    if (packet.updated_at) meta.appendChild(ageSpan(null, packet.updated_at, "", " ago"));
     if (packet.paths.length) meta.appendChild(h("span", null, packet.paths.length + (packet.paths.length === 1 ? " file" : " files")));
     if (packet.status && packet.status !== "active") meta.appendChild(h("span", "stale", packet.status));
     row.appendChild(meta);
@@ -2019,7 +2124,7 @@ function renderDetailPanel(panel, d, run) {
       var row = h("div", "pnl-tl-row");
       row.appendChild(h("span", "pnl-tl-state", change.state));
       row.appendChild(h("span", "pnl-tl-by", change.by));
-      row.appendChild(h("span", "pnl-tl-at", ago(change.at)));
+      row.appendChild(ageSpan("pnl-tl-at", change.at));
       if (change.note) row.appendChild(h("div", "pnl-tl-note", change.note));
       timeline.appendChild(row);
     });
@@ -2410,7 +2515,7 @@ function renderBoard() {
       cardCoreAtoms(run).forEach(function (el) { arow.appendChild(el); });
       var boardVerdict = verdictChipFor(run);
       if (boardVerdict) arow.appendChild(verdictChipEl(boardVerdict));
-      arow.appendChild(h("span", "tm", ago(run.updated_at)));
+      arow.appendChild(ageSpan("tm", run.updated_at));
       mid.appendChild(arow);
       card.appendChild(mid);
       card.onclick = function () { selectRun(run.id); };
@@ -2891,7 +2996,7 @@ function renderQueue(body, runId, steers) {
     var row = h("div", "qrow" + (delivered ? " delivered" : ""));
     var head = h("div", "qrow-head");
     head.appendChild(h("span", "atom" + (delivered ? "" : " amber"), record.status));
-    head.appendChild(h("span", "", ago(delivered ? record.delivered_at : record.at)));
+    head.appendChild(ageSpan("", delivered ? record.delivered_at : record.at));
     row.appendChild(head);
     if (delivered) {
       row.appendChild(h("div", "qrow-text", record.message));
@@ -3226,7 +3331,7 @@ function renderNotifications() {
       ? (run.waiting_on.question || run.waiting_on.detail) : runTitle(run);
     mid.appendChild(h("div", "s", detail));
     row.appendChild(mid);
-    row.appendChild(h("span", "when", ago(run.updated_at)));
+    row.appendChild(ageSpan("when", run.updated_at));
     row.onclick = function () {
       document.getElementById("notif").classList.remove("on");
       openRun(run.id);
@@ -3567,6 +3672,14 @@ Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function 
 });
 
 // --- SSE: notifications, never state. Any run event triggers a re-read.
+var runEventDebounce = null;
+function scheduleRunRefresh() {
+  if (runEventDebounce) return;
+  runEventDebounce = setTimeout(function () {
+    runEventDebounce = null;
+    refresh();
+  }, 50);
+}
 function connect() {
   var source = new EventSource("/runs/events");
   source.onopen = function () {
@@ -3582,7 +3695,13 @@ function connect() {
     document.getElementById("conn").classList.remove("off");
     document.getElementById("st-left").textContent = "live";
   });
-  source.addEventListener("run", function () { refresh(); });
+  // Several "run" events can land in the same tick (a wave dispatching, an SSE
+  // reconnect replaying a burst) — each used to call refresh() on its own, so a burst
+  // of N events meant N full refreshes stacked back to back, each one racing the DOM
+  // work of the last. A 50ms trailing debounce (setTimeout, not requestAnimationFrame —
+  // this fires off a network fetch, not a paint, so there is no frame to align to)
+  // coalesces a burst into exactly one gated refresh() pass.
+  source.addEventListener("run", function () { scheduleRunRefresh(); });
   // Room deltas stream live text so replies feel like a reply, not a page reload —
   // but the "you" and "final" kinds always trigger a re-read, so a missed delta
   // never leaves the transcript out of sync with what the server actually persisted.
@@ -3656,4 +3775,7 @@ refreshRoom();
 connect();
 setTimeout(function () { document.getElementById("room-input").focus(); }, 0);
 setInterval(refresh, 30000);
-setInterval(refreshRoom, 15000);`;
+setInterval(refreshRoom, 15000);
+// Age labels ('17h', '2m ago') tick on their own clock, independent of every polling
+// cadence above — this is the only thing that touches them between real data changes.
+setInterval(tickAges, 15000);`;
