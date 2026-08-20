@@ -258,12 +258,17 @@ export interface RejectResult {
   message: string;
 }
 
-const REJECTABLE_STATES = new Set<RunState>(["ready", "failed", "stopped"]);
+// reviewing/approved/changes_requested join ready/failed/stopped here per the reviewer-role
+// design (contract.ts's review_required gate) — reviewRun (review.ts) can leave a run in
+// any of the three, and a human must be able to refuse the work at any of them, same as
+// today's ready/failed/stopped, rather than being forced to wait out the review first.
+const REJECTABLE_STATES = new Set<RunState>(["ready", "failed", "stopped", "reviewing", "approved", "changes_requested"]);
 
-// None of ready/failed/stopped/dropped has a live agent process, so there is nothing a
-// reject would interrupt. blocked does — an agent is genuinely waiting on an answer — so
-// that one alone needs "stop it first". The rest get a message that fits their state
-// instead of the same canned line.
+// None of ready/failed/stopped/dropped/reviewing/approved/changes_requested is refused
+// here — see REJECTABLE_STATES above. blocked is the one state left that still needs
+// "stop it first": an agent is genuinely waiting on an answer there. Everything below is
+// for a state that isn't rejectable at all (running/dispatched/verifying), where the
+// message fits that state instead of the same canned line.
 function rejectRefusal(runId: string, state: RunState): string {
   if (state === "blocked") return `Run ${runId} is blocked — an agent is waiting on you. Stop it, then reject.`;
   if (state === "running" || state === "dispatched" || state === "verifying") {

@@ -43,15 +43,21 @@ function footer(state: UiState, view: Viewport): string {
 
 function stateStyle(runState: string): Style {
   if (runState === "running") return "brightCyan";
-  if (runState === "ready") return "brightGreen";
-  if (runState === "blocked") return "brightYellow";
+  // reviewing is deliberately its own color (the brand accent, matching the header) —
+  // never brightGreen/brightYellow, both of which already read as a verdict here.
+  if (runState === "reviewing") return "brightMagenta";
+  if (runState === "ready" || runState === "approved") return "brightGreen";
+  if (runState === "blocked" || runState === "changes_requested") return "brightYellow";
   if (runState === "failed") return "red";
   if (runState === "merged") return "green";
   return "gray";
 }
 
 function badge(runState: string): string {
-  const marks: Record<string, string> = { running: "▶", ready: "✓", blocked: "⏸", failed: "✗", merged: "◆", rejected: "·", stopped: "■" };
+  const marks: Record<string, string> = {
+    running: "▶", ready: "✓", blocked: "⏸", failed: "✗", merged: "◆", rejected: "·", stopped: "■",
+    reviewing: "◐", approved: "✓", changes_requested: "↺",
+  };
   return marks[runState] ?? "·";
 }
 

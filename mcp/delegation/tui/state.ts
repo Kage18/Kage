@@ -277,7 +277,10 @@ export function reduce(state: UiState, key: Key): { state: UiState; effect: Effe
     if (key.name === "enter") {
       const run = rows[state.boardIndex];
       if (!run) return { state, effect: NONE };
-      if (run.state === "blocked" || run.state === "dropped") {
+      // changes_requested joins blocked/dropped here — it resumes through the exact
+      // same tell/steer path (steer.ts's REENTRANT_STATES), just triggered by a
+      // reviewer's verdict instead of a question.
+      if (run.state === "blocked" || run.state === "dropped" || run.state === "changes_requested") {
         return { state: { ...state, prompt: { kind: "answer", runId: run.id, input: "" } }, effect: NONE };
       }
       return { state, effect: { kind: "openReview", runId: run.id } };

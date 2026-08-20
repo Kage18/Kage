@@ -49,6 +49,7 @@ import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type
 import { sendControl, isRunLive } from "./control.js";
 import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
+import { readAgentReview, type AgentReviewRecord } from "./review.js";
 import { adoptOrphanedRun, isWorktreeAdoptable, killOrphanedAgent, resumeStoppedRun } from "./recovery.js";
 import { adapterByName, detectAgent } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
@@ -869,6 +870,11 @@ function runDetail(projectDir: string, runId: string): Record<string, unknown> {
   // same convention as `taught` below.
   const suggestion = suggestedNextPrompt(run, claim);
   if (suggestion) detail.suggested_next = suggestion;
+  // The reviewer role's verdict (review.ts's reviewRun) — a DIFFERENT record from claim
+  // above, and absent for every run that never opted into review_required, same
+  // absent-means-absent convention as `taught` below.
+  const agentReview = readAgentReview(projectDir, runId);
+  if (agentReview) detail.agent_review = agentReview;
   detail.files = runFilesTree(projectDir, runId);
   // The flywheel's backward edge: the packets this run ratified into team memory.
   // Empty until a merge ratifies something — the surface then says nothing.
@@ -1614,7 +1620,7 @@ export async function handleDelegationRoute(
   }
 
   const runMatch = path.match(
-    /^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers|takeover|handback|resume-run|adopt|orphan-kill))?$/,
+    /^\/runs\/([A-Za-z0-9._-]+)(?:\/(tell|stop|interrupt|merge|reject|raw|diff|steers|review|takeover|handback|resume-run|adopt|orphan-kill))?$/,
   );
   if (!runMatch) return false;
   const [, runId, action] = runMatch;
@@ -1627,6 +1633,27 @@ export async function handleDelegationRoute(
       return true;
     }
     json(res, 200, { ok: true, steers: readSteerRecords(projectDir, runId) });
+    return true;
+  }
+
+  // The review-verdict route: an independent reviewer agent's verdict on this run
+  // (review.ts's reviewRun), distinct from the manager's own advisory kage_review_run
+  // note and from the kernel's own claim verdict. Absent (404) is the honest answer for
+  // any run that never opted into review_required, or one still sitting in "reviewing" —
+  // never a guessed/default verdict.
+  if (action === "review" && method === "GET") {
+    try {
+      readRun(projectDir, runId);
+    } catch (error) {
+      json(res, 404, { ok: false, error: (error as Error).message });
+      return true;
+    }
+    const review: AgentReviewRecord | null = readAgentReview(projectDir, runId);
+    if (!review) {
+      json(res, 404, { ok: false, error: `no reviewer verdict recorded for ${runId}` });
+      return true;
+    }
+    json(res, 200, { ok: true, review });
     return true;
   }
 

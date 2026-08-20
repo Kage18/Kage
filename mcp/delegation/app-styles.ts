@@ -607,6 +607,9 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .chip.blast-hot { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
   .chip.state-blocked { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 40%, var(--line)); }
   .chip.state-merged { color:var(--text3); }
+  .chip.state-reviewing { color:var(--memory); border-color:color-mix(in srgb, var(--memory) 40%, var(--line)); }
+  .chip.state-approved { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line)); }
+  .chip.state-changes_requested { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 40%, var(--line)); }
   .chip.state-executing { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line)); }
   .chip.state-abandoned { color:var(--crimson); border-color:color-mix(in srgb, var(--crimson) 40%, var(--line)); }
   .chip.goal-chip { cursor:pointer; }
@@ -636,6 +639,11 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .pnl-tl-by { font-family:var(--mono); color:var(--text3); font-size:10.5px; }
   .pnl-tl-at { font-family:var(--mono); color:var(--text3); font-size:10.5px; margin-left:auto; }
   .pnl-tl-note { flex:0 0 100%; color:var(--text2); font-size:11.5px; }
+  .pnl-review-verdict { display:inline-block; margin-top:10px; text-transform:capitalize; }
+  .pnl-review-note { color:var(--amber); font-size:11px; margin-top:6px; }
+  .pnl-review-findings { display:flex; flex-direction:column; gap:6px; margin-top:10px; }
+  .pnl-review-finding { font-size:11.5px; color:var(--text2); line-height:1.5; padding-left:14px; position:relative; }
+  .pnl-review-finding::before { content:"—"; position:absolute; left:0; color:var(--text3); }
   .pnl-files { display:flex; flex-direction:column; gap:2px; margin-top:10px; }
   .pnl-file { display:flex; align-items:center; gap:8px; width:100%; text-align:left;
     padding:6px 8px; border-radius:var(--r-control); font-size:11.5px; }
