@@ -310,6 +310,14 @@ export interface DelegationApiContext {
   takeOverRunFn?: typeof takeOverRun;
   /** Test seam: replace the real kill-and-reattach hand-back entirely. */
   handBackFn?: typeof handBack;
+  /**
+   * Test seam: replace the real dispatch-a-run call the /goals/:id/dispatch-wave route
+   * uses. Production always uses the real dispatchRun (dispatch.ts) — the same path
+   * kage_dispatch itself calls — so this exists only so a test can avoid the real
+   * compileBrief/checkGoalAcceptsNewRun path per spec in a wave without changing
+   * production behavior at all.
+   */
+  dispatchRunFn?: typeof dispatchRun;
 }
 
 /**
@@ -1466,13 +1474,14 @@ export async function handleDelegationRoute(
     // real detached `kage supervise` spawn so a test can assert the attach without a
     // stray child process outliving it.
     const hold = body.hold === true;
+    const doDispatch = ctx.dispatchRunFn ?? dispatchRun;
     const runIds: string[] = [];
     const warnings: string[] = [];
     for (const spec of wave.runs) {
       try {
         // briefOnly + dispatchDetached mirrors kage_dispatch (index.ts) exactly — a
         // second, divergent dispatch path is exactly what this route must not become.
-        const held = await dispatchRun(projectDir, { intent: spec.intent, type: spec.type, briefOnly: true, goalId: goal.id }, adapter);
+        const held = await doDispatch(projectDir, { intent: spec.intent, type: spec.type, briefOnly: true, goalId: goal.id }, adapter);
         runIds.push(held.task.id);
         const spawned = hold ? { pid: undefined } : dispatchDetached(projectDir, held.task);
         if (!hold && !spawned.pid) warnings.push(`${held.task.id}: could not hand off to a detached supervisor`);

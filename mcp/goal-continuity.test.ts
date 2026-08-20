@@ -6,6 +6,9 @@
 // covers the fix: goalWaveStatus (a pure derivation, never persisted), POST
 // /goals/:id/dispatch-wave (the same dispatch path kage_dispatch itself uses), and the
 // open-goals digest every new manager session now gets at spawn time.
+//
+// Every test below carries an explicit timeout: a route or fixture that hangs must fail
+// that ONE test loudly, never stall the whole suite the way an unbounded await would.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
@@ -15,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 
-import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute, type DelegationFeed } from "./delegation/api.js";
+import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute, type DelegationApiContext, type DelegationFeed } from "./delegation/api.js";
 import { guardRequest } from "./delegation/guard.js";
 import { createRun, patchRun, readRun, transitionRun } from "./delegation/contract.js";
 import { writeDelegationConfig } from "./delegation/config.js";
@@ -72,12 +75,33 @@ function runAt(project: string, intent: string, state: "running" | "merged" | "f
   return run.id;
 }
 
+/**
+ * A fast, deterministic stand-in for dispatch.ts's real dispatchRun — used ONLY by the
+ * two dispatch-wave-over-HTTP tests below, via the dispatchRunFn seam api.ts now exposes
+ * on DelegationApiContext. Production code never uses this: the route always calls the
+ * real dispatchRun when the seam is absent, so this changes nothing about what ships.
+ * It still performs the two facts those tests actually assert on — a real run record
+ * exists, and it is attached to the goal — without compileBrief's own work in the loop.
+ */
+async function fakeDispatchRun(
+  projectDir: string,
+  options: { intent: string; type?: string; goalId?: string },
+): Promise<{ task: { id: string } }> {
+  const task = createRun(projectDir, { intent: options.intent, type: (options.type as never) ?? "chore", agent: "stub" });
+  transitionRun(projectDir, task.id, "briefed", "kernel");
+  if (options.goalId) attachRunToGoal(projectDir, options.goalId, task.id);
+  return { task: readRun(projectDir, task.id) };
+}
+
 const TOKEN = "test-token-0123456789abcdef0123456789abcdef";
 
 /** Same daemon-in-miniature the delegation API's own tests use — guard first, then the
  * delegation handler — kept local to this file rather than imported from
  * delegation-api.test.ts, which is off-limits to touch. */
-async function startApi(projectDir: string): Promise<{ server: Server; port: number; feed: DelegationFeed }> {
+async function startApi(
+  projectDir: string,
+  options: { dispatchRunFn?: DelegationApiContext["dispatchRunFn"] } = {},
+): Promise<{ server: Server; port: number; feed: DelegationFeed }> {
   const feed = createDelegationFeed(projectDir, { heartbeatMs: 60_000 });
   const room = createRoomState();
   const pty = createPtyState();
@@ -92,13 +116,20 @@ async function startApi(projectDir: string): Promise<{ server: Server; port: num
       res.end(JSON.stringify({ ok: false, error: verdict.reason }));
       return;
     }
-    if (await handleDelegationRoute({ projectDir, feed, room, pty }, req, res, url)) return;
+    if (await handleDelegationRoute({ projectDir, feed, room, pty, dispatchRunFn: options.dispatchRunFn }, req, res, url)) return;
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: false, error: "not_found" }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   return { server, port, feed };
+}
+
+/** Always tears down both the listening socket AND the feed's fs.watch handle — a bare
+ * server.close() leaves that watcher's handle open and the process alive. */
+function closeApi(handle: { server: Server; feed: DelegationFeed }): void {
+  handle.feed.close();
+  handle.server.close();
 }
 
 function apiFetch(port: number, path: string, options: RequestInit = {}): Promise<Response> {
@@ -109,7 +140,7 @@ function apiFetch(port: number, path: string, options: RequestInit = {}): Promis
 
 // --- goalWaveStatus: pure derivation, never persisted ---------------------------------
 
-test("goalWaveStatus derives all five statuses from fixture run states", () => {
+test("goalWaveStatus derives all five statuses from fixture run states", { timeout: 5_000 }, () => {
   const project = tempProject();
 
   // due: first wave, no runs attached yet.
@@ -152,16 +183,16 @@ test("goalWaveStatus derives all five statuses from fixture run states", () => {
 
 // --- POST /goals/:id/dispatch-wave -----------------------------------------------------
 
-test("POST /goals/:id/dispatch-wave refuses a wave that is not due", async () => {
+test("POST /goals/:id/dispatch-wave refuses a wave that is not due", { timeout: 15_000 }, async () => {
   const project = tempGitProject();
-  const { server, port } = await startApi(project);
+  const handle = await startApi(project);
   try {
     // wave 1 is 'waiting' — wave 0 has no run attached yet, so it is not merged.
     const waitingGoal = createGoal(project, {
       intent: "two wave goal",
       plan: [[{ intent: "a", type: "chore", files_scope: [] }], [{ intent: "b", type: "chore", files_scope: [] }]],
     });
-    const waitingRes = await apiFetch(port, `/goals/${waitingGoal.id}/dispatch-wave`, {
+    const waitingRes = await apiFetch(handle.port, `/goals/${waitingGoal.id}/dispatch-wave`, {
       method: "POST",
       body: JSON.stringify({ wave_index: 1 }),
     });
@@ -175,133 +206,148 @@ test("POST /goals/:id/dispatch-wave refuses a wave that is not due", async () =>
     const busyGoal = createGoal(project, { intent: "busy goal", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
     const runningId = runAt(project, "already dispatched", "running");
     attachRunToGoal(project, busyGoal.id, runningId, 0);
-    const busyRes = await apiFetch(port, `/goals/${busyGoal.id}/dispatch-wave`, { method: "POST", body: "{}" });
+    const busyRes = await apiFetch(handle.port, `/goals/${busyGoal.id}/dispatch-wave`, { method: "POST", body: "{}" });
     assert.equal(busyRes.status, 409);
     const busyBody = (await busyRes.json()) as { ok: boolean; error: string };
     assert.equal(busyBody.ok, false);
     assert.match(busyBody.error, /no wave due for dispatch/);
   } finally {
-    server.close();
+    closeApi(handle);
   }
 });
 
-test("POST /goals/:id/dispatch-wave dispatches a due wave through the SAME path kage_dispatch uses, attaching every spec", async () => {
-  const project = tempGitProject();
-  const { server, port } = await startApi(project);
-  try {
-    const goal = createGoal(project, {
-      intent: "ship the feature",
-      plan: [[
-        { intent: "part one", type: "chore", files_scope: ["a.ts"] },
-        { intent: "part two", type: "chore", files_scope: ["b.ts"] },
-      ]],
-    });
-    const res = await apiFetch(port, `/goals/${goal.id}/dispatch-wave`, {
-      method: "POST",
-      body: JSON.stringify({ agent: "stub", hold: true }),
-    });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { ok: boolean; goal_id: string; wave_index: number; run_ids: string[] };
-    assert.equal(body.ok, true);
-    assert.equal(body.wave_index, 0);
-    assert.equal(body.run_ids.length, 2, "every spec in the due wave must produce a run");
+test(
+  "POST /goals/:id/dispatch-wave dispatches a due wave through the SAME path kage_dispatch uses, attaching every spec",
+  { timeout: 15_000 },
+  async () => {
+    const project = tempGitProject();
+    const handle = await startApi(project, { dispatchRunFn: fakeDispatchRun as never });
+    try {
+      const goal = createGoal(project, {
+        intent: "ship the feature",
+        plan: [[
+          { intent: "part one", type: "chore", files_scope: ["a.ts"] },
+          { intent: "part two", type: "chore", files_scope: ["b.ts"] },
+        ]],
+      });
+      const res = await apiFetch(handle.port, `/goals/${goal.id}/dispatch-wave`, {
+        method: "POST",
+        body: JSON.stringify({ agent: "stub", hold: true }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { ok: boolean; goal_id: string; wave_index: number; run_ids: string[] };
+      assert.equal(body.ok, true);
+      assert.equal(body.wave_index, 0);
+      assert.equal(body.run_ids.length, 2, "every spec in the due wave must produce a run");
 
-    const reread = readGoal(project, goal.id);
-    assert.deepEqual([...reread.plan.waves[0].run_ids].sort(), [...body.run_ids].sort());
-    for (const runId of body.run_ids) assert.equal(readRun(project, runId).state, "briefed");
-  } finally {
-    server.close();
-  }
-});
-
-test("dispatch-wave attaches every spec regardless of max_concurrent, and an over-cap run still queues through the kernel's own admission gate", async () => {
-  const project = tempGitProject();
-  writeDelegationConfig(project, { max_concurrent: 1 });
-  const { server, port } = await startApi(project);
-  try {
-    // Occupy the one available slot with a genuinely live, unrelated run.
-    const occupying = createRun(project, { intent: "holding the slot", type: "chore", agent: "stub" });
-    transitionRun(project, occupying.id, "briefed", "kernel");
-    transitionRun(project, occupying.id, "dispatched", "kernel");
-    transitionRun(project, occupying.id, "running", "kernel");
-    patchRun(project, occupying.id, { agent_pid: process.pid });
-
-    const goal = createGoal(project, {
-      intent: "two runs, one slot",
-      plan: [[
-        { intent: "spec one", type: "chore", files_scope: [] },
-        { intent: "spec two", type: "chore", files_scope: [] },
-      ]],
-    });
-    const res = await apiFetch(port, `/goals/${goal.id}/dispatch-wave`, { method: "POST", body: JSON.stringify({ agent: "stub", hold: true }) });
-    const body = (await res.json()) as { ok: boolean; run_ids: string[] };
-    assert.equal(body.ok, true);
-    // dispatch-wave itself never throttles by max_concurrent — it dispatches everything
-    // the due wave planned, exactly as options.md's "excess queue as the kernel already
-    // handles" describes.
-    assert.equal(body.run_ids.length, 2);
-
-    for (const runId of body.run_ids) {
-      await superviseRun(project, runId, stubAdapter());
-      const run = readRun(project, runId);
-      assert.equal(run.state, "briefed", "a run created over the cap must be left queued, not run");
-      assert.equal(run.waiting_on?.needs, "a free run slot");
+      const reread = readGoal(project, goal.id);
+      assert.deepEqual([...reread.plan.waves[0].run_ids].sort(), [...body.run_ids].sort());
+      for (const runId of body.run_ids) assert.equal(readRun(project, runId).state, "briefed");
+    } finally {
+      closeApi(handle);
     }
-  } finally {
-    server.close();
-  }
-});
+  },
+);
+
+test(
+  "dispatch-wave attaches every spec regardless of max_concurrent, and an over-cap run still queues through the kernel's own admission gate",
+  { timeout: 15_000 },
+  async () => {
+    const project = tempGitProject();
+    writeDelegationConfig(project, { max_concurrent: 1 });
+    const handle = await startApi(project, { dispatchRunFn: fakeDispatchRun as never });
+    try {
+      // Occupy the one available slot with a genuinely live, unrelated run.
+      const occupying = createRun(project, { intent: "holding the slot", type: "chore", agent: "stub" });
+      transitionRun(project, occupying.id, "briefed", "kernel");
+      transitionRun(project, occupying.id, "dispatched", "kernel");
+      transitionRun(project, occupying.id, "running", "kernel");
+      patchRun(project, occupying.id, { agent_pid: process.pid });
+
+      const goal = createGoal(project, {
+        intent: "two runs, one slot",
+        plan: [[
+          { intent: "spec one", type: "chore", files_scope: [] },
+          { intent: "spec two", type: "chore", files_scope: [] },
+        ]],
+      });
+      const res = await apiFetch(handle.port, `/goals/${goal.id}/dispatch-wave`, {
+        method: "POST",
+        body: JSON.stringify({ agent: "stub", hold: true }),
+      });
+      const body = (await res.json()) as { ok: boolean; run_ids: string[] };
+      assert.equal(body.ok, true);
+      // dispatch-wave itself never throttles by max_concurrent — it dispatches everything
+      // the due wave planned, exactly as the brief's "excess queue as the kernel already
+      // handles" describes.
+      assert.equal(body.run_ids.length, 2);
+
+      for (const runId of body.run_ids) {
+        await superviseRun(project, runId, stubAdapter());
+        const run = readRun(project, runId);
+        assert.equal(run.state, "briefed", "a run created over the cap must be left queued, not run");
+        assert.equal(run.waiting_on?.needs, "a free run slot");
+      }
+    } finally {
+      closeApi(handle);
+    }
+  },
+);
 
 // --- goal reads carry the derived wave status ------------------------------------------
 
-test("GET /goals and GET /goals/:id carry the derived wave_status", async () => {
+test("GET /goals and GET /goals/:id carry the derived wave_status", { timeout: 15_000 }, async () => {
   const project = tempProject();
-  const { server, port } = await startApi(project);
+  const handle = await startApi(project);
   try {
     const goal = createGoal(project, {
       intent: "two waves",
       plan: [[{ intent: "a", type: "chore", files_scope: [] }], [{ intent: "b", type: "chore", files_scope: [] }]],
     });
 
-    const list = (await (await apiFetch(port, "/goals")).json()) as { goals: Array<{ id: string; wave_status: unknown }> };
+    const list = (await (await apiFetch(handle.port, "/goals")).json()) as { goals: Array<{ id: string; wave_status: unknown }> };
     const listed = list.goals.find((g) => g.id === goal.id);
     assert.ok(listed, "the created goal must be in the list");
     assert.deepEqual(listed?.wave_status, [{ status: "due" }, { status: "waiting" }]);
 
-    const single = (await (await apiFetch(port, `/goals/${goal.id}`)).json()) as { goal: { wave_status: unknown } };
+    const single = (await (await apiFetch(handle.port, `/goals/${goal.id}`)).json()) as { goal: { wave_status: unknown } };
     assert.deepEqual(single.goal.wave_status, [{ status: "due" }, { status: "waiting" }]);
   } finally {
-    server.close();
+    closeApi(handle);
   }
 });
 
 // --- goal continuity for a brand-new manager session ------------------------------------
 
-test("the open-goals digest includes a due goal's wave-is-due phrasing and omits terminal goals", () => {
-  const project = tempProject();
+test(
+  "the open-goals digest includes a due goal's wave-is-due phrasing and omits terminal goals",
+  { timeout: 5_000 },
+  () => {
+    const project = tempProject();
 
-  const openGoal = createGoal(project, { intent: "still open\nsecond line ignored", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
+    const openGoal = createGoal(project, { intent: "still open\nsecond line ignored", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
 
-  const doneGoal = createGoal(project, { intent: "finished goal", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
-  const mergedId = runAt(project, "finishing run", "merged");
-  attachRunToGoal(project, doneGoal.id, mergedId, 0);
-  assert.equal(readGoal(project, doneGoal.id).state, "done", "fixture sanity: the goal must actually be terminal");
+    const doneGoal = createGoal(project, { intent: "finished goal", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
+    const mergedId = runAt(project, "finishing run", "merged");
+    attachRunToGoal(project, doneGoal.id, mergedId, 0);
+    assert.equal(readGoal(project, doneGoal.id).state, "done", "fixture sanity: the goal must actually be terminal");
 
-  const lines = openGoalsDigestLines(project);
-  assert.equal(lines.length, 1, "a terminal goal must never appear in the digest");
-  assert.match(lines[0], new RegExp(openGoal.id));
-  assert.match(lines[0], /still open/);
-  assert.ok(!lines[0].includes("second line ignored"), "only the intent's first line is used");
-  assert.match(lines[0], /wave 0 is due — dispatch it or say why not/);
-  assert.ok(!lines.some((line) => line.includes(doneGoal.id)));
+    const lines = openGoalsDigestLines(project);
+    assert.equal(lines.length, 1, "a terminal goal must never appear in the digest");
+    assert.match(lines[0], new RegExp(openGoal.id));
+    assert.match(lines[0], /still open/);
+    assert.ok(!lines[0].includes("second line ignored"), "only the intent's first line is used");
+    assert.match(lines[0], /wave 0 is due — dispatch it or say why not/);
+    assert.ok(!lines.some((line) => line.includes(doneGoal.id)));
 
-  const prompt = managerPromptFor(project);
-  assert.ok(prompt.startsWith(MANAGER_CONSTITUTION), "the digest is appended, never replaces the constitution");
-  assert.match(prompt, new RegExp(openGoal.id));
-  assert.ok(!prompt.includes(doneGoal.id));
-});
+    const prompt = managerPromptFor(project);
+    assert.ok(prompt.startsWith(MANAGER_CONSTITUTION), "the digest is appended, never replaces the constitution");
+    assert.match(prompt, new RegExp(openGoal.id));
+    assert.ok(!prompt.includes(doneGoal.id));
+  },
+);
 
-test("the open-goals digest is capped at 3 goals", () => {
+test("the open-goals digest is capped at 3 goals", { timeout: 5_000 }, () => {
   const project = tempProject();
   for (let i = 0; i < 5; i++) {
     createGoal(project, { intent: `goal number ${i}`, plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
@@ -309,35 +355,43 @@ test("the open-goals digest is capped at 3 goals", () => {
   assert.equal(openGoalsDigestLines(project).length, 3);
 });
 
-test("managerPromptFor is exactly the constitution when there are no open goals", () => {
+test("managerPromptFor is exactly the constitution when there are no open goals", { timeout: 5_000 }, () => {
   const project = tempProject();
   assert.equal(managerPromptFor(project), MANAGER_CONSTITUTION);
 });
 
-test("ensureOrchestratorWorktree (room-pty.ts) writes the open-goals digest into CLAUDE.md alongside the constitution", () => {
-  const project = tempGitProject();
-  const goal = createGoal(project, { intent: "inherit me", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
+test(
+  "ensureOrchestratorWorktree (room-pty.ts) writes the open-goals digest into CLAUDE.md alongside the constitution",
+  { timeout: 15_000 },
+  () => {
+    const project = tempGitProject();
+    const goal = createGoal(project, { intent: "inherit me", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
 
-  const cwd = ensureOrchestratorWorktree(project);
-  const content = readFileSync(join(cwd, "CLAUDE.md"), "utf8");
-  assert.ok(content.includes(MANAGER_CONSTITUTION), "the full constitution must still be present");
-  assert.match(content, new RegExp(goal.id));
-  assert.match(content, /wave 0 is due — dispatch it or say why not/);
-});
+    const cwd = ensureOrchestratorWorktree(project);
+    const content = readFileSync(join(cwd, "CLAUDE.md"), "utf8");
+    assert.ok(content.includes(MANAGER_CONSTITUTION), "the full constitution must still be present");
+    assert.match(content, new RegExp(goal.id));
+    assert.match(content, /wave 0 is due — dispatch it or say why not/);
+  },
+);
 
-test("buildHeadlessRoomArgs (room-supervisor.ts) carries the open-goals digest when given managerPromptFor's output", () => {
-  const project = tempGitProject();
-  const goal = createGoal(project, { intent: "headless inherit me", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
+test(
+  "buildHeadlessRoomArgs (room-supervisor.ts) carries the open-goals digest when given managerPromptFor's output",
+  { timeout: 5_000 },
+  () => {
+    const project = tempProject();
+    const goal = createGoal(project, { intent: "headless inherit me", plan: [[{ intent: "a", type: "chore", files_scope: [] }]] });
 
-  const args = buildHeadlessRoomArgs({ mcpConfigPath: "/tmp/room-mcp.json", systemPrompt: managerPromptFor(project) });
-  const promptIndex = args.indexOf("--append-system-prompt");
-  assert.notEqual(promptIndex, -1);
-  const prompt = args[promptIndex + 1];
-  assert.ok(prompt.startsWith(MANAGER_CONSTITUTION));
-  assert.match(prompt, new RegExp(goal.id));
+    const args = buildHeadlessRoomArgs({ mcpConfigPath: "/tmp/room-mcp.json", systemPrompt: managerPromptFor(project) });
+    const promptIndex = args.indexOf("--append-system-prompt");
+    assert.notEqual(promptIndex, -1);
+    const prompt = args[promptIndex + 1];
+    assert.ok(prompt.startsWith(MANAGER_CONSTITUTION));
+    assert.match(prompt, new RegExp(goal.id));
 
-  // Omitting systemPrompt (every pre-existing caller) is unchanged — the fallback is the
-  // bare constitution, same as before this file existed.
-  const bare = buildHeadlessRoomArgs({ mcpConfigPath: "/tmp/room-mcp.json" });
-  assert.equal(bare[bare.indexOf("--append-system-prompt") + 1], MANAGER_CONSTITUTION);
-});
+    // Omitting systemPrompt (every pre-existing caller) is unchanged — the fallback is the
+    // bare constitution, same as before this file existed.
+    const bare = buildHeadlessRoomArgs({ mcpConfigPath: "/tmp/room-mcp.json" });
+    assert.equal(bare[bare.indexOf("--append-system-prompt") + 1], MANAGER_CONSTITUTION);
+  },
+);
