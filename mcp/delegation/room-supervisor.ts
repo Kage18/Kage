@@ -626,6 +626,36 @@ export interface NotifyManagerDeps {
 const WAVE_TERMINAL_STATES = new Set(["merged", "rejected", "failed"]);
 
 /**
+ * Synthetic wake states the review gate sends (mcp/index.ts's kage_review_run) — never a
+ * kernel RunState (contract.ts's RUN_STATES). A run under review stays "ready" in the
+ * kernel's own eyes the whole time; the review verdict rides the SAME event bridge as a
+ * real state change so a held manager session learns about it without a second channel,
+ * but it needs its own phrasing here: "run X is now reviewed" reads as a kernel fact it
+ * is not, so these get the plain "review verdict:" wording below instead.
+ */
+export const REVIEWED_EVENT_STATE = "reviewed";
+export const REVIEW_EVENT_STATES = new Set([REVIEWED_EVENT_STATE]);
+
+function isReviewEvent(state: string): boolean {
+  return REVIEW_EVENT_STATES.has(state);
+}
+
+/** The single-event wake's own middle clause — "(goal intent) is now X: detail" for an
+ * ordinary state, "(goal intent) review verdict: X" for a review event — kept as one
+ * function so the two wordings can never drift apart from where this is called. */
+function eventClause(goalIntent: string, event: { state: string; detail?: string }): string {
+  if (isReviewEvent(event.state)) return `(${goalIntent}) review verdict: ${event.detail ?? "no detail"}`;
+  return `(${goalIntent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}`;
+}
+
+/** One event's line for the coalesced drain (no goal intent — that's stated once in the
+ * frame's own preamble, see drainPendingGoalEvents below). */
+function eventLine(runId: string, event: { state: string; detail?: string }): string {
+  if (isReviewEvent(event.state)) return `run ${runId} review verdict: ${event.detail ?? "no detail"}`;
+  return `run ${runId} is now ${event.state}${event.detail ? `: ${event.detail}` : ""}`;
+}
+
+/**
  * When runId is the last run of its wave to reach a terminal state, and the goal plans a
  * further wave after it, this is the fact the manager keeps getting wrong by inference:
  * that the wave is DONE and what comes next. Returns the explicit note to append to the
@@ -712,7 +742,7 @@ export async function notifyManagerOfRunEvent(
   if (!(await isLive(projectDir, session))) return false;
 
   const note = WAVE_TERMINAL_STATES.has(event.state) ? waveCompletionNote(projectDir, goal, runId) : null;
-  const message = `[kage event] run ${runId} (${goal.intent}) is now ${event.state}${event.detail ? `: ${event.detail}` : ""}${note ? ` — ${note}` : ""}`;
+  const message = `[kage event] run ${runId} ${eventClause(goal.intent, event)}${note ? ` — ${note}` : ""}`;
   const send = deps.sendFrameFn ?? sendFrameToHeldSession;
   const delivered = await send(projectDir, message, session);
   if (delivered) (deps.markGoalEventsDeliveredFn ?? markGoalEventsDelivered)(projectDir, goal.id, [record.id]);
@@ -740,7 +770,7 @@ function coalesceGoalEvents(
   for (const evt of events) latestByRun.set(evt.run_id, evt);
   const runs = [...latestByRun.values()];
   const shown = runs.slice(0, GOAL_EVENT_DRAIN_CAP);
-  const lines = shown.map((evt) => `run ${evt.run_id} is now ${evt.state}${evt.detail ? `: ${evt.detail}` : ""}`);
+  const lines = shown.map((evt) => eventLine(evt.run_id, evt));
   const notes = new Set<string>();
   for (const evt of shown) {
     if (!WAVE_TERMINAL_STATES.has(evt.state)) continue;

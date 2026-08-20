@@ -148,6 +148,53 @@ export function recordLearningJudgment(
   return updated;
 }
 
+// ---------------------------------------------------------------------------
+// The review gate: a run reaching "ready" means the KERNEL verified it — checks ran,
+// a diff exists. It does not mean anyone with judgment looked at it. kage_review_run
+// (mcp/index.ts) records that second, human-shaped pass the same way this file already
+// records brief judgment: an artifact the kernel stores and a card can render, not prose
+// that evaporates once the manager's next reply overwrites it.
+
+export type ReviewVerdict = "approve" | "request_changes";
+
+export interface ReviewRecord {
+  schema_version: 1;
+  run_id: string;
+  at: string;
+  verdict: ReviewVerdict;
+  notes?: string;
+}
+
+function reviewPath(projectDir: string, runId: string): string {
+  return join(runDir(projectDir, runId), "review.json");
+}
+
+export function writeReview(projectDir: string, review: ReviewRecord): void {
+  const path = reviewPath(projectDir, review.run_id);
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(review, null, 2)}\n`, "utf8");
+  renameSync(tmp, path);
+}
+
+export function readReview(projectDir: string, runId: string): ReviewRecord | null {
+  const path = reviewPath(projectDir, runId);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ReviewRecord;
+  } catch {
+    return null;
+  }
+}
+
+/** Human-readable section for the verbose receipt — same shape renderJudgment renders. */
+export function renderReview(review: ReviewRecord | null): string[] {
+  if (!review) return ["REVIEW", "  (none — not yet reviewed)"];
+  const lines = ["REVIEW", `  verdict: ${review.verdict}`];
+  if (review.notes) lines.push(`  notes: ${review.notes}`);
+  return lines;
+}
+
 /** Human-readable section for the verbose receipt. */
 export function renderJudgment(judgment: ManagerJudgment | null): string[] {
   if (!judgment) {
