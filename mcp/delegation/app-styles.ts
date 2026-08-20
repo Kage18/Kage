@@ -174,6 +174,17 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      phone, so unlike the rail's row this one shows its × unconditionally. */
   .settings-projects { display:flex; flex-direction:column; gap:1px; margin-bottom:14px; }
   .settings-projects .prow .pforget { display:block; }
+  /* The sidebar fleet (docs/design/SESSIONS_SURFACE.md §1): under the ACTIVE project
+     only. Orchestrator first with its own live dot, then every non-terminal run by
+     display_name with its own state dot — a merged/rejected run's home is the board. */
+  .pfleet { padding:2px 2px 8px 14px; display:flex; flex-direction:column; gap:1px; }
+  .pfleet-row { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:var(--r-control);
+    cursor:pointer; font-size:11.5px; color:var(--text2); }
+  .pfleet-row:hover { background:var(--inset); }
+  .pfleet-row.on { background:var(--surface); color:var(--text); }
+  .pfleet-row.orch { font-weight:600; }
+  .pfleet-n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fleet-dot { margin-top:0; flex:none; }
   .side .sidefoot { border-top:1px solid var(--line); padding:9px 12px; font-size:11px; color:var(--text3); }
   .side .sidefoot b { font-weight:600; color:var(--text2); }
   @media (max-width: 900px) { .side { display:none; } }
@@ -321,6 +332,14 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .turn .who { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
     text-transform:uppercase; color:var(--text3); }
   .turn.you .who { color:var(--green); }
+  /* The headless fallback's own label, shown quietly next to "Kage" — the pty manager
+     answering gets no such mention, since it IS the session (docs/design/
+     SESSIONS_SURFACE.md §2). */
+  .turn .who-sub { margin-left:7px; text-transform:none; letter-spacing:0; opacity:.7; }
+  /* Tool calls collapsed into one expandable group line, in the Chat register. */
+  .toolgroup { margin-top:2px; }
+  .toolgrouplist { margin-top:4px; padding-left:18px; display:flex; flex-direction:column; gap:3px; }
+  .toolgroupitem { font-family:var(--mono); font-size:11px; color:var(--text3); }
   .turn .bubble2 { font-size:14.5px; line-height:1.7; white-space:pre-wrap; }
   .turn.you .bubble2 { color:var(--text2); max-width:68ch;
     border-left:2px solid var(--green); padding-left:14px; }
@@ -371,12 +390,23 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .room-send { background:var(--seal); color:#fff; border-radius:var(--r-card); padding:7px 14px; font-size:12.5px; font-weight:600; }
   .room-send:disabled { opacity:.45; cursor:default; }
   .room-hint { text-align:center; font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:8px; }
+  /* Presence banner (docs/design/SESSIONS_SURFACE.md §6): absence stated, not a blank
+     pane — the same discipline the Memory view already applies to an unmeasured repo. */
+  .room-banner { display:none; align-items:center; gap:12px; padding:10px 24px;
+    background:color-mix(in srgb, var(--amber) 8%, var(--surface));
+    border-bottom:1px solid color-mix(in srgb, var(--amber) 35%, var(--line));
+    color:var(--amber); font-size:12.5px; flex:none; }
+
   /* Pre-flight forecast: risk before the work exists, always labeled a forecast.
      One quiet line — it informs the dispatch decision, it must not shout over it. */
   .preflight { display:none; align-items:baseline; gap:12px; flex-wrap:wrap;
     font-family:var(--mono); font-size:10.5px; color:var(--text3);
     max-width:720px; margin:8px auto 0; }
-  .modal .preflight { margin:0 18px 10px; max-width:none; }
+  /* The standing defect: the Dispatch button used to drop the instant the forecast
+     resolved and this box's height inserted above it. display:flex + visibility:hidden
+     (JS toggles visibility here, never display — see renderPreflight) reserves the
+     line's height from the moment the modal opens, so nothing ever moves. */
+  .modal .preflight { display:flex; visibility:hidden; min-height:17px; margin:0 18px 10px; max-width:none; }
   .preflight .pf-hot { color:var(--amber); }
   .preflight .pf-mem { color:var(--text2); }
   .preflight .pf-tag { opacity:.6; margin-left:auto; letter-spacing:.08em; text-transform:uppercase; font-size:9.5px; }
@@ -454,6 +484,12 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .qatoms { display:flex; gap:12px; margin-top:6px; flex-wrap:wrap; align-items:baseline; }
   .atom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
   .atom.jade { color:var(--jade); } .atom.amber { color:var(--amber); } .atom.hot { color:var(--crimson); }
+  /* The shared card shape (docs/design/SESSIONS_SURFACE.md §5): a state word with its
+     own dot, and the VERIFIED n/n chip on a finished run — claimVerdict's own label,
+     never re-derived. */
+  .atom.statedot { display:inline-flex; align-items:center; gap:5px; }
+  .atom.statedot .dot { margin-top:0; }
+  .atom.vchip { border:1px solid currentColor; border-radius:999px; padding:1px 7px; opacity:.9; }
   .qtime { font-family:var(--mono); font-size:10.5px; color:var(--text3); padding-top:3px; }
 
   /* handover card */
@@ -546,8 +582,29 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .tab:hover { color:var(--text2); }
   .tab.on { color:var(--text); border-bottom-color:var(--seal); }
 
-  .dbody { padding:20px 26px 28px; flex:1; overflow-y:auto; min-height:0; }
+  /* The right panel (docs/design/SESSIONS_SURFACE.md §3c): the at-a-glance layer
+     beside the tabbed deep-inspection column, not behind a tab of its own. */
+  .dbody { display:flex; flex:1; overflow:hidden; min-height:0; }
+  .dmain { flex:1; min-width:0; overflow-y:auto; padding:20px 26px 28px; }
   .dcol { max-width:900px; }
+  .dpanel { width:300px; flex:none; overflow-y:auto; padding:18px 20px 28px;
+    border-left:1px solid var(--line); background:var(--surface); }
+  .pnl-sec { margin-bottom:22px; }
+  .pnl-sec .paper-receipt { margin:8px 0 0; max-width:none; }
+  .modepill.on { border-color:var(--amber); color:var(--amber); }
+  .pnl-timeline { display:flex; flex-direction:column; gap:9px; margin-top:10px; }
+  .pnl-tl-row { font-size:11.5px; display:flex; flex-wrap:wrap; gap:7px; align-items:baseline; }
+  .pnl-tl-state { font-family:var(--mono); font-weight:600; }
+  .pnl-tl-by { font-family:var(--mono); color:var(--text3); font-size:10.5px; }
+  .pnl-tl-at { font-family:var(--mono); color:var(--text3); font-size:10.5px; margin-left:auto; }
+  .pnl-tl-note { flex:0 0 100%; color:var(--text2); font-size:11.5px; }
+  .pnl-files { display:flex; flex-direction:column; gap:2px; margin-top:10px; }
+  .pnl-file { display:flex; align-items:center; gap:8px; width:100%; text-align:left;
+    padding:6px 8px; border-radius:var(--r-control); font-size:11.5px; }
+  .pnl-file:hover { background:var(--surface2); }
+  .pnl-file .n { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono); }
+  .pnl-file .c { display:flex; gap:6px; font-family:var(--mono); font-size:10px; flex:none; }
+  .pnl-file .c .a { color:var(--jade); } .pnl-file .c .d { color:var(--crimson); }
   .activityline { display:flex; gap:9px; align-items:baseline; font-family:var(--mono); font-size:12px;
     color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     padding:10px 14px; margin-bottom:14px; box-shadow:var(--shadow-sm); }
@@ -574,6 +631,13 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     min-width:0; flex:1; overflow-wrap:anywhere; }
   .toolcard .ts { font-family:var(--mono); font-size:10px; color:var(--text3); opacity:.6;
     margin-left:auto; font-variant-numeric:tabular-nums; flex:none; }
+  /* Write/Edit +/- and a command's exit code, cross-referenced from the W1 files tree
+     and the claim's own checks (docs/design/SESSIONS_SURFACE.md §3a) — the stream
+     itself carries neither. */
+  .toolcard .filediff { display:flex; gap:6px; font-family:var(--mono); font-size:10.5px; flex:none; }
+  .toolcard .filediff .a { color:var(--jade); } .toolcard .filediff .d { color:var(--crimson); }
+  .toolcard .exitcode { font-family:var(--mono); font-size:10.5px; color:var(--jade); flex:none; }
+  .toolcard .exitcode.bad { color:var(--crimson); }
   .livepulse { width:6px; height:6px; border-radius:50%; background:var(--jade); display:inline-block;
     animation:pulse2 1.1s ease-in-out infinite; margin-right:7px; vertical-align:1px; }
 
@@ -712,6 +776,9 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .cwrap .caret { color:var(--seal); font-family:var(--mono); }
   .cwrap input { flex:1; border:none; background:none; color:var(--text); font-size:13px; outline:none; }
   .cwrap .hint { font-family:var(--mono); font-size:10px; color:var(--text3); white-space:nowrap; }
+  /* Ghost suggestion (docs/design/SESSIONS_SURFACE.md §4): suggested_next rendered dim
+     inside the empty input, via the native placeholder — Tab or a click accepts it. */
+  .ghost-on::placeholder, .ghost-on::-webkit-input-placeholder { color:var(--text3); font-style:italic; opacity:.85; }
   .actionbar { padding:11px 26px 14px; background:var(--surface); display:flex; gap:9px; align-items:center; flex:none; }
   .btn { font-size:12.5px; font-weight:550; padding:7px 15px; border-radius:var(--r-card);
     border:1px solid var(--line); background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm); }
@@ -758,8 +825,6 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     background:color-mix(in srgb, var(--jade) 10%, var(--surface2)); }
   .acard .at { font-size:12.5px; font-weight:550; line-height:1.4;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-  .acard .abr { font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:3px;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .acard .arow { display:flex; gap:10px; margin-top:7px; align-items:baseline; }
   .acard .tm { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3); }
 
@@ -926,6 +991,16 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     .settings-projects .prow { padding:11px 10px; }
     .settings-projects .pforget { padding:6px 9px; }
     .palette .row { padding:12px 12px; }
+
+    /* The right panel (docs/design/SESSIONS_SURFACE.md §3c) has no room to sit beside
+       the tab content under 900px — it stacks below instead, each scrolling on its
+       own. .side (and with it the sidebar fleet) is already hidden at this width by
+       the rule above; project/run switching narrow already funnels through the
+       command palette and settings, unchanged here. */
+    .dbody { flex-direction:column; overflow-y:auto; }
+    .dmain { overflow-y:visible; }
+    .dpanel { width:100%; border-left:none; border-top:1px solid var(--line); overflow-y:visible; }
+    .room-banner { flex-wrap:wrap; }
   }
 
   /* Terminal mode — a REAL claude session, not our own chat rendering of one */

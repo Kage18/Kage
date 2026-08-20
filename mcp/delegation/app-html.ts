@@ -94,6 +94,7 @@ ${APP_STYLES}
       <button class="tadd" id="t-add" title="a separate conversation with the manager">+</button>
     </div>
     <div id="room-chat-pane">
+      <div class="room-banner" id="room-banner" style="display:none"></div>
       <div class="room-scroll"><div class="room-col" id="room-col">
         <div class="primer" id="room-primer">
           <div class="pseal"><svg class="pseal-eye" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris2" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris2)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg></div>
