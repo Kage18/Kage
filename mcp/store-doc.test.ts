@@ -4,17 +4,27 @@
 // mcp/readme-claims.test.ts, mcp/context-doc.test.ts, and mcp/sessions-doc.test.ts: a design
 // doc that names code is a claim about the code, and this repo's standing failure mode is
 // docs that outrun what actually shipped. This file keeps that claim honest: every
-// backtick-quoted repo path the doc cites must exist; every symbol an "exists"-style
-// citation names must actually appear in the file it's cited against; the doc's own
-// non-negotiable laws (no new deps, node:sqlite feature-detected with a JSON fallback, no
-// database server/account/cloud) must still read as stated; and the `>=18` engines figure
-// the doc quotes from mcp/package.json must still be the real value there.
+// backtick-quoted repo path the doc cites is either TRACKED (must exist in the worktree —
+// a design doc citing source is a claim about source control) or a DERIVED, gitignored
+// `.agent_memory/` artifact (must instead be labelled in the doc as derived/rebuildable,
+// never asserted to exist — a clean worktree that hasn't indexed yet legitimately has none
+// of these, and asserting existence there was the bug that broke this file's own guard);
+// every symbol an "exists"-style citation names must actually appear in the file it's
+// cited against; the doc's own non-negotiable laws (no new deps, node:sqlite
+// feature-detected with a JSON fallback, no database server/account/cloud) must still read
+// as stated; and the `>=18` engines figure the doc quotes from mcp/package.json must still
+// be the real value there.
+//
+// The tracked/derived split is decided by asking git itself (`git check-ignore`), never by
+// a hardcoded directory list or a specific filename — a path is derived because git says
+// it's ignored, not because it happens to start with a string this file recognizes.
 //
 // REGRESSION: delete docs/design/MEMORY_STORE.md, or rename/remove any symbol in
 // SYMBOL_CITATIONS below from the file it's cited against (e.g. rename writeJson in
 // mcp/kernel.ts), or edit mcp/package.json's engines.node away from ">=18" without updating
-// the doc, or reword the doc so it no longer states the JSON-fallback law or the
-// zero-new-dependencies law in a greppable form — any of those fails a test in this file.
+// the doc, or reword the doc so it no longer states the JSON-fallback law, the
+// zero-new-dependencies law, or the derived/rebuildable framing for its gitignored
+// `.agent_memory/` artifacts in a greppable form — any of those fails a test in this file.
 //
 // M1 landed 2026-08-20 (mcp/store/{types,sqlite,json,manifest,rebuild}.ts,
 // mcp/store-layer.test.ts): the guard below is now bidirectional, not a
@@ -30,12 +40,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 const repoPath = (...parts: string[]) => join(__dirname, "..", "..", ...parts);
+const REPO_ROOT = repoPath();
 const DOC_PATH = repoPath("docs", "design", "MEMORY_STORE.md");
 
 function readDoc(): string {
   return readFileSync(DOC_PATH, "utf8");
+}
+
+// Ground truth for "is this path derived output or committed source": ask git, not a
+// hardcoded list of directory names. `git check-ignore` exits 0 when the path IS ignored,
+// 1 when it is NOT ignored (a normal, documented outcome, not an error), and anything else
+// (e.g. not run inside a git worktree) is a real failure this must not swallow.
+function isGitIgnoredArtifact(repoRelativePath: string): boolean {
+  try {
+    execFileSync("git", ["check-ignore", "-q", repoRelativePath], { cwd: REPO_ROOT });
+    return true;
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    if (status === 1) return false;
+    throw error;
+  }
 }
 
 // Every backtick-quoted token that looks like a repo-relative file path (a known
@@ -112,12 +139,36 @@ test("docs/design/MEMORY_STORE.md exists and is a substantial design doc", () =>
   }
 });
 
-test("every concrete repo path MEMORY_STORE.md cites exists in the worktree", () => {
+test("every TRACKED concrete repo path MEMORY_STORE.md cites exists in the worktree", () => {
   const paths = citedPaths(readDoc());
   assert.ok(paths.length >= 10, `expected many cited paths, found ${paths.length}`);
-  for (const path of paths) {
-    assert.ok(existsSync(repoPath(path)), `MEMORY_STORE.md cites "${path}" but it does not exist in the worktree`);
+  const tracked = paths.filter((path) => !isGitIgnoredArtifact(path));
+  // Sanity: this doc cites real source (mcp/kernel.ts and friends) alongside its derived
+  // .agent_memory/ table, so at least some cited paths must fall on the tracked side too
+  // — otherwise this test would vacuously pass with zero real checks.
+  assert.ok(tracked.length > 0, "expected at least one tracked (non-gitignored) cited path");
+  for (const path of tracked) {
+    assert.ok(existsSync(repoPath(path)), `MEMORY_STORE.md cites "${path}" as tracked, but it does not exist in the worktree`);
   }
+});
+
+test("every DERIVED (gitignored .agent_memory/) path MEMORY_STORE.md cites is labelled derived/rebuildable, not asserted to exist", () => {
+  // A gitignored index/cache artifact legitimately does not exist in a clean worktree
+  // that hasn't indexed yet (reproduced: this worktree has no .agent_memory/graph/ at
+  // all) — asserting existsSync on one, as the old single test did, was an
+  // environment-dependent false failure, not a real doc/code disagreement. The fix isn't
+  // to skip these paths; it's to hold the doc to a different, honest claim: that it
+  // labels them as derived output, not source it's claiming is checked in.
+  const paths = citedPaths(readDoc());
+  const derived = paths.filter((path) => isGitIgnoredArtifact(path));
+  assert.ok(derived.length > 0, "expected MEMORY_STORE.md to cite at least one gitignored .agent_memory/ artifact");
+  const flat = readDoc().replace(/\s+/g, " ");
+  assert.ok(
+    flat.includes(
+      "is, today, disposable — delete the whole tree and `kage index` regenerates it",
+    ),
+    "doc should label its gitignored .agent_memory/ artifacts as disposable/regenerated, not silently assume they exist on disk",
+  );
 });
 
 test("every symbol MEMORY_STORE.md cites as existing code is a real identifier in its cited file", () => {

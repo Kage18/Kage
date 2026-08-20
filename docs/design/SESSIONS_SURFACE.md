@@ -142,24 +142,20 @@ child, lands the run at `stopped`, and reattaches a real detached supervisor
 (`dispatchDetached`, the same default `HandBackDeps.reattach` steer.ts's own fallback
 uses) — full circle, not exile.
 
-**Gap: instant Take Over needs `agent_session_id` written to disk while the run is
-still live, and today it isn't, for the path that matters.** In the in-process dispatch
-path, `executeRun()` pre-assigns a session id and patches it to disk *before* the adapter
-even spawns (`randomUUID()` then `patchRun(..., { agent_session_id: sessionId })`,
-`mcp/delegation/dispatch.ts:304-305`). But the path every real dispatch actually takes —
-the detached supervisor (`kage supervise`, `mcp/delegation/supervisor.ts`) — does the
-opposite: the true session id is parsed out of the agent's own streamed JSONL
-(`sessionIdFrom(line)`) and held only in an **in-memory** `state.sessionId`
-(`supervisor.ts:340-341`); it is not written back to the `TaskRecord` until the run's
-whole turn finishes, in the final `patchRun` after the streaming promise resolves
-(`supervisor.ts:489-492`). Between dispatch and that final write, `task.agent_session_id`
-on disk is whatever it was before this turn started — for a fresh run, unset — so
-`takeOverRun`'s own check (`run-pty.ts:123-124`) refuses exactly the run a person is most
-likely to want to take over: one that's actively working. This is the same live-usage
-streaming loop the per-run budget work (`kage/enforce-the-per-run-budget-...`) added for
-spend tracking; patching `agent_session_id` the moment `sessionIdFrom()` first resolves
-it, on the same turn-boundary loop that already patches spend, closes this gap with no
-new mechanism — **in flight, not done**.
+**Landed: `agent_session_id` is now written to disk the moment the stream first reports
+it, not only at turn end.** The detached supervisor path (`kage supervise`,
+`mcp/delegation/supervisor.ts`) — the path every real dispatch actually takes — parses
+the true session id out of the agent's own streamed JSONL (`sessionIdFrom(line)`) and, the
+first time it resolves, immediately patches it to the `TaskRecord`
+(`patchRun(projectDir, runId, { agent_session_id: id })`, `supervisor.ts:585`), not only
+in the exit-cleanup `patchRun` that still runs at turn end as belt-and-braces
+(`supervisor.ts:759`). The in-process dispatch path already did this at spawn time
+(`executeRun()`'s `randomUUID()` then `patchRun`, `mcp/delegation/dispatch.ts:304-305`);
+both paths now agree. `takeOverRun`'s own check (`run-pty.ts:123-124`) no longer refuses
+a run that's actively working — this closed the exact defect the code's own comment
+names: "Take Over" used to refuse a run mid-stream with "no agent session recorded." The
+fix reused the same turn-boundary streaming loop that already patches spend
+(`supervisor.ts:594-601`) to patch the session id too, no new mechanism added.
 
 **Deliberate, and worth stating in the doc itself:** taking over must be a visible state
 change, never a silent one. AO's sessions are unsupervised by default, so nothing changes
@@ -228,10 +224,18 @@ anywhere a suggested next step appears) so there is exactly one place this logic
 - **A check failed** → name the failing command (`claimVerdict()` already carries
   `check.cmd` and `exit_code` per outcome, `verify.ts:236-244` reading `ClaimRecord.checks`,
   `contract.ts:143-163`) — e.g. *"npm test failed — see the log."*
-- **Stalled** → quote the stall evidence. Gap: no stall detector exists yet (grepped
-  `stall` case-insensitively across every delegation file; the only hits are unrelated
-  matches on "install"). **In flight, not done** — this suggestion has no data source
-  until that detector lands.
+- **Stalled** → quote the stall evidence. **Landed**: the stall detector
+  (`evaluateStallTurn`, `mcp/delegation/supervisor.ts:159-207`) runs once per turn
+  boundary and trips on either of two independent triggers — the same command failing
+  with the same exit code `STALL_SAME_COMMAND_STREAK` (3) turns in a row, or
+  `STALL_NO_DIFF_STREAK` (6) consecutive turns with no change to the worktree's `git diff
+  --stat` (`supervisor.ts:116-117`). A trip sets `SupervisorState.stallHalted`
+  (`supervisor.ts:284`) and lands as the `note` on the run's `stopped` transition
+  (`transitionRun`, `contract.ts:876`) — the same `state_history` note field §3c's
+  ACTIVITY panel already reads, and that `renderRunCard` already surfaces as
+  `stopped  stalled: ...` (`contract.ts:978-983`). The data source this suggestion needed
+  now exists; wiring the composer's ghost text to read it is ordinary W1/W2 work, no
+  different from this section's other three sources.
 - **Ready** → *"review the receipt."*
 - **Blocked with a question** → the agent's own words, already captured verbatim in
   `waiting_on.detail` (`contract.ts:113`) the moment a run transitions to `blocked`.
@@ -302,7 +306,7 @@ this doc adds. Nothing here gets a pass because it's new.
 
 | Wave | Scope | Depends on |
 |---|---|---|
-| **W1 — backend** | `display_name` on `TaskRecord` + `kage_dispatch`'s schema (§2); server-side suggested-next derivation from `claimVerdict` (§4); files-tree data already produced by `parseDiff()` exposed as structured JSON instead of client-parsed text (§3c/4). | The budget run and the unified-session run both touch `mcp/delegation/dispatch.ts` and `mcp/delegation/supervisor.ts` — their files overlap with the `agent_session_id` fix in §3b, so W1 starts after both land, not before. |
+| **W1 — backend** | `display_name` on `TaskRecord` + `kage_dispatch`'s schema (§2); server-side suggested-next derivation from `claimVerdict` (§4); files-tree data already produced by `parseDiff()` exposed as structured JSON instead of client-parsed text (§3c/4). | The budget run landed, `agent_session_id` fix in §3b included — W1 no longer waits on it. The unified-session run, still in flight, also touches `mcp/delegation/dispatch.ts` and `mcp/delegation/supervisor.ts`; W1 starts once it lands too. |
 | **W2 — renderer** | Sidebar fleet (§1); Follow's session-transcript register upgrade (§3a); right panel reorder + Activity timeline (§3c); Terminal tab with the honest pause/resume label (§3b); ghost text wired to §4's server output; orchestrator banner (§6); card trim to six fields (§5); **and, same surface, same pass, the three defects below** — a UI pass that touches these files and skips known-broken adjacent code in them is not finished. | None beyond W1's data being available. |
 | **W3 — the chat composer writes into the orchestrator's own pty** | Only once the unified-session work (§1) makes Chat and Terminal the same live process instead of two that hand off — currently `retireStructuredRoom` (`room-pty.ts:231`) makes them mutually exclusive, not shared. | The unified-session work itself, in flight. |
 
