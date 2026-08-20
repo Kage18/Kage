@@ -118,6 +118,52 @@ export interface DiffStats {
   paths: string[];
 }
 
+export interface DiffFileEntry {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  added: number;
+  removed: number;
+}
+
+/**
+ * Per-file breakdown for ONE diff invocation — numstat for the +/- counts, name-status
+ * for added/modified/deleted, both run with the SAME diffArgs so the two views of the
+ * same diff can never disagree with each other. Callers pick diffArgs to match their own
+ * situation (a single ref against the working tree, or a two-dot committed-only range) —
+ * this helper makes no assumption about which, so it stays reusable without becoming a
+ * second place that decides HOW a run's diff is measured (that decision lives with the
+ * caller, mirroring verify.ts's measureDiff so the two can never disagree on totals).
+ */
+export function diffFileTree(cwd: string, diffArgs: string[]): DiffFileEntry[] {
+  const numstat = git(cwd, ["diff", ...diffArgs, "--numstat"]);
+  if (!numstat.ok || !numstat.stdout) return [];
+  const nameStatus = git(cwd, ["diff", ...diffArgs, "--name-status"]);
+  const statusByPath = new Map<string, DiffFileEntry["status"]>();
+  if (nameStatus.ok && nameStatus.stdout) {
+    for (const row of nameStatus.stdout.split("\n")) {
+      const cols = row.split("\t");
+      const code = cols[0]?.[0];
+      // A rename/copy row is "R100\told\tnew" — the destination (last column) is the
+      // path numstat itself reports, so that is the one this map must key on.
+      const path = cols[cols.length - 1];
+      if (!code || !path) continue;
+      statusByPath.set(path, code === "A" ? "added" : code === "D" ? "deleted" : "modified");
+    }
+  }
+  const entries: DiffFileEntry[] = [];
+  for (const row of numstat.stdout.split("\n")) {
+    const [added, removed, path] = row.split("\t");
+    if (!path) continue;
+    entries.push({
+      path,
+      status: statusByPath.get(path) ?? "modified",
+      added: Number(added) || 0,
+      removed: Number(removed) || 0,
+    });
+  }
+  return entries;
+}
+
 // Stage everything (including untracked files the agent created) and measure the change
 // against the branch point. Staging is how untracked work becomes visible to `git diff`;
 // it is also exactly what the commit at claim time needs.

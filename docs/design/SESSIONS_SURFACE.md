@@ -90,24 +90,20 @@ mechanism itself, which is real.
 
 ## 2. Named workers
 
-**Gap, confirmed.** `TaskRecord` has no name field at all (`contract.ts:76-117`) — the
-closest thing to a name is the run **id** itself, built by `makeRunId()`
-(`contract.ts:313-321`) from a lowercased, hyphenated slice of the intent plus a date and
-a hash (`enforce-the-per-run-budget-it-is-display-260818-1166`), which is legible but was
-never designed to be read as a name — it is the machine key. The MCP surface a manager
-uses to hire a worker, `kage_dispatch` (`mcp/index.ts:1222-1261`), has no `name` or
-`display_name` parameter in its `inputSchema` today; a manager cannot name what it
-spawns.
-
-**Design.** Add `display_name?: string` to `TaskRecord`. Set it from `kage_dispatch`'s
-manager-facing tool surface at hire time — the manager, having just written the intent,
-is in the best position to pick a short name the way AO's orchestrator named
-`haiku-notes`. When the manager doesn't set one, fall back to the first few meaningful
-words of `intent` (the same slugging `makeRunId` already does, without the date/hash
-suffix a human never needs to read). The run **id** stays the identifier everywhere
-machine-facing — steer, merge, reject, every CLI verb and API path keys off `id`, never
-the display name. Cards and the sidebar fleet show `display_name`; nothing that resolves
-a run programmatically changes.
+**Landed.** `TaskRecord.display_name` (`mcp/delegation/contract.ts`) carries a
+manager-given name, falling back to `deriveDisplayName()` (`mcp/delegation/contract.ts`)
+— the first meaningful words of `intent`, cleaned to one line and truncated on a word
+boundary, the same idea `makeRunId()`'s own slugging already applied to the run id, minus
+the date/hash suffix a human never needs to read. `createRun()` sets it once at creation,
+so every display surface reads the identical string rather than each deriving its own.
+The MCP surface a manager uses to hire a worker, `kage_dispatch` (`mcp/index.ts`), now
+carries an optional `display_name` param in its `inputSchema`, threaded through
+`dispatchRun()`'s own `displayName` option (`mcp/delegation/dispatch.ts`) — the manager,
+having just written the intent, can pick a short name the way AO's orchestrator named
+`haiku-notes`. The run **id** stays the identifier everywhere machine-facing — steer,
+merge, reject, every CLI verb and API path still key off `id`, never the display name;
+nothing that resolves a run programmatically changes. What §1's sidebar fleet still owes:
+actually reading `display_name` on a card — W2, not this wave.
 
 ## 3. The worker view: the session is the interface
 
@@ -208,23 +204,28 @@ takes the PR's place:
 
 ## 4. Ghost suggestions, Kage's way
 
-**Does not exist today, at all.** Every composer in the app carries a fixed placeholder
-string, never a dynamic one: the steer composer's `#steer-input` reads
-`"Message the agent…"` (`app-client.ts:1732`), the Room composer's `#room-input` reads
-`"Message Kage…"` (`app-html.ts:116`), the blocked-run inline answer field reads a static
-`"Answer the agent…"` (`app-client.ts:203`). Grepping `ghost` and `suggest` across the
-whole client turns up nothing.
+**The derivation is landed, server-side; no composer reads it yet — that is W2.** Every
+composer in the app still carries a fixed placeholder string, never a dynamic one: the
+steer composer's `#steer-input` reads `"Message the agent…"` (`app-client.ts:1732`), the
+Room composer's `#room-input` reads `"Message Kage…"` (`app-html.ts:116`), the
+blocked-run inline answer field reads a static `"Answer the agent…"` (`app-client.ts:203`).
+Grepping `ghost` and `suggest` across the whole CLIENT still turns up nothing — that part
+of the gap is unchanged.
 
 AO derives its ghost text from the transcript tail — whatever the worker's session says
 last is what gets echoed back into the composer, unverified. Kage has a better source
 sitting right next to it: the **verdict**, computed the same way the receipt already is.
-One function, server-side, feeding every surface (composer, notification digest,
-anywhere a suggested next step appears) so there is exactly one place this logic lives:
+`suggestedNextPrompt()` (`mcp/delegation/suggest.ts`) is now that one function,
+server-side — the single source every surface (composer, notification digest, anywhere a
+suggested next step appears) will read once W2 wires it in — and the run detail API
+already attaches its result as `suggested_next` (`mcp/delegation/api.ts`) whenever there
+is something honest to say:
 
-- **A check failed** → name the failing command (`claimVerdict()` already carries
-  `check.cmd` and `exit_code` per outcome, `verify.ts:236-244` reading `ClaimRecord.checks`,
-  `contract.ts:143-163`) — e.g. *"npm test failed — see the log."*
-- **Stalled** → quote the stall evidence. **Landed**: the stall detector
+- **A check failed** → name the failing command verbatim (`claimVerdict()` already
+  carries `check.cmd` and `exit_code` per outcome, `verify.ts:236-244` reading
+  `ClaimRecord.checks`, `contract.ts:143-163`) — e.g. *"the tests check failed: npm run
+  test --prefix mcp - fix and reverify."*
+- **Stalled** → quote the stall evidence verbatim. **Landed**: the stall detector
   (`evaluateStallTurn`, `mcp/delegation/supervisor.ts:159-207`) runs once per turn
   boundary and trips on either of two independent triggers — the same command failing
   with the same exit code `STALL_SAME_COMMAND_STREAK` (3) turns in a row, or
@@ -233,12 +234,16 @@ anywhere a suggested next step appears) so there is exactly one place this logic
   (`supervisor.ts:284`) and lands as the `note` on the run's `stopped` transition
   (`transitionRun`, `contract.ts:876`) — the same `state_history` note field §3c's
   ACTIVITY panel already reads, and that `renderRunCard` already surfaces as
-  `stopped  stalled: ...` (`contract.ts:978-983`). The data source this suggestion needed
-  now exists; wiring the composer's ghost text to read it is ordinary W1/W2 work, no
-  different from this section's other three sources.
+  `stopped  stalled: ...` (`contract.ts:978-983`). `suggestedNextPrompt()` quotes that
+  same `note` verbatim when it starts with `"stalled:"`.
 - **Ready** → *"review the receipt."*
 - **Blocked with a question** → the agent's own words, already captured verbatim in
-  `waiting_on.detail` (`contract.ts:113`) the moment a run transitions to `blocked`.
+  `waiting_on.detail` (`contract.ts:113`) the moment a run transitions to `blocked` —
+  `suggestedNextPrompt()` returns it unchanged.
+
+All four rules, and the `null` otherwise (absent means absent — no filler suggestions),
+are implemented and unit-tested against fixture claims. What remains is ordinary W2 work:
+pointing an actual composer's placeholder at `suggested_next` instead of its fixed string.
 
 ## 5. Cards: trim to AO's five, plus exactly one
 
@@ -306,7 +311,7 @@ this doc adds. Nothing here gets a pass because it's new.
 
 | Wave | Scope | Depends on |
 |---|---|---|
-| **W1 — backend** | `display_name` on `TaskRecord` + `kage_dispatch`'s schema (§2); server-side suggested-next derivation from `claimVerdict` (§4); files-tree data already produced by `parseDiff()` exposed as structured JSON instead of client-parsed text (§3c/4). | The budget run landed, `agent_session_id` fix in §3b included — W1 no longer waits on it. The unified-session run, still in flight, also touches `mcp/delegation/dispatch.ts` and `mcp/delegation/supervisor.ts`; W1 starts once it lands too. |
+| **W1 — backend** | **Landed.** `display_name` on `TaskRecord` + `kage_dispatch`'s schema (§2); server-side suggested-next derivation from `claimVerdict` (§4); a structured per-file tree on the run detail API, computed server-side instead of client-parsed text (§3c/4); orchestrator liveness + last-activity on `GET /room` (§6). | The budget run landed, `agent_session_id` fix in §3b included — W1 no longer waited on it. The unified-session run's own liveness probes (`isRoomSupervisorLive`, `isRoomPtyLive`) had already merged, which is what let §6's data land in this same wave. |
 | **W2 — renderer** | Sidebar fleet (§1); Follow's session-transcript register upgrade (§3a); right panel reorder + Activity timeline (§3c); Terminal tab with the honest pause/resume label (§3b); ghost text wired to §4's server output; orchestrator banner (§6); card trim to six fields (§5); **and, same surface, same pass, the three defects below** — a UI pass that touches these files and skips known-broken adjacent code in them is not finished. | None beyond W1's data being available. |
 | **W3 — the chat composer writes into the orchestrator's own pty** | Only once the unified-session work (§1) makes Chat and Terminal the same live process instead of two that hand off — currently `retireStructuredRoom` (`room-pty.ts:231`) makes them mutually exclusive, not shared. | The unified-session work itself, in flight. |
 

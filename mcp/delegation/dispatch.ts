@@ -45,6 +45,8 @@ import { commitWorktree, createWorktree, resolveWorkspaceKind, worktreePath } fr
 export interface DispatchOptions {
   intent: string;
   type?: RunType;
+  /** The manager's own name for this run — falls back to deriveDisplayName(intent) when absent. */
+  displayName?: string;
   /** Skip execution and return the compiled brief for approval (the dispatch gate). */
   briefOnly?: boolean;
   /** Render a live progress line while the hired agent works. */
@@ -246,6 +248,7 @@ export async function dispatchRun(projectDir: string, options: DispatchOptions, 
     intent: options.intent,
     type,
     agent: adapter.name,
+    displayName: options.displayName,
     confidence: plan.confidence,
     curatedBy: judgment ? "manager" : "kernel",
     // The flywheel's forward edge: which packets this brief carries (post-judgment,

@@ -85,6 +85,15 @@ export interface TaskRecord {
   schema_version: typeof RUN_SCHEMA_VERSION;
   id: string;
   intent: string;
+  /**
+   * Human-readable label for this run — the manager's own name if it gave one at hire
+   * time (`kage_dispatch`'s `display_name`), or `deriveDisplayName(intent)` when it
+   * didn't. Set once at creation, never re-derived on read, so every display surface
+   * (list rows, cards, sidebar) reads the SAME name instead of each deriving its own.
+   * The run id stays the only machine identity — nothing resolves a run by this field.
+   * Optional only because runs created before this field existed lack it.
+   */
+  display_name?: string;
   type: RunType;
   state: RunState;
   agent: string;
@@ -414,6 +423,8 @@ export interface CreateRunInput {
   intent: string;
   type: RunType;
   agent: string;
+  /** The manager's own name for this run — falls back to deriveDisplayName(intent) when absent. */
+  displayName?: string;
   budgets?: Partial<RunBudgets>;
   confidence?: RunConfidence;
   curatedBy?: "manager" | "kernel";
@@ -461,6 +472,28 @@ export function runTitle(run: TaskRecord): string {
   return `${truncated.trimEnd()}${ellipsis}`;
 }
 
+const DISPLAY_NAME_MAX_LENGTH = 40;
+
+/**
+ * The fallback name for a run whose caller didn't provide one: the first meaningful
+ * words of the intent, cleaned to one line and truncated on a word boundary — the same
+ * idea `makeRunId` already applies to build the run id's slug, minus the date/hash
+ * suffix a human never needs to read. Exported so createRun and every display surface
+ * that must show a name for a pre-existing run with no `display_name` on disk (recorded
+ * before this field existed) derive the identical string, never two different ones.
+ */
+export function deriveDisplayName(intent: string, maxLength: number = DISPLAY_NAME_MAX_LENGTH): string {
+  const raw = (intent ?? "").trim();
+  if (!raw) return "Untitled run";
+  const collapsed = raw.split(/\r?\n/)[0].replace(/\s+/g, " ").trim();
+  if (!collapsed) return "Untitled run";
+  if (collapsed.length <= maxLength) return collapsed;
+  const cut = collapsed.slice(0, maxLength);
+  const lastSpace = cut.lastIndexOf(" ");
+  const truncated = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+  return `${truncated}…`;
+}
+
 export function createRun(projectDir: string, input: CreateRunInput): RunView {
   const intent = input.intent.trim();
   if (!intent) throw new Error("Run intent must be a non-empty string.");
@@ -471,6 +504,7 @@ export function createRun(projectDir: string, input: CreateRunInput): RunView {
     schema_version: RUN_SCHEMA_VERSION,
     id,
     intent,
+    display_name: input.displayName?.trim() || deriveDisplayName(intent),
     type: input.type,
     state: "draft",
     agent: input.agent,
