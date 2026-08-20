@@ -18,6 +18,11 @@ export interface RoomHistoryTurn {
   tools?: string[];
   /** Card numbers the manager restated and the kernel checked on the way out. */
   corrections?: string[];
+  /** Which session actually produced a "kage" turn: the live interactive pty session,
+   * or the headless fallback (a live -p supervisor or the one-shot askManager path).
+   * Undefined for a "you" turn, or a "kage" turn from a test's askRoomFn override that
+   * never went through real routing. */
+  manager?: "pty" | "headless";
 }
 
 export function roomHistoryPath(projectDir: string, session?: string): string {

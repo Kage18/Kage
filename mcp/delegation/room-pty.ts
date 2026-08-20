@@ -13,7 +13,7 @@
 // depending on it: installs cleanly, and a real interactive claude session spawned
 // through it renders its actual banner (confirmed live, not assumed).
 import { createServer, connect, type Socket } from "node:net";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -31,6 +31,7 @@ import { MANAGER_ALLOWED_TOOLS } from "./manager-client.js";
 import { MANAGER_CONSTITUTION } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import { createWorktree } from "./worktree.js";
+import { resolveNativeTranscriptPath } from "./room-transcript.js";
 
 function roomDir(projectDir: string, session?: string): string {
   return roomDirFor(projectDir, session);
@@ -169,11 +170,18 @@ export interface RoomPtyLaunch {
 /**
  * Pure arg-building, mirroring buildManagerArgs/buildRoomLaunch elsewhere in this
  * package — testable without spawning a real pty or a real claude process.
+ *
+ * `sessionId` (--session-id) is only used on a FRESH launch, mirroring
+ * claudeLiveArgs's own --resume-vs---session-id choice in adapters/index.ts: pinning
+ * the id up front, instead of discovering it later, is what lets the caller resolve the
+ * native transcript path before the process even starts — the pty path has no
+ * structured stdout to scrape a session id back out of the way the headless one does.
+ * Never both flags at once.
  */
-export function buildRoomPtyLaunch(options: { resumeId?: string; mcpConfigPath: string; cwd: string }): RoomPtyLaunch {
+export function buildRoomPtyLaunch(options: { resumeId?: string; sessionId?: string; mcpConfigPath: string; cwd: string }): RoomPtyLaunch {
   return {
     args: [
-      ...(options.resumeId ? ["--resume", options.resumeId] : []),
+      ...(options.resumeId ? ["--resume", options.resumeId] : options.sessionId ? ["--session-id", options.sessionId] : []),
       "--mcp-config",
       options.mcpConfigPath,
       // Pre-approved so the orchestrator can act the moment it starts, same list the
@@ -185,6 +193,19 @@ export function buildRoomPtyLaunch(options: { resumeId?: string; mcpConfigPath: 
     ],
     cwd: options.cwd,
   };
+}
+
+/**
+ * Frames a full chat message as one pty write. Wrapped in xterm's bracketed-paste
+ * sequence (ESC[200~ ... ESC[201~) so any newline WITHIN the message is inserted
+ * literally into claude's input box rather than each one submitting early — the way a
+ * real terminal frames a multi-line paste — then a trailing `\r` (the byte a terminal
+ * sends for Enter; not `\n`) submits the whole thing once the paste ends. This is the
+ * choice referenced in this run's brief: bracketed paste, not raw keystroke-by-keystroke
+ * injection, because chat messages are composed elsewhere and arrive whole.
+ */
+export function frameChatInputForPty(message: string): string {
+  return `\x1b[200~${message}\x1b[201~\r`;
 }
 
 export type RoomPtyOp = { op: "write"; data: string } | { op: "resize"; cols: number; rows: number } | { op: "status" };
@@ -250,11 +271,24 @@ export async function superviseRoomPty(projectDir: string, session?: string): Pr
   // and what it does NOT fix (--resume itself was verified fine; see this run's claim).
   const currentDigest = roomPermissionDigest(mcpConfigPath);
   const { resumeId, digestChanged } = resolveRoomResumeId(readRoomSessionMeta(projectDir, session), currentDigest);
-  writeRoomSessionMeta(projectDir, { session_id: resumeId, permission_digest: currentDigest }, session);
   // Its own worktree/branch, never the user's checkout — mirrors how every run already
   // gets one (worktree.ts), just under a reserved orchestrator id instead of a run id.
   const cwd = ensureOrchestratorWorktree(projectDir, session);
-  const { args } = buildRoomPtyLaunch({ resumeId, mcpConfigPath, cwd });
+  // AO's own sessions table records agent_session_id and native_transcript_path per
+  // session — the identity that lets its chat rendering and its terminal be views of
+  // the SAME session instead of two. A resumed session already has a known id; a fresh
+  // one is assigned via --session-id up front (buildRoomPtyLaunch, below) rather than
+  // discovered later, since raw pty bytes have no structured protocol to scrape an id
+  // out of. Either way the transcript path is knowable before the process even starts,
+  // because claude's own munging of cwd+session-id into a jsonl path is pure (see
+  // resolveNativeTranscriptPath in room-transcript.ts).
+  const sessionId = resumeId ?? randomUUID();
+  writeRoomSessionMeta(
+    projectDir,
+    { session_id: sessionId, permission_digest: currentDigest, native_transcript_path: resolveNativeTranscriptPath(cwd, sessionId) },
+    session,
+  );
+  const { args } = buildRoomPtyLaunch({ resumeId, sessionId: resumeId ? undefined : sessionId, mcpConfigPath, cwd });
   const term = pty.spawn(claudeBin, args, {
     name: "xterm-256color",
     cols: 100,
