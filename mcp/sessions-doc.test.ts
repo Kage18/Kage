@@ -100,6 +100,11 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "verifyRun", file: "mcp/delegation/verify.ts" },
   { symbol: "MemoryOverview", file: "mcp/delegation/memory-view.ts" },
   { symbol: "kage_dispatch", file: "mcp/index.ts" },
+  // W1 backend (this run): display_name is no longer the doc's one deliberate absence —
+  // see the dedicated landed-gap test below for the negative-direction check.
+  { symbol: "display_name", file: "mcp/delegation/contract.ts" },
+  { symbol: "deriveDisplayName", file: "mcp/delegation/contract.ts" },
+  { symbol: "suggestedNextPrompt", file: "mcp/delegation/suggest.ts" },
 ];
 
 test("docs/design/SESSIONS_SURFACE.md exists and is a substantial design doc", () => {
@@ -140,18 +145,43 @@ test("every symbol SESSIONS_SURFACE.md cites as existing code is a real identifi
   }
 });
 
-test("the doc's display_name gap is real: no run record or dispatch tool has it yet", () => {
-  // The doc's whole §2 (Named workers) is specified as new work because TaskRecord and
-  // kage_dispatch's schema have no name field today. If either now does, §2 is stale.
+test("the doc's display_name gap is landed and cited: TaskRecord and kage_dispatch's schema both carry it now", () => {
+  // The doc's whole §2 (Named workers) used to specify display_name as new work because
+  // neither TaskRecord nor kage_dispatch's schema had a name field. This W1 run landed
+  // both (TaskRecord.display_name + deriveDisplayName in contract.ts, kage_dispatch's
+  // display_name param in mcp/index.ts) — this checks the same disagreement in the
+  // opposite direction, same precedent as the stall-detector test below: if either is
+  // ever removed, or the doc ever reverts to claiming the gap is still open, this fails.
   const contractSource = readFileSync(repoPath("mcp/delegation/contract.ts"), "utf8");
-  assert.ok(!/display_name/.test(contractSource), "expected no display_name field on TaskRecord yet — if one now exists, doc §2 is stale");
+  assert.ok(/\bdisplay_name\b/.test(contractSource), "expected TaskRecord to carry display_name now — if it was removed, doc §2 is stale in the other direction");
+  assert.ok(/\bderiveDisplayName\b/.test(contractSource), "expected deriveDisplayName to exist in contract.ts");
   const indexSource = readFileSync(repoPath("mcp/index.ts"), "utf8");
   const dispatchToolMatch = /name:\s*"kage_dispatch"[\s\S]*?required:\s*\[[^\]]*\]\s*,?\s*}\s*,?\s*}/.exec(indexSource);
   assert.ok(dispatchToolMatch, "expected to find the kage_dispatch tool's inputSchema block in mcp/index.ts");
+  assert.ok(/display_name/.test(dispatchToolMatch![0]), "expected kage_dispatch's inputSchema to carry display_name now — if it was removed, doc §2 is stale in the other direction");
+  const doc = readDoc();
   assert.ok(
-    !/display_name|"name":\s*{\s*type:\s*"string"/.test(dispatchToolMatch![0]),
-    "expected kage_dispatch's inputSchema to have no name/display_name param yet — if one now exists, doc §2 is stale",
+    doc.includes("TaskRecord.display_name") && doc.includes("deriveDisplayName"),
+    "doc's §2 should cite the real display_name/deriveDisplayName symbols now that the gap has landed",
   );
+  assert.ok(!/\*\*gap, confirmed\.\*\*\s*`TaskRecord` has no name field/i.test(doc), "doc should no longer describe display_name as an unbuilt gap");
+});
+
+test("the doc's ghost-suggestion derivation is landed and cited: suggestedNextPrompt is real, and the doc no longer calls it fully unbuilt", () => {
+  // §4 used to open with "Does not exist today, at all." This W1 run landed the one
+  // server-side derivation function plus its API attachment (suggested_next); wiring an
+  // actual composer to read it is still open (W2) — the doc must say exactly that, not
+  // claim the whole feature is unbuilt.
+  const suggestSource = readFileSync(repoPath("mcp/delegation/suggest.ts"), "utf8");
+  assert.ok(/\bsuggestedNextPrompt\b/.test(suggestSource), "expected suggestedNextPrompt to exist in mcp/delegation/suggest.ts");
+  const apiSource = readFileSync(repoPath("mcp/delegation/api.ts"), "utf8");
+  assert.ok(/\bsuggested_next\b/.test(apiSource), "expected the run detail API to attach suggested_next");
+  const doc = readDoc();
+  assert.ok(
+    doc.includes("suggestedNextPrompt") && doc.includes("suggested_next"),
+    "doc's §4 should cite the real suggestedNextPrompt/suggested_next symbols now that the derivation has landed",
+  );
+  assert.ok(!/does not exist today, at all/i.test(doc), "doc should no longer describe ghost suggestions as fully unbuilt");
 });
 
 test("the doc's stall-detector gap is landed and cited: the detector is real and the doc names it, not as a gap", () => {

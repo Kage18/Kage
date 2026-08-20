@@ -50,12 +50,20 @@ import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./recover
 import { adapterByName } from "./adapters/index.js";
 import { eventsSincePage } from "./report.js";
 import { claimVerdict, renderClaimCard } from "./verify.js";
+import { suggestedNextPrompt } from "./suggest.js";
 import { readActivity } from "./progress.js";
-import { git } from "./git.js";
+import { currentBranch, diffFileTree, git, type DiffFileEntry } from "./git.js";
 import { worktreePath } from "./worktree.js";
 import { askManager } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
-import { askRoomSupervisor, dispatchRoomSupervisor, isRoomSupervisorLive, readRoomSessionMeta, type RoomStreamEvent } from "./room-supervisor.js";
+import {
+  askRoomSupervisor,
+  dispatchRoomSupervisor,
+  isRoomSupervisorLive,
+  readRoomSessionMeta,
+  readRoomSupervisorRecord,
+  type RoomStreamEvent,
+} from "./room-supervisor.js";
 import { readNativeTranscriptPage, waitForNewAssistantTurns, TRANSCRIPT_PAGE_CAP } from "./room-transcript.js";
 import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
@@ -69,6 +77,7 @@ import {
   dispatchRoomPtySupervisor,
   frameChatInputForPty,
   isRoomPtyLive,
+  readRoomPtyRecord,
   retirePtyRoom,
   retireStructuredRoom,
   type RoomPtyAttachment,
@@ -633,6 +642,59 @@ function runDiffText(projectDir: string, runId: string): string {
   return parts.join("\n");
 }
 
+/**
+ * The run's diff as a per-file tree — path, added/modified/deleted, +/- lines — the data
+ * behind the FILES panel (docs/design/SESSIONS_SURFACE.md §3c/4). Uses the SAME
+ * single-ref technique verify.ts's measureDiff already uses at claim/reverify time
+ * (merge-base against the working tree, one git invocation family) whenever the run's
+ * own worktree is still on disk, so this can never disagree with the diff-size check's
+ * own totals the way summing two separately-measured diffs (committed range, then a
+ * second uncommitted-only diff) could double-count a file touched both ways — exactly
+ * the class of bug the diff-size check itself was just fixed for. Falls back to a
+ * two-dot committed-only range in the PROJECT's own checkout only once the run's
+ * worktree is gone (a merged or cleaned-up run has no working tree left to fold in).
+ */
+export function runFilesTree(projectDir: string, runId: string): DiffFileEntry[] {
+  const run = readRun(projectDir, runId);
+  const worktree = worktreePath(projectDir, runId);
+  if (existsSync(worktree)) {
+    git(worktree, ["add", "-A"]);
+    const base = currentBranch(projectDir);
+    const mergeBase = git(worktree, ["merge-base", "HEAD", base]);
+    if (mergeBase.ok && mergeBase.stdout) return diffFileTree(worktree, [mergeBase.stdout]);
+  }
+  const branchExists = git(projectDir, ["rev-parse", "--verify", "--quiet", run.branch]).ok;
+  if (branchExists) {
+    const mergeBase = git(projectDir, ["merge-base", "HEAD", run.branch]);
+    if (mergeBase.ok && mergeBase.stdout) return diffFileTree(projectDir, [`${mergeBase.stdout}..${run.branch}`]);
+  }
+  return [];
+}
+
+/**
+ * Whether the orchestrator's own session (Room, docs/design/SESSIONS_SURFACE.md §6) is
+ * live for this project, plus when it last did anything — the data behind the presence
+ * banner. "Live" means either register a person could be talking to right now: the
+ * structured (headless) supervisor, or the pty Terminal — `retireStructuredRoom` keeps
+ * the two mutually exclusive per thread, but either one being up counts as the
+ * orchestrator being up. Sourced from the SAME liveness probes (isRoomSupervisorLive,
+ * isRoomPtyLive) every other surface already trusts, never a separate guess. Activity
+ * prefers the last recorded room turn (the freshest signal); a live session with no
+ * turns yet (just started) falls back to its own record's started_at rather than
+ * reporting no activity at all for a session that plainly exists.
+ */
+export async function orchestratorPresence(projectDir: string, session?: string): Promise<{ live: boolean; activity_at: string | null }> {
+  const [supervisorLive, ptyLive] = await Promise.all([isRoomSupervisorLive(projectDir, session), isRoomPtyLive(projectDir, session)]);
+  const turns = readRoomHistory(projectDir, session);
+  const lastTurnAt = turns.length ? turns[turns.length - 1].at : null;
+  const supervisorRecord = readRoomSupervisorRecord(projectDir, session);
+  const ptyRecord = readRoomPtyRecord(projectDir, session);
+  return {
+    live: supervisorLive || ptyLive,
+    activity_at: lastTurnAt ?? supervisorRecord?.started_at ?? ptyRecord?.started_at ?? null,
+  };
+}
+
 function runDetail(projectDir: string, runId: string): Record<string, unknown> {
   const run = readRun(projectDir, runId);
   const owningGoal = goalForRun(projectDir, runId);
@@ -640,9 +702,10 @@ function runDetail(projectDir: string, runId: string): Record<string, unknown> {
   const briefFile = join(runDir(projectDir, runId), "brief.md");
   if (existsSync(briefFile)) detail.brief = readFileSync(briefFile, "utf8");
   const claimFile = join(runDir(projectDir, runId), "claim.json");
+  let claim: ClaimRecord | null = null;
   if (existsSync(claimFile)) {
     try {
-      const claim = JSON.parse(readFileSync(claimFile, "utf8")) as ClaimRecord;
+      claim = JSON.parse(readFileSync(claimFile, "utf8")) as ClaimRecord;
       detail.claim = claim;
       detail.receipt = renderClaimCard(claim, { budget: run.budgets.diff_lines, task: run });
       // The verdict travels WITH the claim, computed by the kernel that ran the checks.
@@ -653,9 +716,17 @@ function runDetail(projectDir: string, runId: string): Record<string, unknown> {
       // prevent, so the verdict is now a fact the surface renders, never one it decides.
       detail.verdict = claimVerdict(claim);
     } catch {
+      claim = null;
       // A torn claim never breaks the detail view; the receipt tab shows nothing.
     }
   }
+  // The composer's pre-filled ghost suggestion, derived server-side from the SAME
+  // verdict the receipt already reads — never the transcript tail. Absent means
+  // absent: a run with nothing honest to suggest carries no suggested_next key at all,
+  // same convention as `taught` below.
+  const suggestion = suggestedNextPrompt(run, claim);
+  if (suggestion) detail.suggested_next = suggestion;
+  detail.files = runFilesTree(projectDir, runId);
   // The flywheel's backward edge: the packets this run ratified into team memory.
   // Empty until a merge ratifies something — the surface then says nothing.
   const taught = packetsTaughtByRun(projectDir, runId);
@@ -904,12 +975,17 @@ export async function handleDelegationRoute(
 
   if (path === "/room" && method === "GET") {
     const key = normalizeSessionKey(url.searchParams.get("session"));
+    // The presence banner's data (docs/design/SESSIONS_SURFACE.md §6): whether an
+    // orchestrator session is live for this project, and when it last did anything.
+    const presence = await orchestratorPresence(projectDir, key);
     json(res, 200, {
       ok: true,
       session: key,
       sessions: listRoomSessions(projectDir),
       turns: readRoomHistory(projectDir, key),
       busy: roomStateFor(ctx, key).pending > 0,
+      orchestrator_live: presence.live,
+      orchestrator_activity_at: presence.activity_at,
     });
     return true;
   }

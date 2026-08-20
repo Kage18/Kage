@@ -1229,6 +1229,11 @@ const DELEGATION_TOOLS = [
         intent: { type: "string" },
         type: { type: "string", enum: [...RUN_TYPES] },
         agent: { type: "string", enum: ["claude", "codex", "stub"] },
+        display_name: {
+          type: "string",
+          description:
+            "A short name for this run — shown in the sidebar, cards, and list rows. Pick one the way you'd name a hired worker (e.g. \"haiku-notes\"). Omit to derive one from the intent.",
+        },
         drop_memories: {
           type: "array",
           description: "Recalled memories you judged irrelevant to this task. Each needs a reason.",
@@ -1511,6 +1516,7 @@ async function runDelegationTool(
     // Unlike the CLI, this tool cannot block on followRun to wait for a verdict — it must
     // return promptly with the run id so the caller can poll kage_task / kage_room_state.
     const budgetUsd = typeof args?.budget_usd === "number" ? args.budget_usd : undefined;
+    const displayName = typeof args?.display_name === "string" ? args.display_name.trim() || undefined : undefined;
     const held = await dispatchRun(
       projectDir,
       {
@@ -1520,6 +1526,7 @@ async function runDelegationTool(
         briefOnly: true,
         ...(goalId ? { goalId } : {}),
         ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+        ...(displayName ? { displayName } : {}),
       },
       adapter,
     );
