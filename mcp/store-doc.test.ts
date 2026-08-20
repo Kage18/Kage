@@ -27,11 +27,18 @@
 // `.agent_memory/` artifacts in a greppable form — any of those fails a test in this file.
 //
 // M1 landed 2026-08-20 (mcp/store/{types,sqlite,json,manifest,rebuild}.ts,
-// mcp/store-layer.test.ts): the guard below is now bidirectional, not a
-// single "doesn't exist yet" check. It fails if mcp/store/ or any of its
-// five files goes missing, or if the doc stops saying M1 landed, or if
-// mcp/kernel.ts starts importing from mcp/store/ or referencing
-// StoreBackend before M2/M3 actually wire the seam in.
+// mcp/store-layer.test.ts): the guard below is bidirectional, not a single
+// "doesn't exist yet" check. It fails if mcp/store/ or any of its five
+// files goes missing, or if the doc stops saying M1 landed.
+//
+// M2 landed the same day (mcp/kernel.ts routes packet/path, docs-FTS, and
+// vector reads/writes through openStore(); mcp/cli.ts ships `kage store
+// status`/`kage store rebuild`; mcp/store-port.test.ts is M2's own test
+// file): the same pattern repeats one phase later -- a test below now fails
+// if kernel.ts stops calling openStore()/replaceDocsFtsDocs()/
+// replaceVectorDocuments(), or if the doc stops saying M2 landed, AND a
+// separate test still fails if M3's graph-side writes (upsertKgEntities and
+// friends) show up in kernel.ts before M3 actually lands.
 //
 // __dirname is mcp/dist/ at runtime (compiled test) — one ".." reaches sibling mcp/
 // sources, two reaches the repo root. Same convention as readme-claims.test.ts,
@@ -93,7 +100,7 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "recall", file: "mcp/kernel.ts" },
   { symbol: "recallWithVectorScores", file: "mcp/kernel.ts" },
   { symbol: "loadApprovedPackets", file: "mcp/kernel.ts" },
-  { symbol: "readSparseVectorIndex", file: "mcp/kernel.ts" },
+  { symbol: "scorePacketsVectorFromStore", file: "mcp/kernel.ts" },
   { symbol: "searchDocs", file: "mcp/kernel.ts" },
   { symbol: "readDocsIndex", file: "mcp/kernel.ts" },
   { symbol: "queryCodeGraph", file: "mcp/kernel.ts" },
@@ -122,6 +129,14 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "JsonStoreBackend", file: "mcp/store/json.ts" },
   { symbol: "openStore", file: "mcp/store/manifest.ts" },
   { symbol: "rebuildStore", file: "mcp/store/rebuild.ts" },
+  // M2 landed 2026-08-20 -- see the "M2 seam is wired into kernel.ts" test
+  // below for the directory/call-site half of this guard.
+  { symbol: "openStore", file: "mcp/kernel.ts" },
+  { symbol: "buildPacketIndexes", file: "mcp/kernel.ts" },
+  { symbol: "replaceDocsFtsDocs", file: "mcp/store/types.ts" },
+  { symbol: "replaceVectorDocuments", file: "mcp/store/types.ts" },
+  { symbol: "listDocsFtsDocs", file: "mcp/store/types.ts" },
+  { symbol: "loadDocsChunks", file: "mcp/store/rebuild.ts" },
 ];
 
 test("docs/design/MEMORY_STORE.md exists and is a substantial design doc", () => {
@@ -201,18 +216,41 @@ test("M1's store seam exists as shipped code, and the doc says M1 landed", () =>
   }
 });
 
-test("M2/M3 have not wired the store seam into mcp/kernel.ts yet, and the doc still marks them not built", () => {
-  // The other half of the same guard: M1 landing must not be mistaken for
-  // M2/M3 landing. mcp/kernel.ts must still own every artifact this design
-  // is meant to eventually move behind the seam -- if StoreBackend (or an
-  // import from mcp/store/) shows up in kernel.ts, M2/M3 have started and
-  // this doc's "Not yet built" rows are now stale.
+test("M2's store seam is wired into mcp/kernel.ts, and the doc says M2 landed", () => {
+  // Mirror image of M1's own guard test above: this now fails if the seam
+  // disappears out from under the doc, or if the doc stops saying M2 landed
+  // while the code still routes through it.
   const kernelSource = readFileSync(repoPath("mcp", "kernel.ts"), "utf8");
-  assert.ok(!/\bStoreBackend\b/.test(kernelSource), "expected no StoreBackend identifier in mcp/kernel.ts yet -- that's M2/M3's job, not M1's");
-  assert.ok(!/from\s+["']\.\/store\//.test(kernelSource) && !/require\(["']\.\/store\//.test(kernelSource), "expected mcp/kernel.ts to not import from mcp/store/ yet -- that's M2/M3's job, not M1's");
+  assert.ok(/from\s+["']\.\/store\/manifest\.js["']/.test(kernelSource), "expected mcp/kernel.ts to import openStore from ./store/manifest.js -- M2 landed 2026-08-20 and this doc says so");
+  assert.ok(/\bopenStore\(/.test(kernelSource), "expected mcp/kernel.ts to call openStore() -- M2's actual wiring, not just an import");
+  assert.ok(/\breplaceDocsFtsDocs\(/.test(kernelSource), "expected mcp/kernel.ts to write docs through replaceDocsFtsDocs");
+  assert.ok(/\breplaceVectorDocuments\(/.test(kernelSource), "expected mcp/kernel.ts to write the vector index through replaceVectorDocuments");
 
   const doc = readDoc();
-  assert.ok(/M2 — the memory-side port\*\*\s*\|\s*Not yet built/.test(doc), "doc's M2 row should still say Not yet built");
+  assert.ok(doc.includes("M2 — the memory-side port") && doc.includes("**Landed 2026-08-20.**"), "doc's M2 row should say M2 landed 2026-08-20, not just describe it as proposed");
+  for (const symbol of ["openStore", "replaceDocsFtsDocs", "replaceVectorDocuments", "scorePacketsVectorFromStore"]) {
+    assert.ok(doc.includes(symbol), `doc's M2 row should name the real symbol "${symbol}" it landed`);
+  }
+});
+
+// PATH_TOKEN-style regex match against a bold table-cell phrase must account
+// for the bold-close ** landing directly against the pipe with no space --
+// e.g. "**M3 — the graph-side port** | Not yet built" has ** immediately
+// before the |, so a naive \s*\|\s* right after the phrase text can miss it.
+// (Caught by actually running this test, not by inspection -- see the repo
+// memory packet on this exact gotcha, captured while landing M1's own guard.)
+test("M3 has not wired the store seam into mcp/kernel.ts yet, and the doc still marks it not built", () => {
+  const kernelSource = readFileSync(repoPath("mcp", "kernel.ts"), "utf8");
+  // M2 legitimately calls openStore()/upsertPackets()/etc. now; the
+  // structural- and knowledge-graph writes are M3's own scope and the
+  // tripwire here -- if kernel.ts starts calling any of these, M3 has
+  // started and the doc's M3/M4 "Not yet built" rows are now stale.
+  assert.ok(
+    !/\bupsertKgEntities\(|\bupsertKgEdges\(|\bupsertKgEpisodes\(|\bbackend\.upsertFiles\(|\bbackend\.upsertSymbols\(/.test(kernelSource),
+    "expected mcp/kernel.ts to not write the structural/knowledge graph through the store seam yet -- that's M3's job, not M2's",
+  );
+
+  const doc = readDoc();
   assert.ok(/M3 — the graph-side port\*\*\s*\|\s*Not yet built/.test(doc), "doc's M3 row should still say Not yet built");
   assert.ok(/M4 — benchmarks and the scale guard\*\*\s*\|\s*Not yet built/.test(doc), "doc's M4 row should still say Not yet built");
 });

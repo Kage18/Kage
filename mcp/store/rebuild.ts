@@ -95,6 +95,7 @@ interface DocsChunkLike {
   heading: string;
   anchor: string;
   text: string;
+  line: number;
 }
 interface DocsIndexArtifactLike {
   chunks: DocsChunkLike[];
@@ -167,9 +168,20 @@ function loadKgEpisodes(projectDir: string): KgEpisodeRow[] {
   return episodes.map((episode) => ({ id: episode.id, ts: episode.observed_at, summary: episode.summary }));
 }
 
-function loadDocsChunks(projectDir: string): Array<{ id: string; docPath: string; heading: string; body: string }> {
+function loadDocsChunks(projectDir: string): Array<{ id: string; docPath: string; heading: string; body: string; anchor: string; line: number }> {
   const artifact = readJsonSafe<DocsIndexArtifactLike>(join(memoryDir(projectDir), "indexes", "docs-index.json"), { chunks: [] });
-  return artifact.chunks.map((chunk) => ({ id: `${chunk.doc_path}#${chunk.anchor}`, docPath: chunk.doc_path, heading: chunk.heading, body: chunk.text }));
+  // `${doc_path}#${anchor}` alone collides: a long section under one heading
+  // splits into several DOCS_CHUNK_MAX_CHARS-sized chunks that all share the
+  // same doc_path + anchor, so a bare doc_path#anchor id silently drops every
+  // chunk but the last one on upsert -- the running index disambiguates.
+  return artifact.chunks.map((chunk, index) => ({
+    id: `${chunk.doc_path}#${chunk.anchor}#${index}`,
+    docPath: chunk.doc_path,
+    heading: chunk.heading,
+    body: chunk.text,
+    anchor: chunk.anchor,
+    line: chunk.line,
+  }));
 }
 
 function loadVectorDocuments(projectDir: string): SparseVectorDocumentLike[] {
@@ -217,11 +229,17 @@ function populate(backend: StoreBackend, projectDir: string): Record<string, num
   backend.upsertPackets(packetRows);
   backend.upsertPacketPaths(pathRows);
   backend.upsertPacketSymbols(symbolRows);
-  for (const chunk of docsChunks) backend.upsertDocsFtsDoc(chunk);
-  for (const document of vectorDocuments) {
-    const terms: VectorChunkRow[] = document.terms.map(([term, weight]) => ({ packetId: document.packet_id, term, weight }));
-    backend.upsertVectorChunks(document.packet_id, terms);
-  }
+  // Bulk, not one upsert per doc/packet -- the JSON backend's upsert
+  // contract is a whole-file rewrite per call (mcp/store/json.ts), so a
+  // per-item loop over hundreds of chunks/packets would cost O(n) whole-
+  // file rewrites on every rebuild instead of one.
+  backend.replaceDocsFtsDocs(docsChunks.map((chunk) => ({ id: chunk.id, docPath: chunk.docPath, heading: chunk.heading, body: chunk.body, anchor: chunk.anchor, line: chunk.line })));
+  backend.replaceVectorDocuments(
+    vectorDocuments.map((document) => ({
+      packetId: document.packet_id,
+      terms: document.terms.map(([term, weight]): VectorChunkRow => ({ packetId: document.packet_id, term, weight })),
+    })),
+  );
   backend.upsertKgEntities(kgEntities);
   backend.upsertKgEdges(kgEdges);
   backend.upsertKgEpisodes(kgEpisodes);

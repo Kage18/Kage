@@ -51,6 +51,8 @@ import { Worker } from "node:worker_threads";
 import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
+import { openStore } from "./store/manifest.js";
+import type { DocsFtsDoc, StoreBackend, VectorCandidate, VectorChunkRow } from "./store/types.js";
 
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -315,18 +317,10 @@ export interface KageContextSlotWriteResult {
   errors: string[];
 }
 
-interface SparseVectorDocument {
-  packet_id: string;
-  terms: Array<[string, number]>;
-  norm: number;
-}
-
-interface SparseVectorIndex {
-  schema_version: 1;
-  generated_from_updated_at: string | null;
-  packet_count: number;
-  documents: SparseVectorDocument[];
-}
+// The sparse vector index used to be a whole-file JSON artifact hydrated
+// here (SparseVectorIndex/SparseVectorDocument). It now lives behind the
+// StoreBackend seam (mcp/store/, docs/design/MEMORY_STORE.md M2) --
+// scorePacketsVectorFromStore below reads it through openStore() instead.
 
 interface DenseEmbeddingProvider {
   name: string;
@@ -9003,6 +8997,17 @@ function chunkDoc(docPath: string, text: string): DocsChunk[] {
   return chunks;
 }
 
+// Every chunk's id must be unique even when a long section under one heading
+// splits into several DOCS_CHUNK_MAX_CHARS-sized pieces that all share the
+// same doc_path + anchor -- the running index disambiguates those.
+function docsChunkStoreId(chunk: DocsChunk, index: number): string {
+  return `${chunk.doc_path}#${chunk.anchor}#${index}`;
+}
+
+function docsChunkToFtsDoc(chunk: DocsChunk, index: number): DocsFtsDoc {
+  return { id: docsChunkStoreId(chunk, index), docPath: chunk.doc_path, heading: chunk.heading, body: chunk.text, anchor: chunk.anchor, line: chunk.line };
+}
+
 export function buildDocsIndex(projectDir: string): DocsIndexArtifact {
   const docFiles = discoverDocFiles(projectDir);
   const chunks: DocsChunk[] = [];
@@ -9019,19 +9024,36 @@ export function buildDocsIndex(projectDir: string): DocsIndexArtifact {
     chunk_count: chunks.length,
     chunks,
   };
-  writeJson(join(indexesDir(projectDir), "docs-index.json"), artifact);
+  // Routed through the StoreBackend seam (docs/design/MEMORY_STORE.md M2):
+  // one bulk call, not one upsert per chunk -- the JSON backend's upsert
+  // contract is a whole-file rewrite per call (see mcp/store/json.ts), so a
+  // per-chunk loop here would cost O(chunks) whole-file rewrites on every
+  // `kage refresh`.
+  const { backend } = openStore(projectDir);
+  try {
+    backend.replaceDocsFtsDocs(chunks.map(docsChunkToFtsDoc));
+  } finally {
+    backend.close();
+  }
   return artifact;
 }
 
 function readDocsIndex(projectDir: string): DocsIndexArtifact | null {
-  const path = join(indexesDir(projectDir), "docs-index.json");
-  if (!existsSync(path)) return null;
+  const { backend } = openStore(projectDir);
   try {
-    const artifact = readJson<DocsIndexArtifact>(path);
-    if (!Array.isArray(artifact?.chunks)) return null;
-    return artifact;
-  } catch {
-    return null;
+    const hits = backend.listDocsFtsDocs();
+    if (!hits.length) return null; // never built yet -- caller falls back to buildDocsIndex()
+    const chunks: DocsChunk[] = hits.map((hit) => ({ doc_path: hit.docPath, heading: hit.heading, anchor: hit.anchor, text: hit.body, line: hit.line }));
+    return {
+      schema_version: DOCS_INDEX_SCHEMA_VERSION,
+      generated_at: "",
+      source: "repo-docs",
+      doc_count: new Set(chunks.map((chunk) => chunk.doc_path)).size,
+      chunk_count: chunks.length,
+      chunks,
+    };
+  } finally {
+    backend.close();
   }
 }
 
@@ -9156,11 +9178,42 @@ function buildPacketIndexes(projectDir: string): string[] {
     join(indexesDir(projectDir), "by-tag.json"),
     join(indexesDir(projectDir), "by-type.json"),
   ];
+  // catalog.json/by-path.json/by-tag.json/by-type.json stay direct writeJson
+  // calls: PacketRow (mcp/store/types.ts) carries only id/type/status/score/
+  // updatedAt, not title/summary/tags/paths/source_refs/repo_state, so it
+  // cannot reconstruct catalog.json byte-for-byte without widening M1's row
+  // shape in a way that breaks its own getPacket() deepEqual test
+  // (mcp/store-layer.test.ts:82). by-path/by-tag/by-type are confirmed dead
+  // weight -- grepping this file finds them written and existence-checked,
+  // never content-read back (docs/design/MEMORY_STORE.md, "One correction
+  // worth stating plainly") -- so there is no seam benefit to routing their
+  // bytes through a backend nothing queries. Their packet-id/type/status/
+  // path FACTS still flow into the store just below, for queryPacketsByPath
+  // and the sqlite backend's own future consumers.
   writeJson(written[0], catalog);
   writeJson(written[1], byPath);
   writeJson(written[2], byTag);
   writeJson(written[3], byType);
-  written.push(writeSparseVectorIndex(projectDir, packets));
+
+  // Vector index and packet/path rows, routed through the StoreBackend seam
+  // (docs/design/MEMORY_STORE.md M2). One bulk replaceVectorDocuments call,
+  // not one upsertVectorChunks per packet -- see buildDocsIndex's docstring
+  // for why a per-item loop would be quadratic on the JSON backend.
+  const { backend } = openStore(projectDir);
+  try {
+    backend.upsertPackets(packets.map((packet) => ({ id: packet.id, type: packet.type, status: packet.status, score: null, updatedAt: packet.updated_at })));
+    backend.upsertPacketPaths(packets.flatMap((packet) => packet.paths.map((path) => ({ packetId: packet.id, path, sha256: null }))));
+    backend.replaceVectorDocuments(
+      packets.map((packet) => ({
+        packetId: packet.id,
+        terms: [...packetSparseVector(packet).entries()].map(([term, weight]): VectorChunkRow => ({ packetId: packet.id, term, weight })),
+      })),
+      { generatedFromUpdatedAt: catalog.generated_from_updated_at },
+    );
+  } finally {
+    backend.close();
+  }
+  written.push(join(indexesDir(projectDir), "vector-local.json"));
   // Docs search index over the repo's own committed documentation. Built here so
   // it stays current through both indexProject and refreshProject.
   buildDocsIndex(projectDir);
@@ -10031,25 +10084,56 @@ function scorePacketsVector(queryTerms: string[], packets: MemoryPacket[]): Map<
   return result;
 }
 
-function scorePacketsVectorFromIndex(queryTerms: string[], index: SparseVectorIndex | null): Map<string, VectorScore> {
+// Replaces scorePacketsVectorFromIndex's old whole-file hydration
+// (SparseVectorIndex) with the StoreBackend seam (docs/design/MEMORY_STORE.md
+// M2): `candidates` already carries only the rows whose term the query asked
+// about, plus each row's packetId-wide norm (VectorCandidate.norm) -- enough
+// for cosine scoring without ever hydrating a document's full term list, the
+// same math scorePacketsVectorFromIndex ran, just sourced from store rows
+// instead of a parsed array.
+function scorePacketsVectorFromCandidates(queryTerms: string[], candidates: VectorCandidate[]): Map<string, VectorScore> {
   const terms = expandQueryTerms(queryTerms);
   const queryVector = termVector(terms);
   const queryNorm = vectorNorm(queryVector);
   const result = new Map<string, VectorScore>();
-  if (!index || !terms.length || queryNorm <= 0 || !index.documents.length) return result;
+  if (!terms.length || queryNorm <= 0 || !candidates.length) return result;
 
-  for (const document of index.documents) {
-    const documentVector = new Map<string, number>(document.terms);
-    const score = cosineScore(queryVector, queryNorm, documentVector, document.norm);
+  const byPacket = new Map<string, { vector: Map<string, number>; norm: number }>();
+  for (const candidate of candidates) {
+    const entry = byPacket.get(candidate.packetId) ?? { vector: new Map<string, number>(), norm: candidate.norm };
+    entry.vector.set(candidate.term, candidate.weight);
+    byPacket.set(candidate.packetId, entry);
+  }
+
+  for (const [packetId, { vector: documentVector, norm }] of byPacket) {
+    const score = cosineScore(queryVector, queryNorm, documentVector, norm);
     if (score <= 0) continue;
     const why = terms
       .filter((term) => queryVector.has(term) && documentVector.has(term))
       .slice(0, 5)
       .map((term) => `vector-local-index:${term}`);
-    result.set(document.packet_id, { score: Number((score * 0.75).toFixed(2)), why });
+    result.set(packetId, { score: Number((score * 0.75).toFixed(2)), why });
   }
 
   return result;
+}
+
+// Freshness-gated store read: if the store's vector rows don't cover exactly
+// today's approved packet set, a stale index would silently misscore, so
+// this falls back to live in-memory scoring (scorePacketsVector) instead --
+// the same guarantee readSparseVectorIndex's packet_count/generated_from
+// checks gave before the store existed, narrowed to an id-set comparison
+// (see mcp/store/types.ts's listVectorPacketIds doc for why: the sqlite
+// backend has no cheap single "generated_from" stamp to compare, only row
+// presence).
+function scorePacketsVectorFromStore(backend: StoreBackend, queryTerms: string[], approvedPackets: MemoryPacket[]): Map<string, VectorScore> {
+  const approvedIds = new Set(approvedPackets.map((packet) => packet.id));
+  const storedIds = new Set(backend.listVectorPacketIds());
+  const isFresh = approvedIds.size === storedIds.size && [...approvedIds].every((id) => storedIds.has(id));
+  if (!isFresh) return scorePacketsVector(queryTerms, approvedPackets);
+  const terms = expandQueryTerms(queryTerms);
+  if (!terms.length) return new Map();
+  return scorePacketsVectorFromCandidates(queryTerms, backend.queryVectorCandidates(terms));
 }
 
 function packetSparseVector(packet: MemoryPacket): Map<string, number> {
@@ -10061,49 +10145,6 @@ function packetSparseVector(packet: MemoryPacket): Map<string, number> {
     ...tokenize(packet.type).flatMap((term) => [term, lexicalStem(term)]),
     ...tokenize(packet.body).flatMap((term) => [term, lexicalStem(term)]),
   ]);
-}
-
-function buildSparseVectorIndex(packets: MemoryPacket[]): SparseVectorIndex {
-  return {
-    schema_version: 1,
-    generated_from_updated_at: packets.map((packet) => packet.updated_at).sort().at(-1) ?? null,
-    packet_count: packets.length,
-    documents: packets.map((packet) => {
-      const vector = packetSparseVector(packet);
-      return {
-        packet_id: packet.id,
-        terms: Array.from(vector.entries()).sort(([a], [b]) => a.localeCompare(b)),
-        norm: Number(vectorNorm(vector).toFixed(6)),
-      };
-    }),
-  };
-}
-
-function writeSparseVectorIndex(projectDir: string, packets: MemoryPacket[]): string {
-  const path = join(indexesDir(projectDir), "vector-local.json");
-  writeJson(path, buildSparseVectorIndex(packets));
-  return path;
-}
-
-function readSparseVectorIndex(projectDir: string, packets: MemoryPacket[]): SparseVectorIndex | null {
-  const path = join(indexesDir(projectDir), "vector-local.json");
-  if (!existsSync(path)) return null;
-  try {
-    const index = readJson<SparseVectorIndex>(path);
-    if (index.schema_version !== 1) return null;
-    if (index.packet_count !== packets.length) return null;
-    const generatedFrom = packets.map((packet) => packet.updated_at).sort().at(-1) ?? null;
-    if (index.generated_from_updated_at !== generatedFrom) return null;
-    const packetIds = new Set(packets.map((packet) => packet.id));
-    if (index.documents.length !== packets.length) return null;
-    for (const document of index.documents) {
-      if (!packetIds.has(document.packet_id)) return null;
-      if (!Array.isArray(document.terms) || !Number.isFinite(document.norm)) return null;
-    }
-    return index;
-  } catch {
-    return null;
-  }
 }
 
 function denseEmbeddingIndexPath(projectDir: string): string {
@@ -10723,10 +10764,17 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   const baseScores = scorePacketsBm25(expansion.baseTerms, approvedPackets);
   const temporalScores = scorePacketsBm25(expansion.temporalTerms, approvedPackets);
   const semanticScores = scorePacketsBm25(expansion.semanticTerms, approvedPackets);
-  const sparseVectorIndex = externalVectorScores ? null : readSparseVectorIndex(projectDir, approvedPackets);
-  const vectorScores = externalVectorScores ?? (sparseVectorIndex
-    ? scorePacketsVectorFromIndex(terms, sparseVectorIndex)
-    : scorePacketsVector(terms, approvedPackets));
+  let vectorScores: Map<string, VectorScore>;
+  if (externalVectorScores) {
+    vectorScores = externalVectorScores;
+  } else {
+    const { backend } = openStore(projectDir);
+    try {
+      vectorScores = scorePacketsVectorFromStore(backend, terms, approvedPackets);
+    } finally {
+      backend.close();
+    }
+  }
   const referenceBodyScores = scoreReferenceBodyBm25(terms, approvedPackets);
   const accessEntries = readMemoryAccessEntries(projectDir, approvedPackets);
   const graphLookup = recallGraphLookup(knowledgeGraph);

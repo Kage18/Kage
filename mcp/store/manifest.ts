@@ -60,19 +60,24 @@ export interface OpenStoreResult {
 }
 
 /**
- * The only door M2/M3 use to get a StoreBackend. Picks SqliteStoreBackend
- * when node:sqlite is feature-detected as available (mcp/store/sqlite.ts's
- * detect()) and nothing forces JSON; otherwise picks JsonStoreBackend.
- * A forced backend -- via `opts.forceBackend` or a persisted
- * `manifest.forced_backend` -- always wins over detection, in that order.
- * Opens the chosen backend, migrates it, updates and persists the
- * manifest's `active_backend`, and returns both.
+ * The only door M2/M3 use to get a StoreBackend. A forced backend -- via
+ * `opts.forceBackend` or a persisted `manifest.forced_backend` -- always
+ * wins, in that order (a user's explicit opt-in). Absent a force, the
+ * default stays JsonStoreBackend even when node:sqlite is feature-detected
+ * available (mcp/store/sqlite.ts's detect()) UNTIL the manifest records a
+ * completed migration -- `manifest.last_rebuild_at` set by a prior
+ * `rebuildStore()`/`kage store rebuild` run, docs/design/MEMORY_STORE.md's
+ * "lazy migration" ("flip the manifest" once the migration's read-back is
+ * trustworthy). Only then does SqliteStoreBackend become the automatic
+ * choice on later opens. Opens the chosen backend, migrates it, updates and
+ * persists the manifest's `active_backend`, and returns both.
  */
 export function openStore(projectDir: string, opts: OpenStoreOptions = {}): OpenStoreResult {
   const existing = readManifest(projectDir);
   const forced = opts.forceBackend ?? existing?.forced_backend ?? null;
   const detection = detect(opts.requireFn);
-  const kind: BackendKind = forced ?? (detection.available ? "sqlite" : "json");
+  const migrated = Boolean(existing?.last_rebuild_at);
+  const kind: BackendKind = forced ?? (detection.available && migrated ? "sqlite" : "json");
 
   const backend: StoreBackend = kind === "sqlite" ? new SqliteStoreBackend(opts.requireFn) : new JsonStoreBackend();
   backend.open(projectDir);
