@@ -148,6 +148,11 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "kgNeighbourhood", file: "mcp/kernel.ts" },
   { symbol: "buildStructuralIndex", file: "mcp/kernel.ts" },
   { symbol: "buildKnowledgeGraph", file: "mcp/kernel.ts" },
+  // M4 landed 2026-08-20 -- see the "M4 seam is wired into mcp/kernel.ts and
+  // mcp/cli.ts" test below for the directory/wiring half of this guard.
+  { symbol: "countIndexableFiles", file: "mcp/kernel.ts" },
+  { symbol: "scaleGuardMessage", file: "mcp/kernel.ts" },
+  { symbol: "SCALE_GUARD_FILE_THRESHOLD", file: "mcp/kernel.ts" },
 ];
 
 test("docs/design/MEMORY_STORE.md exists and is a substantial design doc", () => {
@@ -267,7 +272,34 @@ test("M3's store seam is wired into mcp/kernel.ts, and the doc says M3 landed", 
   for (const symbol of ["replaceFileGraphRows", "replaceCallEdgesForRepo", "replaceKnowledgeGraph", "queryKgEdgesForEntities"]) {
     assert.ok(doc.includes(symbol), `doc's M3 row should name the real symbol "${symbol}" it landed`);
   }
-  assert.ok(/M4 — benchmarks and the scale guard\*\*\s*\|\s*Not yet built/.test(doc), "doc's M4 row should still say Not yet built");
+});
+
+// M4 landed 2026-08-20, the same day as M1-M3 -- see the "M4's benchmark
+// harness and scale guard exist as shipped code" test below for the
+// directory/symbol/wiring half of this guard.
+test("M4's store seam is wired into mcp/kernel.ts and mcp/cli.ts, and the doc says M4 landed", () => {
+  // Mirror image of M1/M2/M3's own guard tests above: this now fails if the
+  // scale guard disappears out from under the doc, or if the doc stops
+  // saying M4 landed while the code still ships it.
+  const kernelSource = readFileSync(repoPath("mcp", "kernel.ts"), "utf8");
+  assert.ok(/\bexport function countIndexableFiles\(/.test(kernelSource), "expected mcp/kernel.ts to export countIndexableFiles, the cheap indexable-file count the scale guard reads");
+  assert.ok(/\bexport function scaleGuardMessage\(/.test(kernelSource), "expected mcp/kernel.ts to export scaleGuardMessage, the guard's plain-language warning");
+  assert.ok(/\bexport const SCALE_GUARD_FILE_THRESHOLD\b/.test(kernelSource), "expected mcp/kernel.ts to export the SCALE_GUARD_FILE_THRESHOLD the guard compares against");
+
+  const cliSource = readFileSync(repoPath("mcp", "cli.ts"), "utf8");
+  assert.ok(/\bscaleGuardMessage\(/.test(cliSource), "expected mcp/cli.ts to call scaleGuardMessage -- the guard must actually be wired into a command, not just exist in kernel.ts");
+  assert.ok(/\bcountIndexableFiles\(/.test(cliSource), "expected mcp/cli.ts's install command to call countIndexableFiles for its own file count");
+
+  for (const file of ["fixture.ts", "harness.ts", "run-one.ts", "run.ts"]) {
+    assert.ok(existsSync(repoPath("mcp", "bench", file)), `expected mcp/bench/${file} to exist -- M4's benchmark harness`);
+  }
+  assert.ok(existsSync(repoPath("mcp", "scale-guard.test.ts")), "expected mcp/scale-guard.test.ts to exist -- M4's own test file");
+
+  const doc = readDoc();
+  assert.ok(doc.includes("M4 — benchmarks and the scale guard") && doc.includes("**Landed"), "doc's M4 row should say M4 landed, not just describe it as a target");
+  for (const symbol of ["countIndexableFiles", "scaleGuardMessage", "SCALE_GUARD_FILE_THRESHOLD"]) {
+    assert.ok(doc.includes(symbol), `doc's M4 row should name the real symbol "${symbol}" it landed`);
+  }
 });
 
 test("the doc states the JSON-fallback law in a greppable form", () => {
