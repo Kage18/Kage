@@ -1,20 +1,25 @@
 // docs/design/SESSIONS_SURFACE.md cites real symbols at real file:line locations and
-// names two pieces of work as in-flight rather than landed. Same pattern as
+// names one piece of work as in-flight rather than landed. Same pattern as
 // mcp/readme-claims.test.ts and mcp/context-doc.test.ts: a design doc that names code is
 // a claim about the code, and this repo's standing failure mode is docs that outrun what
 // actually shipped. This file keeps that claim honest four ways: every backtick-quoted
 // repo path the doc cites must exist; every symbol an "exists"-style citation names must
-// actually appear in the file it's cited against; the two gaps the doc leans its design
-// on (no display_name on a run, no stall detector) must still be genuinely absent from
-// the real source, not just asserted in prose; and the two in-flight items must still
-// read as in-flight, not as already landed.
+// actually appear in the file it's cited against; the one gap the doc still leans its
+// design on (no display_name on a run) must still be genuinely absent from the real
+// source, not just asserted in prose — the stall-detector gap this file used to check the
+// same way closed when the budget-circuit-breaker run landed `evaluateStallTurn`, so that
+// check now runs in reverse (asserting the detector is real and the doc cites it as
+// landed, not that it's absent); and the one remaining in-flight item, the unified-session
+// work, must still read as in-flight, not as already landed.
 //
 // REGRESSION: delete docs/design/SESSIONS_SURFACE.md, or rename/remove any symbol in
 // SYMBOL_CITATIONS below from the file it's cited against (e.g. rename workRow in
-// mcp/delegation/app-client.ts), or add a working stall detector or a display_name field
-// without updating the doc's gap framing, or reword the doc to claim agent_session_id is
-// already persisted live / the chat composer already writes into the orchestrator's own
-// pty (i.e. drop the "in flight" language) — any of those fails a test in this file.
+// mcp/delegation/app-client.ts), or add a display_name field without updating the doc's
+// gap framing, or remove/rename the stall detector (`evaluateStallTurn`,
+// `STALL_SAME_COMMAND_STREAK`) without reverting the doc to gap framing, or reword the doc
+// to claim agent_session_id is not yet persisted live / the chat composer already writes
+// into the orchestrator's own pty (i.e. drop the "in flight" language for the
+// unified-session work) — any of those fails a test in this file.
 //
 // __dirname is mcp/dist/ at runtime (compiled test) — one ".." reaches sibling mcp/
 // sources, two reaches the repo root. Same convention as readme-claims.test.ts and
@@ -48,8 +53,9 @@ function citedPaths(doc: string): string[] {
 // that symbol — hand-curated against the doc's own "Exists"/"exists today" prose
 // (verified against the real source before landing, not derived mechanically from the
 // markdown). This is the doc's own claim inventory for shipped code: display_name (a
-// PROPOSED field, not yet real) and any stall-detector symbol are deliberately absent
-// from this list — they are gaps, checked by the separate test below instead.
+// PROPOSED field, not yet real) is deliberately absent from this list — it is the one
+// remaining gap, checked by the separate test below instead. The stall-detector symbols
+// are included here now that the detector has landed.
 const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "TaskRecord", file: "mcp/delegation/contract.ts" },
   { symbol: "displayState", file: "mcp/delegation/contract.ts" },
@@ -86,6 +92,9 @@ const SYMBOL_CITATIONS: Array<{ symbol: string; file: string }> = [
   { symbol: "executeRun", file: "mcp/delegation/dispatch.ts" },
   { symbol: "randomUUID", file: "mcp/delegation/dispatch.ts" },
   { symbol: "sessionIdFrom", file: "mcp/delegation/supervisor.ts" },
+  { symbol: "evaluateStallTurn", file: "mcp/delegation/supervisor.ts" },
+  { symbol: "STALL_SAME_COMMAND_STREAK", file: "mcp/delegation/supervisor.ts" },
+  { symbol: "STALL_NO_DIFF_STREAK", file: "mcp/delegation/supervisor.ts" },
   { symbol: "claimVerdict", file: "mcp/delegation/verify.ts" },
   { symbol: "renderClaimCard", file: "mcp/delegation/verify.ts" },
   { symbol: "verifyRun", file: "mcp/delegation/verify.ts" },
@@ -145,44 +154,55 @@ test("the doc's display_name gap is real: no run record or dispatch tool has it 
   );
 });
 
-test("the doc's stall-detector gap is real: no stall-detection code exists yet", () => {
-  // The doc's §4 (Ghost suggestions) names a stalled-run suggestion as blocked on a
-  // detector that doesn't exist yet. If one now does, that clause of §4 is stale.
-  const delegationFiles = [
-    "mcp/delegation/contract.ts",
-    "mcp/delegation/supervisor.ts",
-    "mcp/delegation/dispatch.ts",
-    "mcp/delegation/steer.ts",
-  ];
-  // Word-boundary match: "stall"/"stalled"/"stalls" as a whole word, never a substring
-  // hit inside "install"/"installed"/"installer" (this repo's actual most common word
-  // containing "stall" — a plain /stall/i test false-positives on every one of them).
-  const STALL_WORD = /\bstall(ed|s)?\b/i;
-  for (const file of delegationFiles) {
-    const source = readFileSync(repoPath(file), "utf8");
-    assert.ok(!STALL_WORD.test(source), `expected no "stall" identifier in ${file} — if a stall detector now exists, doc §4 is stale`);
-  }
+test("the doc's stall-detector gap is landed and cited: the detector is real and the doc names it, not as a gap", () => {
+  // The doc's §4 (Ghost suggestions) used to name a stalled-run suggestion as blocked on
+  // a detector that didn't exist. The budget-circuit-breaker run landed one
+  // (evaluateStallTurn and the STALL_* constants, mcp/delegation/supervisor.ts) — this
+  // checks the same disagreement in the opposite direction: if the detector is ever
+  // removed or renamed, or the doc ever reverts to claiming it's still missing, this
+  // should fail.
+  const supervisorSource = readFileSync(repoPath("mcp/delegation/supervisor.ts"), "utf8");
+  assert.ok(
+    /\bevaluateStallTurn\b/.test(supervisorSource) &&
+      /\bSTALL_SAME_COMMAND_STREAK\b/.test(supervisorSource) &&
+      /\bSTALL_NO_DIFF_STREAK\b/.test(supervisorSource),
+    "expected the stall detector (evaluateStallTurn, STALL_SAME_COMMAND_STREAK, STALL_NO_DIFF_STREAK) to exist in supervisor.ts — if it was removed, doc §4 is now stale in the other direction",
+  );
+  const doc = readDoc();
+  assert.ok(
+    doc.includes("evaluateStallTurn") && doc.includes("STALL_SAME_COMMAND_STREAK") && doc.includes("STALL_NO_DIFF_STREAK"),
+    "doc's §4 should cite the real stall-detector symbols now that the detector has landed",
+  );
+  assert.ok(
+    !/no stall detector exists yet/i.test(doc),
+    "doc should no longer describe the stall detector as an unbuilt gap",
+  );
 });
 
-test("the doc names both cited in-flight items as in-flight, not as already landed", () => {
+test("the doc names the one remaining in-flight item as in-flight, and no longer calls agent_session_id in-flight", () => {
   const doc = readDoc();
   // Markdown wraps prose at arbitrary columns, so a phrase spanning two source lines
-  // (e.g. "...no new\nmechanism — **in flight...") must not be missed just because a
-  // newline landed inside it — collapse all whitespace runs to a single space first.
+  // must not be missed just because a newline landed inside it — collapse all whitespace
+  // runs to a single space first.
   const flat = doc.replace(/\s+/g, " ").toLowerCase();
   const inFlightMentions = (flat.match(/in flight/g) || []).length;
-  // Four uses today: the orchestrator-as-real-session heading (§1), the
-  // agent_session_id/Take Over gap (§3b), the stall detector gap (§4), and the W3 row.
-  // At least 3 keeps this from being satisfied by a single stray mention while still
-  // tolerating minor rewording.
-  assert.ok(inFlightMentions >= 3, `expected the doc to name multiple things as "in flight", found ${inFlightMentions}`);
-  assert.ok(
-    flat.includes("agent_session_id") && flat.includes("closes this gap with no new mechanism — **in flight, not done**"),
-    "doc should name the agent_session_id/Take Over gap as in-flight, not as already closed",
-  );
+  // Two uses remain after the budget-circuit-breaker run landed both the
+  // agent_session_id fix (§3b) and the stall detector (§4): the orchestrator-as-real-
+  // session heading (§1) and the W3 row, both naming the same still-open unified-session
+  // gap. At least 2 keeps this from being satisfied by a single stray mention while
+  // still tolerating minor rewording.
+  assert.ok(inFlightMentions >= 2, `expected the doc to still name the unified-session work as in flight, found ${inFlightMentions} "in flight" mentions`);
   assert.ok(
     flat.includes("unified-session work itself, in flight"),
     "doc's W3 row should state the unified-session work is in flight, not landed",
+  );
+  assert.ok(
+    flat.includes("landed: `agent_session_id` is now written to disk the moment the stream first reports it"),
+    "doc should describe agent_session_id's mid-run persistence as landed, not in-flight",
+  );
+  assert.ok(
+    !flat.includes("closes this gap with no new mechanism — **in flight, not done**"),
+    "doc should no longer describe agent_session_id's mid-run persistence as in-flight — it landed with the budget-circuit-breaker run",
   );
 });
 
