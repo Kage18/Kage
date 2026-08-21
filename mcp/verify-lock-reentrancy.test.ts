@@ -28,6 +28,17 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// The operator verifying THIS very run sets KAGE_NO_VERIFY_LOCK=1 as an escape hatch —
+// necessary because, pre-fix, the kernel's own outer verification of its own `npm test`
+// would otherwise deadlock on itself (the exact bug this file exists to catch). That ambient
+// variable, like KAGE_VERIFY_LOCK_HELD and KAGE_VERIFY_LOCK_PATH, inherits into both the
+// spawned holder process below and this test's own direct acquireVerifyLock() call unless
+// explicitly cleared — left unsanitized, an ambient KAGE_NO_VERIFY_LOCK=1 makes
+// acquireVerifyLock take the always-skip branch (checked BEFORE the KAGE_VERIFY_LOCK_HELD
+// marker), which fails this test's `inherited` assertion outright (observed).
+const LOCK_ENV_VARS = ["KAGE_NO_VERIFY_LOCK", "KAGE_VERIFY_LOCK_HELD", "KAGE_VERIFY_LOCK_PATH"] as const;
+const SANITIZE_CHILD_ENV_LINES = LOCK_ENV_VARS.map((key) => `delete process.env.${key};`);
+
 test("a stub verification with KAGE_VERIFY_LOCK_HELD=1 completes immediately without waiting on a held default lock", async () => {
   const lockPath = join(tempDir("kage-verify-lock-reentrant-"), "verify.lock");
   const holdMs = 1500;
@@ -36,8 +47,10 @@ test("a stub verification with KAGE_VERIFY_LOCK_HELD=1 completes immediately wit
   // A real, ALIVE holder in its own process — the steal path only ever fires for a DEAD
   // holder pid, so an alive holder is exactly what would otherwise wedge a naive nested
   // acquire for the full hold duration (in the field, far longer: the whole outer command).
+  // Sanitizes its own ambient env first, same reasoning as the module comment above.
   const holderScript = [
     `const { acquireVerifyLock } = require(${JSON.stringify(lockModulePath)});`,
+    ...SANITIZE_CHILD_ENV_LINES,
     `const acq = acquireVerifyLock({ lockPath: ${JSON.stringify(lockPath)} });`,
     `process.stdout.write("ACQUIRED\\n");`,
     `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${holdMs});`,
@@ -51,8 +64,12 @@ test("a stub verification with KAGE_VERIFY_LOCK_HELD=1 completes immediately wit
     holder.on("error", reject);
   });
 
-  const previousPath = process.env.KAGE_VERIFY_LOCK_PATH;
-  const previousHeld = process.env.KAGE_VERIFY_LOCK_HELD;
+  const previous: Record<string, string | undefined> = {};
+  for (const key of LOCK_ENV_VARS) previous[key] = process.env[key];
+  // Sanitize the ambient environment BEFORE setting this test's own intended values — an
+  // ambient KAGE_NO_VERIFY_LOCK=1 left in place would short-circuit acquireVerifyLock before
+  // it ever looks at KAGE_VERIFY_LOCK_HELD below.
+  for (const key of LOCK_ENV_VARS) delete process.env[key];
   // No `lockPath` option passed to acquireVerifyLock below — resolution goes through the
   // same default/env path spawnWithTreeKill itself uses, so this exercises the real
   // reentrancy seam, not a special-cased test-only argument.
@@ -70,10 +87,10 @@ test("a stub verification with KAGE_VERIFY_LOCK_HELD=1 completes immediately wit
     assert.ok(elapsedMs < 200, `expected an inherited acquisition to skip the wait entirely, took ${elapsedMs}ms`);
     acquisition.handle.release();
   } finally {
-    if (previousPath === undefined) delete process.env.KAGE_VERIFY_LOCK_PATH;
-    else process.env.KAGE_VERIFY_LOCK_PATH = previousPath;
-    if (previousHeld === undefined) delete process.env.KAGE_VERIFY_LOCK_HELD;
-    else process.env.KAGE_VERIFY_LOCK_HELD = previousHeld;
+    for (const key of LOCK_ENV_VARS) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
   }
 
   await new Promise((resolve) => holder.on("close", resolve));
