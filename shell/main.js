@@ -13,6 +13,7 @@ const { execFile, execFileSync } = require("node:child_process");
 const { writeFileSync, existsSync, readFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 const { startAutoUpdate, restartToUpdate } = require("./update.js");
+const { ensureEngineAvailable } = require("./bootstrap.js");
 
 /**
  * The app's own mark — the 影 seal the titlebar already shows.
@@ -79,6 +80,11 @@ function resolveProjectDir() {
 
 let projectDir = null;
 
+// Present only in a dev checkout (next door at ../mcp/dist/cli.js) — inside a PACKAGED
+// app this path is sealed in the asar and does not exist. Both resolveCli() and the
+// bootstrap check below need to know this, so it is computed once, not twice.
+const localCliPath = join(__dirname, "..", "mcp", "dist", "cli.js");
+
 /**
  * Find the Kage CLI.
  *
@@ -86,11 +92,13 @@ let projectDir = null;
  * path is inside the asar and does not exist, so fall back to the globally installed
  * `kage` — resolved through the login shell, because a GUI app launched from Finder
  * inherits almost no PATH (no /opt/homebrew/bin, no nvm), which is the classic way a
- * packaged Electron app "works from the terminal and not from the dock".
+ * packaged Electron app "works from the terminal and not from the dock". By the time
+ * this runs, ensureEngineAvailable() (see openAppInWindow) has already confirmed a
+ * packaged app's `kage` is actually there — this fallback is what happens if that
+ * check was skipped via KAGE_NO_BOOTSTRAP=1 and the engine is still missing.
  */
 function resolveCli() {
-  const local = join(__dirname, "..", "mcp", "dist", "cli.js");
-  if (existsSync(local)) return { command: process.execPath, args: [local], viaNode: true };
+  if (existsSync(localCliPath)) return { command: process.execPath, args: [localCliPath], viaNode: true };
   try {
     const shell = process.env.SHELL || "/bin/zsh";
     const found = execFileSync(shell, ["-lic", "command -v kage"], { encoding: "utf8" }).trim().split("\n").pop();
@@ -393,6 +401,19 @@ async function openAppInWindow() {
     return;
   }
   try {
+    // A dmg-first launch has no `kage` on PATH yet — catch that BEFORE resolveCli()
+    // falls back to a bare 'kage' and turns it into a raw spawn ENOENT. Skipped
+    // entirely in a dev checkout (localCliPath exists) or under KAGE_NO_BOOTSTRAP=1.
+    const bootstrap = await ensureEngineAvailable({
+      localCliExists: existsSync(localCliPath),
+      onInstalling: () => {
+        if (win && !win.isDestroyed()) win.loadURL(splashUrl("Installing Kage's engine…\n\nThis can take a minute."));
+      },
+    });
+    if (!bootstrap.ok) {
+      if (win && !win.isDestroyed()) win.loadURL(splashUrl(bootstrap.message));
+      return;
+    }
     // Try the cheap check first; fall back to the CLI only when it cannot answer.
     const url = (await existingDaemonUrl()) || (await ensureDaemon());
     if (win && !win.isDestroyed()) win.loadURL(url);
