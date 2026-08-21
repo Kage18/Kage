@@ -84,13 +84,13 @@ test("refreshProject updates an existing metrics.json instead of leaving it froz
 test("refreshProject's written totals track a live count of the packet store", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
-  capture({ projectDir: project, title: "First memory", body: "First packet body text for the store.", type: "decision" });
+  capture({ projectDir: project, title: "First memory", body: "First packet body text for the store.", type: "decision", allowLowQuality: true });
 
   refreshProject(project);
   const first = readMetrics(project);
   assert.equal(first.memory_graph.approved_packets, 1);
 
-  capture({ projectDir: project, title: "Second memory", body: "Second packet body text for the store.", type: "decision" });
+  capture({ projectDir: project, title: "Second memory", body: "Second packet body text for the store.", type: "decision", allowLowQuality: true });
   refreshProject(project);
   const second = readMetrics(project);
   assert.equal(second.memory_graph.approved_packets, 2);

@@ -394,6 +394,11 @@ export interface CaptureInput {
    * When omitted, a conservative per-type default is stored and marked estimated.
    */
   discoveryTokens?: number;
+  /**
+   * Admit this capture even though its computed quality score is below the
+   * ADMISSION_QUALITY_FLOOR (default rejects such captures at write time).
+   */
+  allowLowQuality?: boolean;
 }
 
 export interface CaptureResult {
@@ -433,6 +438,8 @@ export interface LearnInput {
    * When omitted, a conservative per-type default is stored and marked estimated.
    */
   discoveryTokens?: number;
+  /** Admit this learning even though its computed quality score is below the admission floor. */
+  allowLowQuality?: boolean;
 }
 
 export type LearnResult = CaptureResult;
@@ -9587,6 +9594,12 @@ function refreshPacketStaleness(projectDir: string, options: { quiet?: boolean }
   const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
   const ignorePatterns = readKageIgnore(projectDir);
   for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
+    // Deprecated/superseded packets are end-state, not actionable — flagging "packet status
+    // is deprecated" as a stale FINDING just restates their own status and dominated the
+    // stale list (292 of 695 in the audit that prompted this). `kage gc` is where their
+    // lifecycle is handled; skip them here so the stale surface only shows things a human
+    // can still act on.
+    if (entry.packet.status === "deprecated" || entry.packet.status === "superseded") continue;
     // Drop any .kageignore'd grounding (presentation layers etc.) from the stored packet
     // so memory is never anchored to non-knowledge files.
     const pruned = prunePacketGroundingPaths(entry.packet, ignorePatterns);
@@ -9712,19 +9725,68 @@ export interface GcResult {
   deprecated: Array<{ id: string; title: string; reason: string }>;
   deleted: Array<{ id: string; title: string }>;
   skipped: Array<{ id: string; title: string; reason: string }>;
+  /** Deprecated/superseded packets excluded up front — end-state, not re-processed. */
+  excluded_end_state: Array<{ id: string; title: string; status: string }>;
+  /** Duplicate pairs (score >= 0.95) auto-merged this pass via kage_supersede, lineage recorded. */
+  merged_duplicates: Array<{ kept: { id: string; title: string }; superseded: { id: string; title: string }; score: number }>;
+  /**
+   * Contradiction pairs ranked by recall traffic, most-recalled first, each with a one-line
+   * resolution suggestion. Listing is automatic; resolving stays a human/operator decision —
+   * gc never auto-resolves a contradiction.
+   */
+  contradiction_pairs: Array<{
+    a: { id: string; title: string };
+    b: { id: string; title: string };
+    shared_paths: string[];
+    reason: string;
+    recall_traffic_30d: number;
+    suggestion: string;
+  }>;
+  /** Honest before/after counts. For a dry run, after === before: nothing was written. */
+  before: { total_packets: number; stale: number; contradiction_pairs: number; duplicate_pairs_ge_95: number };
+  after: { total_packets: number; stale: number; contradiction_pairs: number; duplicate_pairs_ge_95: number };
   total_scanned: number;
+}
+
+// Counts the honest before/after line reports. Re-scans disk each call (cheap relative to
+// the rest of a gc pass) so dry runs never claim an improvement that wasn't written.
+function gcHealthCounts(projectDir: string): GcResult["before"] {
+  const approved = loadApprovedPackets(projectDir);
+  const stale = approved.filter((packet) => staleMemoryReasons(projectDir, packet).length > 0).length;
+  const context = memoryQualityContext(projectDir);
+  let duplicatePairsGe95 = 0;
+  const seenDup = new Set<string>();
+  for (const packet of approved) {
+    for (const dupe of duplicateCandidatesWithContext(packet, context, 0.95).filter((d) => d.status === "approved")) {
+      const key = [packet.id, dupe.id].sort().join("\0");
+      if (seenDup.has(key)) continue;
+      seenDup.add(key);
+      duplicatePairsGe95 += 1;
+    }
+  }
+  return {
+    total_packets: loadPacketsFromDir(packetsDir(projectDir)).length,
+    stale,
+    contradiction_pairs: kageConflicts(projectDir).count,
+    duplicate_pairs_ge_95: duplicatePairsGe95,
+  };
 }
 
 export function gcProject(projectDir: string, options: { dryRun?: boolean; force?: boolean } = {}): GcResult {
   ensureMemoryDirs(projectDir);
+  const before = gcHealthCounts(projectDir);
   const packetEntries = loadPacketEntriesFromDir(packetsDir(projectDir));
   const deprecated: GcResult["deprecated"] = [];
   const deleted: GcResult["deleted"] = [];
   const skipped: GcResult["skipped"] = [];
+  const excludedEndState: GcResult["excluded_end_state"] = [];
 
   for (const { path, packet } of packetEntries) {
-    if (packet.status === "deprecated") {
-      skipped.push({ id: packet.id, title: packet.title, reason: "already deprecated" });
+    // Deprecated/superseded packets are end-state, not actionable — re-deprecating a
+    // superseded packet would clobber the lineage kage_supersede just recorded on it.
+    // Exclude both from every downstream gc surface instead of only skipping "deprecated".
+    if (packet.status === "deprecated" || packet.status === "superseded") {
+      excludedEndState.push({ id: packet.id, title: packet.title, status: packet.status });
       continue;
     }
     // Serialized transcript / tool-output / file-content dumps and ungrounded conversational
@@ -9777,9 +9839,58 @@ export function gcProject(projectDir: string, options: { dryRun?: boolean; force
         deleted,
       });
     }
+  }
+
+  // Duplicate auto-merge (score >= 0.95): a near-perfect duplicate never needs a human
+  // judgment call the way a contradiction does, so gc resolves these itself by superseding
+  // the lower-quality packet of each pair onto the higher-quality one — supersedeMemory
+  // records the lineage edge (superseded_by / supersedes) and never deletes a file.
+  // Re-reads approved packets fresh so a packet the loop above just deprecated for
+  // staleness is never picked as a merge target.
+  const mergedDuplicates: GcResult["merged_duplicates"] = [];
+  const approvedForMerge = loadApprovedPackets(projectDir);
+  const mergeContext = memoryQualityContext(projectDir);
+  const mergedIds = new Set<string>();
+  for (const packet of approvedForMerge) {
+    if (mergedIds.has(packet.id)) continue;
+    const dupes = duplicateCandidatesWithContext(packet, mergeContext, 0.95).filter(
+      (dupe) => dupe.status === "approved" && !mergedIds.has(dupe.id)
+    );
+    for (const dupe of dupes) {
+      const dupePacket = approvedForMerge.find((candidate) => candidate.id === dupe.id);
+      if (!dupePacket) continue;
+      const [keep, drop] = (qualityScore(packet) ?? 0) >= (qualityScore(dupePacket) ?? 0)
+        ? [packet, dupePacket]
+        : [dupePacket, packet];
+      if (!options.dryRun) {
+        const result = supersedeMemory(projectDir, drop.id, keep.id, `kage gc: auto-merged near-duplicate (similarity ${dupe.score})`);
+        if (!result.ok) continue;
+      }
+      mergedIds.add(keep.id);
+      mergedIds.add(drop.id);
+      mergedDuplicates.push({ kept: { id: keep.id, title: keep.title }, superseded: { id: drop.id, title: drop.title }, score: dupe.score });
+    }
+  }
+
+  // Contradiction pairs: LISTING only, ranked by recall traffic so the pair agents actually
+  // hit gets attention first. Resolving stays a human/operator call via kage_supersede —
+  // gc never picks a side on a contradiction the way it does for a straight duplicate.
+  const conflicts = kageConflicts(projectDir);
+  const access = readMemoryAccessEntries(projectDir);
+  const contradictionPairs: GcResult["contradiction_pairs"] = conflicts.pairs
+    .map((pair) => ({
+      ...pair,
+      recall_traffic_30d: Math.max(access.get(pair.a.id)?.uses_30d ?? 0, access.get(pair.b.id)?.uses_30d ?? 0),
+      suggestion: `Confirm which still holds, "${pair.a.title}" or "${pair.b.title}", then kage supersede the outdated one onto the current one.`,
+    }))
+    .sort((x, y) => y.recall_traffic_30d - x.recall_traffic_30d || x.a.title.localeCompare(y.a.title));
+
+  if (!options.dryRun && (deprecated.length || deleted.length || mergedDuplicates.length)) {
     const rebuilt = buildGraphIndexes(projectDir);
     writeJson(join(memoryRoot(projectDir), "metrics.json"), kageMetricsShallow(projectDir, rebuilt));
   }
+
+  const after = options.dryRun ? before : gcHealthCounts(projectDir);
 
   return {
     ok: true,
@@ -9787,6 +9898,11 @@ export function gcProject(projectDir: string, options: { dryRun?: boolean; force
     deprecated,
     deleted,
     skipped,
+    excluded_end_state: excludedEndState,
+    merged_duplicates: mergedDuplicates,
+    contradiction_pairs: contradictionPairs,
+    before,
+    after,
     total_scanned: packetEntries.length,
   };
 }
@@ -16705,6 +16821,15 @@ function kageMetricsShallow(
   const indexedSourceTokens = Math.ceil(sourceFiles.reduce((sum, file) => sum + file.size_bytes, 0) / 4);
   const memoryTokens = allPackets.reduce((sum, packet) => sum + estimateTokens(packetText(packet)), 0);
   const recallContextTokens = Math.max(250, Math.min(1800, codeGraph.symbols.length * 12 + codeGraph.routes.length * 10 + knowledgeGraph.edges.length * 14 + 180));
+  // Real per-packet scores, not the hardcoded 0 this shallow variant used to report — disk
+  // (metrics.json, written from the deep kageMetrics()) held the real number while this
+  // RefreshResult/CLI-facing shape claimed 0, which read as "no memory has ever been
+  // scored" when hundreds of packets carried real quality.score values.
+  const qualityContext = memoryQualityContext(projectDir);
+  const qualityScores = allPackets
+    .map((packet) => Number(((packet.quality ?? {}) as Record<string, unknown>).score ?? evaluateMemoryQuality(projectDir, packet, qualityContext).score))
+    .filter((score) => Number.isFinite(score));
+  const duplicatePairs = allPackets.reduce((sum, packet) => sum + duplicateCandidatesWithContext(packet, qualityContext).length, 0);
   return {
     schema_version: 1,
     project_dir: projectDir,
@@ -16749,8 +16874,8 @@ function kageMetricsShallow(
       edges: knowledgeGraph.edges.length,
       evidence_backed_edges: knowledgeGraph.edges.filter((edge) => edge.evidence.length > 0).length,
       evidence_coverage_percent: percent(knowledgeGraph.edges.filter((edge) => edge.evidence.length > 0).length, knowledgeGraph.edges.length),
-      average_quality_score: 0,
-      duplicate_candidate_pairs: 0,
+      average_quality_score: qualityScores.length ? Math.round(qualityScores.reduce((sum, score) => sum + score, 0) / qualityScores.length) : 0,
+      duplicate_candidate_pairs: duplicatePairs,
     },
     savings: {
       estimated_indexed_source_tokens: indexedSourceTokens,
@@ -16895,8 +17020,20 @@ export function learn(input: LearnInput): LearnResult {
     pendingReview: input.pendingReview,
     strictContradictions: input.strictContradictions,
     discoveryTokens: input.discoveryTokens,
+    allowLowQuality: input.allowLowQuality,
   });
 }
+
+// A new packet whose best match against existing memory is at or above this similarity
+// grounds nothing new — it is a near-duplicate, not a distinct fact. Admission blocks it
+// outright (no bypass flag): the caller should use kage_supersede on the existing packet
+// instead of writing another copy for gc to clean up later.
+const ADMISSION_DUPLICATE_SIMILARITY = 0.92;
+// Captures that would auto-approve below this computed quality score are exactly the
+// "garbage/bloat" the memory layer got called out for (auto-approved at score 54). Reject
+// by default; allowLowQuality is the explicit escape hatch for a caller who has judged the
+// packet worth keeping despite a low score (e.g. a deliberately terse policy note).
+const ADMISSION_QUALITY_FLOOR = 60;
 
 export function capture(input: CaptureInput): CaptureResult {
   ensureMemoryDirs(input.projectDir);
@@ -17068,9 +17205,57 @@ export function capture(input: CaptureInput): CaptureResult {
     };
   }
 
+  const quality = evaluateMemoryQuality(input.projectDir, packet);
+
+  // Admission gate: only guards the auto-approve fast path. A pending-review capture is
+  // already headed for human curation, so blocking it here would just make the review
+  // queue lose candidates instead of the reported bug ("captures auto-approved at quality
+  // score 54") — bloat that entered memory as APPROVED with no review at all.
+  if (!routeToPending) {
+    const duplicates = quality.duplicate_candidates as Array<{ id: string; title: string; score: number; status: string }>;
+    const bestDuplicate = duplicates[0];
+    if (bestDuplicate && bestDuplicate.score >= ADMISSION_DUPLICATE_SIMILARITY) {
+      return {
+        ok: false,
+        errors: [
+          `Capture blocked: ${Math.round(bestDuplicate.score * 100)}% similar to existing packet "${bestDuplicate.title}" ` +
+            `(${bestDuplicate.id}). This grounds nothing new — use kage_supersede to replace it instead of writing a near-duplicate.`,
+        ],
+        warnings,
+      };
+    }
+    // The floor gates the packet's OWN quality (evidence, grounding, substance) — not risks
+    // that a dedicated, more precise mechanism already owns:
+    //  - "possible duplicate memory": the similarity gate above already blocks anything
+    //    >= 0.92; double-counting it here would quality-floor-block a legitimate REPLACEMENT
+    //    packet (deliberately similar to the packet it's about to supersede) purely for
+    //    resembling the thing it replaces — punishing the exact workaround this gate tells
+    //    the caller to use.
+    //  - missing-citation staleness ("all/some referenced paths are missing"): strictCitations
+    //    already hard-rejects a strict caller's hallucinated path, and a non-strict caller
+    //    already gets the "some referenced paths do not exist" warning a few lines up. A
+    //    brand-new capture can only be "stale" via missing paths (its freshness timestamp is
+    //    now, so ttl/content-drift reasons cannot yet apply) — re-penalizing that here in the
+    //    floor would reject well-evidenced captures for a reason two other gates already cover.
+    const risks = (quality.risks as string[] | undefined) ?? [];
+    const duplicateRiskCredit = risks.includes("possible duplicate memory") ? 18 : 0;
+    const staleRiskCredit = (quality.stale_reasons as string[] | undefined)?.length ? 22 : 0;
+    const score = Math.min(100, Number(quality.score ?? 0) + duplicateRiskCredit + staleRiskCredit);
+    if (score < ADMISSION_QUALITY_FLOOR && !input.allowLowQuality) {
+      return {
+        ok: false,
+        errors: [
+          `Capture blocked: computed quality score ${score} is below the admission floor (${ADMISSION_QUALITY_FLOOR}). ` +
+            `Strengthen the packet (evidence, grounding, concise rationale) or pass allow_low_quality to record it anyway.`,
+        ],
+        warnings,
+      };
+    }
+  }
+
   packet.quality = {
     ...packet.quality,
-    ...evaluateMemoryQuality(input.projectDir, packet),
+    ...quality,
     ...(contradictions.length ? { contradicts: contradictions.map((c) => c.packet_id) } : {}),
     ...(unresolvedSymbols.length ? { unresolved_symbols: unresolvedSymbols } : {}),
   };
@@ -18960,7 +19145,11 @@ function createDiffChangeMemory(projectDir: string, summary: BranchReviewSummary
     status: "approved",
     confidence: 0.62,
     tags: unique(["change-memory", "diff-proposal", "repo-local", branch ? `branch:${slugify(branch)}` : "branch:detached"]),
-    paths: summary.changed_files.slice(0, 40),
+    // Cited paths cap at 20: a packet citing 124+ changed files grounds nothing (it cannot
+    // be reverified against "the code moved" per path) — it's the branch summary that
+    // matters, not path spam. The full list still lives in the body's changed-files section
+    // and in source_refs.changed_files below.
+    paths: summary.changed_files.slice(0, 20),
     stack: inferStack(projectDir),
     source_refs: [
       {

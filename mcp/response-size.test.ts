@@ -90,14 +90,30 @@ function seedStalePackets(project: string, count: number, options: { deprecatedC
 
 // Short body, no paths, no tags: base 45 + high-value-type 14 + always-present source
 // evidence 12 - too-short 18 - not-grounded 10 = 43, under the 55 quality-score warning
-// threshold. Enough near-identical fixtures also trip the duplicate-candidate warning.
+// threshold. Enough near-identical fixtures also trip the duplicate-candidate warning —
+// but a distinct word per packet (not just a number, which tokenize() drops as too short
+// to count) keeps similarity under the 0.92 hard admission block while staying above the
+// 0.58 duplicate-candidate warning threshold.
+const THIN_NOTE_WORDS_A = [
+  "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+];
+const THIN_NOTE_WORDS_B = [
+  "quartz", "cobalt", "amber", "cedar", "willow", "granite", "copper", "linen", "maple", "slate",
+];
 function seedLowQualityPackets(project: string, count: number): void {
   for (let i = 0; i < count; i++) {
+    // Two independently-cycling word banks give 100 distinct combinations — enough that no
+    // fixture repeats verbatim within the counts these tests use (up to 40).
+    const word = `${THIN_NOTE_WORDS_A[i % THIN_NOTE_WORDS_A.length]}-${THIN_NOTE_WORDS_B[Math.floor(i / THIN_NOTE_WORDS_A.length) % THIN_NOTE_WORDS_B.length]}`;
+    // allowLowQuality: these packets are deliberately thin — the fixture is testing response
+    // capping/pagination over many packets, not the admission gate, which would otherwise
+    // reject a body this short at write time.
     const result = capture({
       projectDir: project,
-      title: `Thin note ${i}`,
-      body: `Thin note ${i} body.`,
+      title: `Thin note ${word} ${i}`,
+      body: `Thin note about ${word} here.`,
       type: "gotcha",
+      allowLowQuality: true,
     });
     assert.equal(result.ok, true, `capture ${i} should succeed: ${result.errors.join("; ")}`);
   }
@@ -122,7 +138,10 @@ test("capCollection truncates and states an honest total", () => {
 
 test("kage_refresh caps stale_packets to at most 10 and states the true total", async () => {
   const project = tempProject();
-  seedStalePackets(project, 15, { deprecatedCount: 3 });
+  // No deprecatedCount here: gc/refresh now hard-exclude deprecated/superseded packets from
+  // the stale surface (they are end-state, not actionable), so a deprecated packet would
+  // never reach stale_packets to exercise the cap in the first place.
+  seedStalePackets(project, 15);
 
   const result = await callTool("kage_refresh", { project_dir: project });
   const payload = JSON.parse(textContent(result));
@@ -135,11 +154,21 @@ test("kage_refresh caps stale_packets to at most 10 and states the true total", 
   // (b) the truncation notice text actually appears in the returned payload.
   assert.match(textContent(result), /showing 10 of 15 stale packets/);
   assert.ok(payload.response_notes.includes("showing 10 of 15 stale packets"));
+});
 
-  // Ranking: the 3 deprecated (mark_stale, most urgent) findings must survive the cap
-  // even though they were captured last, i.e. this is not an insertion-order slice.
-  const shownActions = payload.stale_packets.map((entry: { suggested_action: string }) => entry.suggested_action);
-  assert.equal(shownActions.filter((action: string) => action === "mark_stale").length, 3);
+test("kage_refresh's stale_packets excludes deprecated packets — they are end-state, not actionable", async () => {
+  const project = tempProject();
+  seedStalePackets(project, 5, { deprecatedCount: 3 });
+
+  const result = await callTool("kage_refresh", { project_dir: project });
+  const payload = JSON.parse(textContent(result));
+
+  // Reverting the refreshPacketStaleness exclusion would report 5 here (3 deprecated + 2
+  // genuinely actionable), each deprecated one flagged "mark_stale" for restating its own
+  // status — exactly what used to dominate the stale list.
+  assert.equal(payload.stale_packets_total, 2);
+  const actions = payload.stale_packets.map((entry: { suggested_action: string }) => entry.suggested_action);
+  assert.equal(actions.includes("mark_stale"), false);
 });
 
 test("kage_refresh limit/verbose return more than the capped default", async () => {
@@ -404,7 +433,9 @@ test("kage_inbox caps items with a true total", async () => {
 test("kage_memory_access caps entries with a true total", async () => {
   const project = tempProject();
   for (let i = 0; i < 20; i++) {
-    assert.equal(capture({ projectDir: project, title: `Access fixture ${i}`, body: `Access fixture body ${i}.`, type: "gotcha", paths: [`src/access-${i}.ts`] }).ok, true);
+    // allowLowQuality: fictional paths (never written to disk) make these ungrounded, and the
+    // fixture only needs 20 distinct packets to test capping — not real quality/grounding.
+    assert.equal(capture({ projectDir: project, title: `Access fixture ${i}`, body: `Access fixture body ${i}.`, type: "gotcha", paths: [`src/access-${i}.ts`], allowLowQuality: true }).ok, true);
   }
   const result = await callTool("kage_memory_access", { project_dir: project });
   const payload = JSON.parse(textContent(result));
@@ -416,7 +447,8 @@ test("kage_memory_access caps entries with a true total", async () => {
 test("kage_memory_timeline caps entries with a true total", async () => {
   const project = tempProject();
   for (let i = 0; i < 20; i++) {
-    assert.equal(capture({ projectDir: project, title: `Timeline fixture ${i}`, body: `Timeline fixture body ${i}.`, type: "gotcha", paths: [`src/timeline-${i}.ts`] }).ok, true);
+    // allowLowQuality: same fictional-path fixture pattern as the memory_access test above.
+    assert.equal(capture({ projectDir: project, title: `Timeline fixture ${i}`, body: `Timeline fixture body ${i}.`, type: "gotcha", paths: [`src/timeline-${i}.ts`], allowLowQuality: true }).ok, true);
   }
   const result = await callTool("kage_memory_timeline", { project_dir: project });
   const payload = JSON.parse(textContent(result));
