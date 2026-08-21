@@ -48,6 +48,11 @@ function verificationChildScript(lockPath: string, projectDir: string, runId: st
     `const fs = require("node:fs");`,
     `const path = require("node:path");`,
     `process.env.KAGE_VERIFY_LOCK_PATH = ${JSON.stringify(lockPath)};`,
+    // This test's own process may itself be running nested inside a real kernel
+    // verification that already holds the machine's DEFAULT lock and stamped this marker
+    // into every child it spawns — which would otherwise leak into this deliberately
+    // separate lockPath and make the child skip real contention, proving nothing.
+    `delete process.env.KAGE_VERIFY_LOCK_HELD;`,
     `const start = Date.now();`,
     `const outcome = runCommandCheck(${JSON.stringify(projectDir)}, ${JSON.stringify(runId)}, ${JSON.stringify(projectDir)}, { id: "tests", kind: "command", cmd: ${JSON.stringify(cmd)}, expect: "exit code 0" });`,
     `const elapsedMs = Date.now() - start;`,
@@ -113,6 +118,9 @@ test("a dead holder's stale verification lock is stolen rather than waited on fo
   // exited by the time we read its reported pid.
   const crashScript = [
     `const { acquireVerifyLock } = require(${JSON.stringify(lockModulePath)});`,
+    // See verificationChildScript's comment: this test's own process may itself be running
+    // nested inside a real kernel verification that already stamped this marker.
+    `delete process.env.KAGE_VERIFY_LOCK_HELD;`,
     `acquireVerifyLock({ lockPath: ${JSON.stringify(lockPath)} });`,
     `process.stdout.write(String(process.pid));`,
   ].join("\n");
@@ -120,9 +128,20 @@ test("a dead holder's stale verification lock is stolen rather than waited on fo
   const deadPid = Number(crashed.stdout.trim());
   assert.ok(Number.isInteger(deadPid) && deadPid > 0, `crashed holder must report a real pid, got: ${crashed.stdout}`);
 
-  const start = Date.now();
-  const acquisition = acquireVerifyLock({ lockPath });
-  const elapsedMs = Date.now() - start;
+  // Same leak risk for this direct, same-process call — this test process itself may be
+  // running nested inside a real kernel verification holding the default lock.
+  const previousHeld = process.env.KAGE_VERIFY_LOCK_HELD;
+  delete process.env.KAGE_VERIFY_LOCK_HELD;
+  let acquisition;
+  let elapsedMs;
+  try {
+    const start = Date.now();
+    acquisition = acquireVerifyLock({ lockPath });
+    elapsedMs = Date.now() - start;
+  } finally {
+    if (previousHeld === undefined) delete process.env.KAGE_VERIFY_LOCK_HELD;
+    else process.env.KAGE_VERIFY_LOCK_HELD = previousHeld;
+  }
 
   assert.equal(acquisition.stolenFromPid, deadPid, "acquiring after a dead holder must report the steal");
   // Revert check: without stale-holder detection, this call has nothing left alive to ever
@@ -141,6 +160,9 @@ test("runCommandCheck's evidence records how long a queued check waited for the 
   // thread that would need to run the code that releases the lock).
   const holderScript = [
     `const { acquireVerifyLock } = require(${JSON.stringify(lockModulePath)});`,
+    // See verificationChildScript's comment: this test's own process may itself be running
+    // nested inside a real kernel verification that already stamped this marker.
+    `delete process.env.KAGE_VERIFY_LOCK_HELD;`,
     `const acq = acquireVerifyLock({ lockPath: ${JSON.stringify(lockPath)} });`,
     `process.stdout.write("ACQUIRED\\n");`,
     `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${holdMs});`,
@@ -154,7 +176,11 @@ test("runCommandCheck's evidence records how long a queued check waited for the 
 
   const projectDir = tempDir("kage-verify-lock-wait-evidence-");
   const previousEnv = process.env.KAGE_VERIFY_LOCK_PATH;
+  const previousHeld = process.env.KAGE_VERIFY_LOCK_HELD;
   process.env.KAGE_VERIFY_LOCK_PATH = lockPath;
+  // This direct, same-process call has the same leak risk: this test process itself may be
+  // running nested inside a real kernel verification holding the default lock.
+  delete process.env.KAGE_VERIFY_LOCK_HELD;
   try {
     const start = Date.now();
     const outcome = runCommandCheck(projectDir, "run-wait-evidence", projectDir, {
@@ -178,6 +204,8 @@ test("runCommandCheck's evidence records how long a queued check waited for the 
   } finally {
     if (previousEnv === undefined) delete process.env.KAGE_VERIFY_LOCK_PATH;
     else process.env.KAGE_VERIFY_LOCK_PATH = previousEnv;
+    if (previousHeld === undefined) delete process.env.KAGE_VERIFY_LOCK_HELD;
+    else process.env.KAGE_VERIFY_LOCK_HELD = previousHeld;
   }
 
   await new Promise((resolve) => holder.on("close", resolve));
