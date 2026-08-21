@@ -62,10 +62,13 @@ import { askManager } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
 import {
   askRoomSupervisor,
+  detectPermissionStuckMention,
   dispatchRoomSupervisor,
   isRoomSupervisorLive,
+  permissionStuckNote,
   readRoomSessionMeta,
   readRoomSupervisorRecord,
+  writeRoomSessionMeta,
   type RoomStreamEvent,
 } from "./room-supervisor.js";
 import { readNativeTranscriptPage, waitForNewAssistantTurns, TRANSCRIPT_PAGE_CAP } from "./room-transcript.js";
@@ -80,10 +83,12 @@ import {
   attachRoomPty,
   dispatchRoomPtySupervisor,
   frameChatInputForPty,
+  isPtySupervisorStale,
   isRoomPtyLive,
   readRoomPtyRecord,
   retirePtyRoom,
   retireStructuredRoom,
+  rotatePtySupervisor,
   type RoomPtyAttachment,
 } from "./room-pty.js";
 import {
@@ -307,6 +312,14 @@ export interface DelegationApiContext {
   askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; corrections?: string[] }>;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
+  /** Test seam: replace the real reply-wait poller, so a pty-ask-timeout test can force
+   * an instant "nothing arrived" without actually waiting PTY_REPLY_TIMEOUT_MS (6min). */
+  waitForNewAssistantTurnsFn?: typeof waitForNewAssistantTurns;
+  /** Test seam: replace the real kill-and-respawn-fresh action a wedged pty supervisor
+   * triggers, so a test can assert it was called without spawning a real detached
+   * process (rotatePtySupervisor's own dispatchRoomPtySupervisor call is real-process
+   * spawning, exactly what every other test seam in this file exists to avoid). */
+  recyclePtySupervisorFn?: typeof rotatePtySupervisor;
   /** Test seam: replace real take-over pty spawning entirely — never a real claude. */
   takeOverRunFn?: typeof takeOverRun;
   /** Test seam: replace the real kill-and-reattach hand-back entirely. */
@@ -431,20 +444,36 @@ interface RoomReply {
   tools: string[];
   corrections?: string[];
   manager?: RoomManagerLabel;
+  /** True when `text` is Kage's own honest report of a failure — never the manager's
+   * own prose. Propagated straight onto the persisted turn (RoomHistoryTurn.failed) so
+   * the renderer can style it as a visible failure instead of an ordinary reply. */
+  failed?: boolean;
 }
 
 /**
  * Writes the message into the SAME interactive session Terminal shows (no second
  * channel), then waits for claude's own native transcript to grow with a new assistant
  * turn. Returns null — quickly, never spawning a new session to find out — when no pty
- * is ALREADY live, or its identity hasn't been recorded yet; either way the caller
- * falls back to headless honestly, never guessing at a reply and never blocking a chat
- * message behind a fresh interactive claude spawn (see ensurePtyAttached's
- * `spawnIfNeeded` doc — that spawn is for the explicit Terminal-open routes only).
+ * is ALREADY live; either way the caller falls back to headless honestly, never
+ * guessing at a reply and never blocking a chat message behind a fresh interactive
+ * claude spawn (see ensurePtyAttached's `spawnIfNeeded` doc — that spawn is for the
+ * explicit Terminal-open routes only).
  */
 export async function resolvePtyReply(ctx: DelegationApiContext, message: string, session?: string): Promise<RoomReply | null> {
   const { projectDir } = ctx;
   const key = normalizeSessionKey(session);
+  const recycle = ctx.recyclePtySupervisorFn ?? rotatePtySupervisor;
+
+  // Guard against a wedged-forever session BEFORE this ask ever reaches it: a
+  // supervisor whose last ask timed out, or that has been holding the same session
+  // open for 12h+, gets rotated (fresh process, fresh session identity) here rather
+  // than being trusted on the strength of a process-liveness probe alone — see
+  // isPtySupervisorStale's own doc for why that probe can't tell a wedged session from
+  // a healthy one.
+  if (isPtySupervisorStale(readRoomPtyRecord(projectDir, key), readRoomSessionMeta(projectDir, key))) {
+    recycle(projectDir, key);
+  }
+
   const ensureAttached = ctx.ensurePtyAttachedFn ?? ensurePtyAttached;
   const attachment = await ensureAttached(ctx, key, false);
   if (!attachment) return null;
@@ -457,26 +486,59 @@ export async function resolvePtyReply(ctx: DelegationApiContext, message: string
   const meta = readRoomSessionMeta(projectDir, key);
   if (!meta.session_id || !meta.native_transcript_path) {
     // The pty is live but superviseRoomPty hasn't (yet) recorded its identity — a
-    // startup race. The message still reaches the real session; there is just nothing
-    // to poll a reply out of this turn.
+    // startup race, not a failure of the session itself. The message still reaches the
+    // real session; there is just nothing to poll a reply out of for THIS turn — say so
+    // plainly rather than persisting a blank "done" turn (Terminal shows the real
+    // exchange regardless of what Chat can report here).
     attachment.write(frameChatInputForPty(message));
-    return { text: "", tools: [], manager: "pty" };
+    return {
+      text: "Kage sent your message to the terminal session, but hasn't recorded its identity yet, so there is nothing to summarize here for this turn — check the Terminal tab for the real reply.",
+      tools: [],
+      manager: "pty",
+      failed: true,
+    };
   }
 
   const readPage = () => readNativeTranscriptPage(meta.native_transcript_path as string, { limit: TRANSCRIPT_PAGE_CAP });
   const beforeTotal = readPage().total;
   attachment.write(frameChatInputForPty(message));
-  const newTurns = await waitForNewAssistantTurns(readPage, {
+  const wait = ctx.waitForNewAssistantTurnsFn ?? waitForNewAssistantTurns;
+  const newTurns = await wait(readPage, {
     beforeTotal,
     timeoutMs: PTY_REPLY_TIMEOUT_MS,
     pollMs: PTY_REPLY_POLL_MS,
     quietMs: PTY_REPLY_QUIET_MS,
   });
-  const text = newTurns
+
+  if (!newTurns.length) {
+    // The manager did not answer within the window. A process-liveness probe (e.g.
+    // /room/pty/status) would still report this session alive — it only checks that
+    // the pid exists, not that it answers — so "alive" can never again be treated as
+    // "answering" here: recycle now, honestly, rather than let the NEXT message eat
+    // another full timeout against the same wedged session.
+    recycle(projectDir, key);
+    writeRoomSessionMeta(projectDir, { last_ask_timed_out: true }, key);
+    const minutes = Math.round(PTY_REPLY_TIMEOUT_MS / 60_000);
+    return {
+      text: `The manager did not answer within ${minutes} minutes — its session stopped responding. Kage rotated it to a fresh session, so your next message reaches a live manager instead of another ${minutes}-minute wait.`,
+      tools: [],
+      manager: "pty",
+      failed: true,
+    };
+  }
+  writeRoomSessionMeta(projectDir, { last_ask_timed_out: false }, key);
+
+  let text = newTurns
     .map((turn) => turn.text)
     .filter(Boolean)
     .join("\n\n");
   const tools = [...new Set(newTurns.flatMap((turn) => turn.tools))];
+  // The pty manager runs with every delegation tool pre-approved (MANAGER_ALLOWED_TOOLS)
+  // the same as the headless supervisor — a permission prompt is never real here either,
+  // so a reply that narrates waiting on one gets the same honest correction the headless
+  // path already applies, rather than being taken at face value as ordinary prose.
+  const stuckTool = detectPermissionStuckMention(text);
+  if (stuckTool) text = `${text}\n\n${permissionStuckNote(stuckTool)}`;
   return { text, tools, manager: "pty" };
 }
 
@@ -575,15 +637,24 @@ function queueRoomTurn(
   room.chain = room.chain.then(async () => {
     try {
       const reply = await resolveRoomReply(ctx, message, historyBefore, key);
+      // Last-resort backstop, independent of which leg produced the reply: an empty
+      // reply is never a valid "done" turn — a blank bubble marked DONE is exactly the
+      // symptom that made a wedged manager session read as a silently-answered message
+      // instead of the failure it was. Every leg that KNOWS why it's empty (the pty
+      // timeout/startup-race branches above) already sets failed:true with an honest
+      // explanation; this only fires for a leg that slips through with blank text some
+      // other way.
+      const blank = !reply.text || !reply.text.trim();
       appendRoomTurn(projectDir, {
         role: "kage",
-        text: reply.text,
+        text: blank ? "The manager returned an empty reply — nothing to show for this turn." : reply.text,
         tools: reply.tools,
         ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
         ...(reply.manager ? { manager: reply.manager } : {}),
+        ...(blank || reply.failed ? { failed: true } : {}),
       }, key);
     } catch (error) {
-      appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}` }, key);
+      appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}`, failed: true }, key);
     } finally {
       feed.notifyRoom({ kind: "final", done: true, session: key });
       room.pending -= 1;

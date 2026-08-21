@@ -24,8 +24,10 @@ import {
   readRoomSessionMeta,
   readRoomSupervisorRecord,
   resolveRoomResumeId,
+  retireRoomSession,
   roomPermissionDigest,
   writeRoomSessionMeta,
+  type RoomSessionMeta,
 } from "./room-supervisor.js";
 import { DEFAULT_SESSION, normalizeSessionKey, roomDirFor } from "./room-sessions.js";
 import { MANAGER_ALLOWED_TOOLS } from "./manager-client.js";
@@ -223,12 +225,20 @@ export type RoomPtyFrame = { kind: "data"; bytes: string } | { kind: "status"; a
 /** Stop the pty room, if one is holding the session. Mirror of retireStructuredRoom. */
 export function retirePtyRoom(projectDir: string, session?: string): void {
   const record = readRoomPtyRecord(projectDir, session);
-  if (!record || !isProcessAlive(record.pid)) return;
-  try {
-    process.kill(record.pid, "SIGTERM");
-  } catch {
-    // Already gone.
+  if (record && isProcessAlive(record.pid)) {
+    try {
+      process.kill(record.pid, "SIGTERM");
+    } catch {
+      // Already gone between the check and the signal.
+    }
   }
+  // The record file itself must never outlive the decision to retire — a stale
+  // pty-supervisor.json is exactly what makes isRoomPtyLive's own fallback
+  // (readRoomPtyRecord + isProcessAlive) report a session alive by a REUSED pid, long
+  // after the session it originally named is gone. superviseRoomPty's own graceful-exit
+  // cleanup also removes this file, so this is a no-op (force:true) on the common path
+  // and the fix only for the abrupt-death/reused-pid case.
+  rmSync(roomPtyRecordPath(projectDir, session), { force: true });
 }
 
 export async function superviseRoomPty(projectDir: string, session?: string): Promise<void> {
@@ -423,6 +433,47 @@ export function dispatchRoomPtySupervisor(projectDir: string, session?: string):
   );
   child.unref();
   return { pid: child.pid };
+}
+
+// Deliberately tighter than any real session is expected to live for: the two live
+// wedges this guards against were both a DAY old, so 12h catches a wedge well before it
+// can repeat that. A supervisor still answering fine at 12h just gets recycled early —
+// cheap (a fresh spawn resumes the same conversation via history replay) next to the
+// cost of missing a genuine wedge.
+const PTY_SUPERVISOR_MAX_AGE_MS = 12 * 60 * 60_000;
+
+/**
+ * Whether the pty supervisor should be recycled BEFORE the next ask even reaches it,
+ * rather than reactively after another ask times out: a supervisor whose last completed
+ * ask never got an answer is exactly the "alive because the process exists, not because
+ * it answers" case isRoomPtyLive's own status probe cannot see (see this module's own
+ * `status` handler — it always replies `alive:true` the instant the socket accepts a
+ * connection, regardless of whether the claude session inside it is responsive). A
+ * supervisor that has never run (record is null) is never stale — there is nothing to
+ * recycle. Pure so this is directly unit-testable without a real process or a real 12h
+ * wait.
+ */
+export function isPtySupervisorStale(record: RoomPtyRecord | null, meta: RoomSessionMeta, now: number = Date.now()): boolean {
+  if (!record) return false;
+  if (meta.last_ask_timed_out) return true;
+  const age = now - Date.parse(record.started_at);
+  return Number.isFinite(age) && age > PTY_SUPERVISOR_MAX_AGE_MS;
+}
+
+/**
+ * The single recycle action for a pty supervisor suspected of being wedged: retires the
+ * process (and its now-meaningless record file, see retirePtyRoom above), THEN retires
+ * the session identity itself (retireRoomSession, room-supervisor.ts) so the fresh
+ * process this spawns cannot --resume the exact session id that stopped answering — a
+ * wedged CLAUDE SESSION, not merely a wedged process, is what both real occurrences of
+ * this bug turned out to be. Used by both the reactive path (an ask just timed out) and
+ * the proactive guard (isPtySupervisorStale, above) so there is exactly one way this
+ * happens, not two that could drift apart.
+ */
+export function rotatePtySupervisor(projectDir: string, session?: string): { pid: number | undefined } {
+  retirePtyRoom(projectDir, session);
+  retireRoomSession(projectDir, session, "wedged");
+  return dispatchRoomPtySupervisor(projectDir, session);
 }
 
 const PTY_CONTROL_TIMEOUT_MS = 3000;

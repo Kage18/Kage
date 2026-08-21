@@ -970,9 +970,10 @@ test("a manager failure becomes a visible kage turn instead of a silently droppe
       const out = await (await apiFetch(port, "/room")).json() as { turns: unknown[] };
       return out.turns.length >= 2;
     });
-    const out = await (await apiFetch(port, "/room")).json() as { turns: Array<{ role: string; text: string }> };
+    const out = await (await apiFetch(port, "/room")).json() as { turns: Array<{ role: string; text: string; failed?: boolean }> };
     assert.equal(out.turns[1].role, "kage");
     assert.match(out.turns[1].text, /claude exited 1/);
+    assert.equal(out.turns[1].failed, true, "a manager failure must be marked so the renderer styles it as a failure, not prose");
   } finally {
     feed.close();
     server.close();

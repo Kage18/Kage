@@ -23,6 +23,11 @@ export interface RoomHistoryTurn {
    * Undefined for a "you" turn, or a "kage" turn from a test's askRoomFn override that
    * never went through real routing. */
   manager?: "pty" | "headless";
+  /** True when this "kage" turn is Kage's own honest report of a failure (an ask that
+   * timed out, an empty reply from any leg, an unhandled error) rather than the
+   * manager's own prose — the renderer styles these as a visible failure, never as an
+   * ordinary reply. Undefined (never false) for a normal turn. */
+  failed?: boolean;
 }
 
 export function roomHistoryPath(projectDir: string, session?: string): string {
