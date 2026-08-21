@@ -5,202 +5,229 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Git-native memory for coding agents, verified against your code. Open memory your team's agents read and write together: every lesson becomes a file in your repo, versioned in git, reviewed in PRs, checked against your code so stale claims get caught before they mislead anyone. One command to install, no account, no API key."
+      content="Kage is the orchestrator that doesn't take an agent's word for it. Every 'done' is a claim, re-checked by the kernel in a clean worktree before it can merge. Local. GPL-3.0. Your repo keeps the memory."
     />
-    <title>Kage — verified OKF memory for coding agents, kept true to your code</title>
+    <title>Kage — Prove it. The orchestrator that re-checks every agent claim.</title>
     <link rel="icon" type="image/svg+xml" href="assets/kage-eye.svg" />
     <link rel="canonical" href="https://kage-core.com/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Kage" />
     <meta property="og:url" content="https://kage-core.com/" />
-    <meta property="og:title" content="Kage — git-native memory for coding agents, verified against your code" />
-    <meta property="og:description" content="Open, git-native memory your team's coding agents read and write together. Every lesson becomes a file in your repo: versioned in git, reviewed in PRs, checked against your code. No account, no API key." />
+    <meta property="og:title" content="Kage — Prove it. The orchestrator that re-checks every agent claim." />
+    <meta property="og:description" content="Kage doesn't take an agent's word for it. Every 'done' is a claim, re-checked by the kernel in a clean worktree before it can merge. Local, GPL-3.0, your repo keeps the memory." />
     <meta property="og:image" content="https://kage-core.com/assets/kage-cover.png" />
     <meta property="og:image:width" content="1000" />
     <meta property="og:image:height" content="420" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Kage — git-native memory for coding agents, verified against your code" />
-    <meta name="twitter:description" content="Open, git-native memory your team's coding agents read and write together. Versioned in git, reviewed in PRs, checked against your code. No account, no API key." />
+    <meta name="twitter:title" content="Kage — Prove it. The orchestrator that re-checks every agent claim." />
+    <meta name="twitter:description" content="Every 'done' is a claim, re-checked by the kernel before it can merge. Local, GPL-3.0, your repo keeps the memory." />
     <meta name="twitter:image" content="https://kage-core.com/assets/kage-cover.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Inter:wght@400..700&family=JetBrains+Mono:wght@400..600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..900&family=Inter:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap"
     />
-    <link rel="stylesheet" href="assets/site.css?v=5" />
+    <link rel="stylesheet" href="assets/site.css?v=6" />
     <style>
-      /* ——— Hero ——— */
-      .hero { padding: 96px 0 64px; }
-      .hero-grid {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(340px, 0.72fr);
-        gap: clamp(32px, 5vw, 64px);
-        align-items: center;
-      }
-      .hero h1 { max-width: 640px; }
-      .hero h1 .accent { color: var(--green); font-style: italic; }
-      .hero-copy { margin-top: 18px; max-width: 520px; color: var(--muted); font: 400 18px/1.6 var(--sans); }
+      /* ——— scene rhythm ——— */
+      .scene { padding: clamp(48px, 8vw, 88px) 0; border-top: 1px solid var(--line); }
+      .scene:first-of-type { border-top: 0; }
+      .scene.inset { background: var(--inset); }
+      .kick { font: 600 10.5px/1 var(--mono); letter-spacing: 0.22em; text-transform: uppercase; color: var(--faint); margin-bottom: 22px; }
+      .kick b { color: var(--red); font-weight: 700; }
+      .kick .grn { color: var(--green); font-weight: 700; }
 
-      /* ——— OKF: front and center ——— */
-      .okf-badge {
-        display: inline-flex; align-items: center; gap: 9px;
-        padding: 7px 14px 7px 9px; margin-bottom: 20px;
-        border: 1px solid var(--hairline-green); border-radius: 999px;
-        background: var(--paper); box-shadow: var(--shadow-card);
-        color: var(--ink); font: 600 13px/1 var(--sans); text-decoration: none;
-      }
-      .okf-badge:hover { border-color: var(--green); }
-      .okf-badge .by { color: var(--faint); font-weight: 500; }
-      .okf-badge .arr { color: var(--green); }
-      .okf-badge .by { display: inline-flex; align-items: center; gap: 4px; }
-      .okf-badge .by img { width: 13px; height: 13px; }
-      .okf-lockup { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-bottom: 14px; }
-      .okf-lockup img { width: 19px; height: 19px; }
-      .okf-lockup .lbl { color: #d6dcd2; font: 600 13px/1 var(--sans); }
-      .okf-lockup .sep { color: rgba(255,255,255,0.22); }
-      .okf-band { background: var(--code-bg); padding: 84px 0; }
-      .okf-band .eyebrow { color: var(--green-strong); }
-      .okf-band h2 { color: #f3f6f2; max-width: 760px; }
-      .okf-band h2 .accent { color: var(--green); font-style: italic; }
-      .okf-band code { color: var(--green-strong); }
-      .okf-band a { color: var(--green); }
-      .okf-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(320px,0.82fr); gap: clamp(32px,5vw,60px); align-items: center; margin-top: 38px; }
-      .okf-lede { color: #aeb6ac; max-width: 600px; font: 400 17px/1.65 var(--sans); }
-      .okf-brings { display: grid; gap: 16px; margin-top: 28px; }
-      .okf-bring { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; }
-      .okf-bring .n { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); font: 700 13px/1 var(--mono); flex: 0 0 auto; }
-      .okf-bring b { display: block; color: #f3f6f2; font: 600 15px/1.4 var(--sans); }
-      .okf-bring p { margin: 3px 0 0; color: #9aa49c; font: 400 14px/1.55 var(--sans); }
-      .okf-closer { margin-top: 30px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,0.1); color: #cdd4ca; font: 500 16px/1.6 var(--sans); max-width: 680px; }
-      .okf-closer b { color: var(--green); }
-      .okf-concept { border: 1px solid rgba(255,255,255,0.12); border-radius: var(--r-card); background: #0c110d; overflow: hidden; box-shadow: var(--shadow-pop); }
-      .okf-concept .h { display: flex; justify-content: space-between; padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); color: #8d968e; font: 500 11.5px/1 var(--mono); }
-      .okf-concept .h .ok { color: var(--green); }
-      .okf-concept pre { margin: 0; padding: 16px 18px; font: 400 12.5px/1.7 var(--mono); color: #c7cfc4; overflow-x: auto; }
-      .okf-concept .kx { color: var(--green-strong); }
-      .okf-concept .cm { color: #6f786e; }
+      /* ——— scene 1 : the claim ——— */
+      .stamp-wrap { position: relative; max-width: 620px; }
+      .claim-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font: 600 11px/1 var(--mono); color: var(--faint); letter-spacing: 0.08em; text-transform: uppercase; }
+      .claim-meta .av { width: 8px; height: 8px; border-radius: 50%; background: #8f97a8; }
+      .claim-msg { background: var(--paper); border: 1px solid var(--line); border-radius: var(--r-card); padding: clamp(18px, 3vw, 28px); font: 400 clamp(15px, 2.4vw, 16.5px)/1.68 var(--sans); color: #dde1da; }
+      .claim-msg .path { font-family: var(--mono); font-size: 0.9em; color: #b9c4b6; }
+      .claim-sub { margin-top: 10px; font: 600 11px/1 var(--mono); color: var(--faint); letter-spacing: 0.06em; text-transform: uppercase; }
 
-      /* ——— Feature rows: text + product artifact ——— */
-      .feature {
-        display: grid;
-        grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-        gap: clamp(28px, 5vw, 72px);
-        align-items: center;
+      .not-verified {
+        position: absolute; right: clamp(-40px, -8vw, -10px); top: 10%;
+        transform: rotate(-7deg);
+        border: 3px solid var(--red); outline: 1.5px solid var(--red); outline-offset: 4px;
+        border-radius: 6px; padding: 12px 20px 10px; color: var(--red); text-align: center;
+        background: color-mix(in srgb, var(--bg) 55%, transparent);
+        animation: slam 0.42s cubic-bezier(0.2, 0.85, 0.3, 1.25) 0.5s both;
       }
-      .feature.flip > .feature-copy { order: 2; }
-      .feature-copy h2 { max-width: 420px; }
-      .feature-copy .lede { font-size: 16px; }
-      .feature-copy .more { display: inline-block; margin-top: 14px; color: var(--green); font: 600 14px/1 var(--sans); }
-      .feature-copy .more:hover { color: var(--green-strong); }
-
-      .stream { display: grid; gap: 10px; }
-      .pktcard {
-        padding: 14px 16px;
-        border: 1px solid var(--line);
-        border-radius: var(--r-panel);
-        background: var(--paper);
-        box-shadow: var(--shadow-card);
+      .not-verified .big { font: 900 clamp(22px, 4vw, 40px)/1 var(--serif); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+      .not-verified .sub { margin-top: 8px; font: 500 9.5px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; }
+      @keyframes slam {
+        0% { opacity: 0; transform: rotate(-7deg) scale(2.4); }
+        62% { opacity: 1; transform: rotate(-7deg) scale(0.94); }
+        82% { transform: rotate(-7deg) scale(1.05); }
+        100% { opacity: 1; transform: rotate(-7deg) scale(1); }
       }
-      .pktcard .meta { display: flex; align-items: center; gap: 10px; font: 600 11px/1 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: 0.08em; }
-      .pktcard .meta .t { margin-left: auto; text-transform: none; letter-spacing: 0; }
-      .pktcard .meta .kind { color: var(--memory); }
-      .pktcard b { display: block; margin-top: 8px; color: var(--ink); font: 600 14.5px/1.35 var(--sans); }
-      .pktcard .check { display: block; margin-top: 7px; font: 500 12.5px/1.5 var(--mono); color: var(--green); }
-      .pktcard.is-rejected { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
-      .pktcard.is-rejected .check { color: var(--danger); }
-      .pktcard.is-withheld { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); opacity: 0.92; }
-      .pktcard.is-withheld .check { color: var(--warn); }
-
-      .sysmsg {
-        overflow: hidden;
-        border: 1px solid var(--hairline-green);
-        border-radius: var(--r-card);
-        background: var(--code-bg);
-        color: var(--code-text);
-        font: 400 13px/1.7 var(--mono);
-        box-shadow: var(--shadow-pop);
-      }
-      .sysmsg .head { display: flex; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); color: #9aa49c; font: 500 11.5px/1 var(--mono); }
-      .sysmsg .body { padding: 14px 18px 16px; white-space: pre-wrap; }
-      .sysmsg .g { color: var(--green-strong); }
-      .sysmsg .dim { color: #8d968e; }
-
-      .prwarn {
-        border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--line));
-        border-radius: var(--r-card);
-        background: var(--paper);
-        box-shadow: var(--shadow-card);
-        overflow: hidden;
-      }
-      .prwarn .head { padding: 13px 18px; border-bottom: 1px solid var(--line); color: var(--warn); font: 600 14px/1.4 var(--sans); }
-      .prwarn .row { display: grid; gap: 3px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
-      .prwarn .row:last-child { border-bottom: 0; }
-      .prwarn .row b { color: var(--ink); font: 500 13.5px/1.45 var(--sans); }
-      .prwarn .row span { color: var(--muted); font: 400 12.5px/1.5 var(--mono); }
-      .prwarn .row .fix { color: var(--green); }
-
-      .syncwrap { display: grid; gap: 12px; }
-      .syncchip {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 14px 18px;
-        border: 1px solid var(--hairline-green);
-        border-radius: 999px;
-        background: var(--paper);
-        font: 500 13.5px/1 var(--mono);
-        color: var(--ink);
-        box-shadow: var(--shadow-card);
-        overflow-x: auto; white-space: nowrap;
-      }
-      .syncchip .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--green); box-shadow: 0 0 10px var(--green); flex: 0 0 auto; }
-      .syncchip .st { margin-left: auto; color: var(--muted); font-size: 12px; }
-
-      /* ——— Agents row ——— */
-      .agents { display: flex; flex-wrap: wrap; gap: 8px; }
-      .agent {
-        padding: 9px 15px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        background: var(--paper);
-        color: var(--muted);
-        font: 500 13px/1 var(--sans);
+      @media (prefers-reduced-motion: reduce) { .not-verified { animation: none; } }
+      @media (max-width: 640px) {
+        .not-verified { position: static; margin: -18px 0 0 auto; width: fit-content; transform: rotate(-4deg); }
       }
 
-      /* ——— Early access: waitlist + demo ——— */
-      .access {
-        border: 1px solid var(--hairline-green);
-        border-radius: var(--r-hero);
-        background: linear-gradient(180deg, color-mix(in srgb, var(--green) 7%, var(--paper)) 0%, var(--paper) 70%);
-        box-shadow: var(--shadow-pop);
-        padding: clamp(32px, 5vw, 56px);
-        text-align: center;
-      }
-      .access h2 { margin: 0 auto; max-width: 560px; }
-      .access .lede { margin: 14px auto 0; max-width: 560px; }
-      .access .actions { justify-content: center; margin-top: 26px; }
-      .access .fine { margin-top: 16px; color: var(--faint); font: 400 12.5px/1.6 var(--sans); }
-      .access .fine a { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
-      .access .fine a:hover { color: var(--green); }
+      .thesis { margin-top: clamp(36px, 7vw, 64px); font: 900 clamp(52px, 13vw, 172px)/0.95 var(--serif); font-style: italic; letter-spacing: -0.03em; }
+      .thesis .dot { color: var(--red); font-style: normal; }
+      .thesis-sub { margin-top: 22px; max-width: 62ch; color: var(--muted); font: 400 clamp(14.5px, 2vw, 15.5px)/1.7 var(--sans); }
+      .thesis-sub b { color: var(--ink); font-weight: 600; }
 
-      @media (max-width: 820px) {
-        /* minmax(0,1fr), not 1fr: keep min:0 so the column shrinks to the
-           viewport instead of growing to fit wide/unbreakable content. */
-        .hero-grid { grid-template-columns: minmax(0, 1fr); }
-        .feature, .feature.flip { grid-template-columns: minmax(0, 1fr); }
-        .feature.flip > .feature-copy { order: 0; }
-        .okf-grid { grid-template-columns: minmax(0, 1fr); }
-        .okf-lede { max-width: 100%; }
-        /* never let hero blocks exceed the screen */
-        .hero h1, .hero-copy, .cmd { max-width: 100%; }
-        /* let command boxes wrap and break the long URL instead of overflowing */
-        .cmd { white-space: normal; }
-        .cmd > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
-        /* kill the desktop-scale empty gap above the hero and tighten the lede */
-        .hero { padding: 36px 0 44px; }
-        .hero-copy { margin-top: 14px; font-size: 16px; line-height: 1.55; }
+      /* ——— scene 2 : the wall ——— */
+      .wall-band { overflow: hidden; padding-top: 30px; }
+      .wall-row { margin-bottom: 14px; white-space: nowrap; color: #303630; font: 400 clamp(13px, 2.6vw, 20px)/1 var(--mono); letter-spacing: 0.01em; }
+      .wall-row .hot { color: #4a5149; }
+      .wall-row .tag { display: inline-block; margin: 0 8px; padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--red) 50%, transparent); border-radius: 3px; color: var(--red); font: 600 9px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; }
+      @keyframes driftL { from { transform: translateX(0); } to { transform: translateX(-60px); } }
+      @keyframes driftR { from { transform: translateX(-60px); } to { transform: translateX(0); } }
+      .wall-row.l { animation: driftL 46s linear infinite alternate; }
+      .wall-row.r { animation: driftR 52s linear infinite alternate; }
+      @media (prefers-reduced-motion: reduce) { .wall-row { animation: none; } }
+      .wall-cap { padding-top: 8px; }
+      .wall-cap .l1 { font: 700 clamp(19px, 3vw, 26px)/1.3 var(--serif); }
+      .wall-cap .l2 { margin-top: 6px; color: var(--muted); font-size: 14px; }
+
+      /* ——— scene 3 : case 001 ——— */
+      .case-grid { display: flex; flex-wrap: wrap; gap: 24px; align-items: stretch; }
+      .case-grid > * { flex: 1 1 320px; min-width: 0; }
+      .q-obj { background: var(--paper); border: 1px solid var(--line); border-radius: var(--r-card); padding: 20px 24px; color: #d7dbd3; font: 400 14.5px/1.65 var(--sans); }
+      .q-obj .path { font-family: var(--mono); font-size: 0.87em; color: #b9c4b6; }
+      .q-src { margin-top: 12px; color: var(--faint); font: 500 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+      .find { position: relative; overflow-x: auto; background: var(--code-bg); border: 1px solid var(--line-strong); border-radius: 4px; padding: 22px 26px; color: var(--code-text); font: 400 13px/1.9 var(--mono); }
+      .find .p { color: var(--green); }
+      .find .dim { color: color-mix(in srgb, var(--code-text) 55%, transparent); }
+      .find .zero { color: var(--red); font-weight: 700; }
+      .smallstamp { display: inline-block; margin-top: 16px; transform: rotate(-4deg); border: 2.5px double var(--red); border-radius: 4px; padding: 6px 14px; color: var(--red); font: 900 17px/1 var(--serif); letter-spacing: 0.1em; text-transform: uppercase; }
+      .case-prose { margin-top: 36px; max-width: 62ch; color: var(--ink); font: 600 clamp(18px, 2.6vw, 22px)/1.55 var(--serif); }
+      .case-prose em { color: var(--red); font-style: italic; }
+      .case-foot { margin-top: 16px; color: var(--faint); font: 400 11px/1.6 var(--mono); letter-spacing: 0.04em; }
+
+      /* ——— scene 4 : the loop ——— */
+      .lead { margin-top: 16px; max-width: 66ch; color: var(--muted); font: 400 14.5px/1.7 var(--sans); }
+      .objects { display: flex; flex-wrap: wrap; justify-content: center; gap: 26px; margin-top: 40px; }
+      .obj { display: flex; flex-direction: column; gap: 12px; width: min(100%, 340px); }
+      .tag-ev { display: flex; align-items: center; gap: 8px; color: var(--faint); font: 500 9.5px/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; }
+      .tag-ev::before { content: ""; width: 7px; height: 7px; border: 1.5px solid var(--faint); border-radius: 50%; }
+
+      .memo { background: var(--physical-paper); color: var(--physical-ink); border-radius: 3px; padding: 22px 24px; transform: rotate(-1.4deg); box-shadow: var(--shadow-pop); }
+      .memo .lh { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; padding-bottom: 9px; border-bottom: 1px solid color-mix(in srgb, var(--physical-ink) 25%, transparent); color: var(--physical-ink-2); font: 500 9px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; }
+      .memo h4 { margin: 0 0 12px; font: 700 17px/1.3 var(--serif); }
+      .memo .cite { padding: 7px 0; border-top: 1px dashed color-mix(in srgb, var(--physical-ink) 22%, transparent); font: 400 10px/1.55 var(--mono); }
+      .memo .cite .who { color: var(--physical-ink-2); }
+      .memo .mf { margin-top: 12px; padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--physical-ink) 25%, transparent); color: var(--physical-ink-2); font: 500 9px/1.5 var(--mono); letter-spacing: 0.06em; }
+
+      .term-obj { overflow: hidden; background: var(--code-bg); border: 1px solid var(--line-strong); border-radius: var(--r-card); box-shadow: var(--shadow-pop); }
+      .term-obj .bar { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; background: #151816; }
+      .term-obj .bar i { display: block; width: 9px; height: 9px; border-radius: 50%; background: #2c302c; }
+      .term-obj pre { margin: 0; padding: 16px 18px 18px; border: 0; border-radius: 0; color: var(--code-text); font: 400 11.5px/1.95 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .term-obj .p { color: var(--green); }
+      .term-obj .dim { color: color-mix(in srgb, var(--code-text) 55%, transparent); }
+
+      .receipt-obj {
+        padding: 26px 24px 22px; background: var(--code-bg); color: var(--code-text); border-radius: 2px;
+        box-shadow: var(--shadow-pop); transform: rotate(0.9deg);
+        -webkit-mask: radial-gradient(circle 5px at 8px 0, transparent 98%, black) top left / 16px 51% repeat-x, radial-gradient(circle 5px at 8px 16px, transparent 98%, black) bottom left / 16px 50% repeat-x;
+        mask: radial-gradient(circle 5px at 8px 0, transparent 98%, black) top left / 16px 51% repeat-x, radial-gradient(circle 5px at 8px 16px, transparent 98%, black) bottom left / 16px 50% repeat-x;
       }
+      .stamp-row { margin-bottom: 9px; text-align: center; }
+      .stamp-g { display: inline-flex; align-items: baseline; gap: 8px; padding: 8px 16px; border: 2.5px double var(--green); border-radius: 3px; color: var(--green); font: 700 16px/1 var(--serif); letter-spacing: 0.12em; text-transform: uppercase; transform: rotate(-1.5deg); }
+      .stamp-g .c { font: 400 12px/1 var(--mono); letter-spacing: 0; }
+      .vsub { display: block; width: fit-content; margin: 0 auto 13px; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--code-text) 35%, transparent); border-radius: 20px; font: 700 8.5px/1.4 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; text-align: center; }
+      .ck { display: grid; grid-template-columns: 14px auto 56px 1fr; gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px dashed color-mix(in srgb, var(--code-text) 15%, transparent); font: 400 10.5px/1.4 var(--mono); }
+      .ck .m { color: var(--green); font-weight: 700; text-align: center; }
+      .ck .reg { color: var(--green); font: 700 8px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+      .ck .reg.insp { color: color-mix(in srgb, var(--code-text) 45%, transparent); }
+      .ck .d { overflow: hidden; color: color-mix(in srgb, var(--code-text) 60%, transparent); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+      .rc-tot { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; padding-top: 9px; border-top: 1px dashed color-mix(in srgb, var(--code-text) 25%, transparent); font: 400 10.5px/1 var(--mono); }
+      .rc-tot .lab { white-space: nowrap; color: color-mix(in srgb, var(--code-text) 60%, transparent); font-size: 8.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+      .rc-tot .dots { flex: 1; min-width: 12px; border-bottom: 1px dotted color-mix(in srgb, var(--code-text) 30%, transparent); transform: translateY(-3px); }
+
+      .loop-foot { max-width: 76ch; margin-top: 34px; color: var(--faint); font: 400 clamp(11px, 1.6vw, 11.5px)/1.6 var(--mono); letter-spacing: 0.03em; }
+      .loop-foot b { color: var(--muted); font-weight: 600; }
+
+      /* ——— scene 4b / 4c shared: two-column claim rows ——— */
+      .two-col { display: flex; flex-wrap: wrap; gap: 32px; margin-top: 36px; align-items: flex-start; }
+      .two-col > * { flex: 1 1 380px; min-width: 0; }
+      .claim-copy { font: 600 21px/1.5 var(--serif); color: var(--ink); max-width: 30ch; }
+      .claim-copy em { color: var(--green); font-style: italic; }
+      .stat-rows { margin-top: 24px; border-top: 1px solid var(--line-strong); }
+      .stat-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+      .stat-row .dots { flex: 1; min-width: 24px; border-bottom: 1px dotted var(--line-strong); transform: translateY(-3px); }
+      .stat-row .v { color: var(--ink); font: 700 20px/1 var(--serif); font-variant-numeric: tabular-nums; }
+      .stat-row .est { color: var(--faint); font: 500 9px/1 var(--mono); letter-spacing: 0.06em; }
+      .scene-foot { max-width: 82ch; margin-top: 26px; color: var(--faint); font: 400 11px/1.7 var(--mono); }
+
+      .packet { max-width: 460px; padding: 20px 24px; background: var(--physical-paper); color: var(--physical-ink); border-radius: 3px; box-shadow: var(--shadow-pop); transform: rotate(-0.8deg); font-family: var(--mono); }
+      .packet .ph { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 11px; padding-bottom: 8px; border-bottom: 1px solid color-mix(in srgb, var(--physical-ink) 25%, transparent); color: var(--physical-ink-2); font: 500 9px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
+      .packet .pt { margin-bottom: 10px; font: 700 15.5px/1.4 var(--serif); }
+      .packet .pl { font: 400 10px/1.7 var(--mono); }
+      .packet .pl .k { color: var(--physical-ink-2); }
+      .packet .pf { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 11px; padding-top: 9px; border-top: 1px dashed color-mix(in srgb, var(--physical-ink) 25%, transparent); color: var(--physical-ink-2); font-size: 9.5px; }
+      .packet .fresh { color: #22713f; font-weight: 700; }
+
+      /* ——— scene 4c : while you were out ——— */
+      .night { max-width: 520px; padding: 6px 0; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; }
+      .nrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; padding: 11px 18px; border-bottom: 1px solid var(--line); }
+      .nrow:last-child { border-bottom: none; }
+      .nrow .tm { flex-shrink: 0; width: 44px; color: var(--faint); font: 500 10px/1 var(--mono); }
+      .nrow .tx { color: var(--muted); font: 400 12.5px/1.5 var(--sans); }
+      .nrow .tx b { color: var(--ink); font-weight: 600; }
+      .nrow .chip { margin-left: auto; }
+      .vocab { display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
+      .vrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
+      .vrow .vcmd { white-space: nowrap; color: var(--green); font: 500 11.5px/1.4 var(--mono); }
+      .vrow .what { color: var(--faint); font: 400 12px/1.5 var(--sans); }
+
+      /* ——— scene 5 : exhibits ——— */
+      .exhibits { display: flex; flex-wrap: wrap; gap: 30px; margin-top: 36px; }
+      .exhibits > * { flex: 1 1 340px; min-width: 0; }
+      .frame { position: relative; padding: 24px; background: var(--bg); border: 1px solid var(--line-strong); }
+      .plate { margin-top: 14px; color: var(--faint); font: 500 9.5px/1.7 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+      .plate b { color: var(--muted); }
+      .slop { overflow: hidden; background: #f6f7fa; color: #292e39; border-radius: 14px; font-family: var(--sans); }
+      .slop .gh { display: flex; align-items: center; height: 52px; padding: 0 18px; background: linear-gradient(135deg, #7b5bfa, #4f9cf7); color: #fff; font-size: 14px; font-weight: 700; }
+      .slop .gb { padding: 16px 18px 18px; font-size: 13px; line-height: 1.6; }
+      .slop .row2 { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #5a6170; font-size: 12px; }
+      .slop .dot2 { width: 8px; height: 8px; border-radius: 50%; background: #34c07c; }
+      .slop .btn2 { display: inline-block; margin-top: 12px; padding: 8px 16px; background: #4f7df7; color: #fff; border-radius: 9px; font-size: 12.5px; font-weight: 600; }
+      .xmark { position: absolute; inset: 24px 24px 56px; pointer-events: none; }
+      .xmark::before, .xmark::after { content: ""; position: absolute; left: -4%; top: 50%; width: 108%; height: 6px; background: var(--red); border-radius: 4px; opacity: 0.82; }
+      .xmark::before { transform: rotate(16deg); }
+      .xmark::after { transform: rotate(-16deg); }
+      .exhibit-card { padding: 14px 16px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+      .exhibit-card .t { color: var(--ink); font: 600 13.5px/1.35 var(--sans); }
+      .exhibit-card .slug { margin-top: 5px; color: var(--faint); font: 400 10px/1.5 var(--mono); }
+      .exhibit-card .row3 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+      .exhibit-chip { padding: 3px 9px; background: var(--paper-2); border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font: 400 10px/1 var(--mono); white-space: nowrap; }
+      .exhibit-chip.ok { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 45%, transparent); color: var(--green); }
+      .exhibit-card .rerun { margin-top: 10px; color: var(--faint); font: 400 9.5px/1.5 var(--mono); letter-spacing: 0.04em; }
+
+      /* ——— scene 6 : the ledger ——— */
+      .strike-row { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; margin-top: 22px; }
+      .struck { color: var(--faint); text-decoration: line-through; text-decoration-color: var(--red); text-decoration-thickness: 4px; font: 900 clamp(24px, 4.5vw, 38px)/1.15 var(--serif); letter-spacing: -0.01em; }
+      .struck-tag { padding: 5px 12px; color: var(--red); border: 2px solid var(--red); border-radius: 4px; transform: rotate(-3deg); font: 500 9.5px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
+      .measured { margin-top: 10px; font: 900 clamp(24px, 4.5vw, 38px)/1.15 var(--serif); letter-spacing: -0.01em; }
+      .ledger { margin-top: 34px; border-top: 1px solid var(--line-strong); }
+      .lrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+      .lrow .name { color: var(--muted); font: 400 14px/1.4 var(--sans); }
+      .lrow .dots { flex: 1; min-width: 24px; border-bottom: 1px dotted var(--line-strong); transform: translateY(-4px); }
+      .lrow .val { white-space: nowrap; font: 700 clamp(20px, 3vw, 27px)/1 var(--serif); font-variant-numeric: tabular-nums; }
+      .lrow .meth { width: 100%; max-width: 330px; color: var(--faint); font: 400 10px/1.6 var(--mono); }
+      .lrow.miss .val, .lrow.miss .meth { color: var(--warn); }
+      .ledger-foot { margin-top: 22px; color: var(--muted); font: 400 clamp(11px, 1.6vw, 11.5px)/1.5 var(--mono); }
+      .ledger-foot .p { color: var(--green); }
+
+      /* ——— scene 7 : the total ——— */
+      .finale-band { background: radial-gradient(900px 320px at 50% 115%, color-mix(in srgb, var(--green) 8%, transparent), transparent 70%), var(--bg); }
+      .finale { display: flex; flex-direction: column; align-items: center; text-align: center; }
+      .stamp-final { padding: 12px 22px; color: var(--green); border: 3px solid var(--green); outline: 1.5px solid var(--green); outline-offset: 4px; border-radius: 6px; transform: rotate(-2.5deg); font: 900 clamp(18px, 3.4vw, 30px)/1.2 var(--serif); letter-spacing: 0.06em; text-transform: uppercase; }
+      .finale .cmd { margin-top: 30px; }
+      .tot-rows { width: min(520px, 100%); margin-top: 22px; }
+      .trow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 6px 0; color: var(--muted); font: 400 12px/1 var(--mono); }
+      .trow .dots { flex: 1; min-width: 24px; border-bottom: 1px dotted var(--line-strong); transform: translateY(-3px); }
+      .trow .v { color: var(--ink); }
+      .barcode { width: 150px; height: 34px; margin-top: 24px; opacity: 0.75; background: repeating-linear-gradient(90deg, var(--muted) 0 2px, transparent 2px 5px, var(--muted) 5px 6px, transparent 6px 11px, var(--muted) 11px 14px, transparent 14px 17px); }
+      .micro { max-width: 90%; margin-top: 12px; color: var(--faint); font: 400 8.5px/1.6 var(--mono); letter-spacing: 0.26em; text-transform: uppercase; }
+      .finale .f-links { justify-content: center; margin-top: 6px; }
     </style>
   </head>
   <body>
@@ -210,431 +237,287 @@
         <span>Kage</span>
       </a>
       <div class="nav-links">
-        <a href="./#how">How it works</a>
-        <a href="./#compare">Compare</a>
-        <a href="./#pricing">Pricing</a>
-        <a href="guide.html">Docs</a>
-        <a href="viewer/">Viewer</a>
+        <a href="guide.html">Guide</a>
+        <a href="benchmarks.html">Benchmarks</a>
+        <a href="releases.html">Releases</a>
         <a class="gh-btn" href="https://github.com/kage-core/Kage" target="_blank" rel="noopener" aria-label="Kage on GitHub">
-        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
-        <span>GitHub</span>
-        <span class="gh-sep"></span>
-        <span class="gh-star">★</span>
-        <span id="gh-stars">6</span>
-      </a>
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+          <span>GitHub</span>
+          <span class="gh-sep"></span>
+          <span class="gh-star">★</span>
+          <span id="gh-stars">6</span>
+        </a>
       </div>
-      <a class="nav-cta" href="demo.html">Book a demo</a>
     </nav>
 
     <main>
-      <!-- ——————————————— HERO ——————————————— -->
-      <section class="hero">
-        <div class="wrap hero-grid">
-          <div>
-            <a class="okf-badge" href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" target="_blank" rel="noopener">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="21" height="21" rx="6" stroke="var(--green)" stroke-width="1.5"/>
-                <path d="M7.6 7.5 L16.4 8.6 M7.6 7.5 L11 16.2 M16.4 8.6 L11 16.2" stroke="var(--green)" stroke-width="1.1" opacity="0.55"/>
-                <circle cx="7.6" cy="7.5" r="2.1" fill="var(--green)"/><circle cx="16.4" cy="8.6" r="2.1" fill="var(--green)"/><circle cx="11" cy="16.2" r="2.1" fill="var(--green)"/>
-              </svg>
-              Built on Open Knowledge Format <span class="by">·&nbsp;<img src="assets/google-g.svg" alt="" aria-hidden="true" width="13" height="13"> Google Cloud</span> <span class="arr">↗</span>
-            </a>
-            <h1>Your coding agent forgets everything. Kage gives it memory that's <span class="accent">verified</span> against your code.</h1>
-            <p class="hero-copy">
-              Memory your agents read and write as a <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf">Google&nbsp;OKF</a>
-              bundle in your repo — checked against your code, so it never goes stale.
-            </p>
-            <div class="cmd">
-              <span class="ps1">$</span>
-              <span id="install-cmd">npx -y @kage-core/kage-graph-mcp install</span>
-              <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
+      <!-- ——————————————— SCENE 1 · THE CLAIM ——————————————— -->
+      <section class="scene" id="the-claim">
+        <div class="wrap">
+          <div class="stamp-wrap">
+            <div class="claim-meta"><span class="av"></span><span>AGENT · FINAL MESSAGE · 16:32</span></div>
+            <div class="claim-msg">Done! Implemented the review gate across <span class="path">contract.ts</span>, <span class="path">review.ts</span> and <span class="path">ratify.ts</span>. All 34 tests pass, typecheck is clean, lint is green — ready to merge. 🎉</div>
+            <div class="claim-sub">CLAIM RECEIVED · STATUS SELF-REPORTED: VERIFIED</div>
+            <div class="not-verified">
+              <div class="big">Not verified</div>
+              <div class="sub">re-run by kage · 2 of 5 checks failed · exit 1</div>
             </div>
-            <p style="margin:12px 0 0;color:var(--muted);font:400 14px/1.5 var(--sans)">One command, then restart your agent. No account, no API key.</p>
-            <div class="actions">
-              <a class="button primary" href="guide.html#quickstart">Install in 60s</a>
-              <a class="button" href="https://github.com/kage-core/Kage">★ Star on GitHub</a>
-              <a class="button" href="guide.html">Read the docs</a>
-            </div>
-            <p style="margin:14px 0 0;color:var(--muted);font:400 13px/1.6 var(--sans)">
-              <strong style="color:var(--ink)">99/100</strong> trust benchmark ·
-              <strong style="color:var(--ink)">zero-config</strong> install ·
-              no account, no API key ·
-              free &amp; open source —
-              or try it before installing anything: <code>npx -y @kage-core/kage-graph-mcp scan&nbsp;--project&nbsp;.</code>
-            </p>
           </div>
+          <h1 class="thesis">Prove it<span class="dot">.</span></h1>
+          <p class="thesis-sub">Kage is the orchestrator that doesn&rsquo;t take the agent&rsquo;s word for it. Every &ldquo;done&rdquo; is a <b>claim</b> — re-checked by the kernel, in a clean worktree, before it can merge. Local. GPL-3.0. Your repo keeps the memory.</p>
+        </div>
+      </section>
 
-          <div class="receipt" aria-label="Example Kage savings receipt">
-            <div class="r-head"><span>Kage · savings receipt</span><span>example week</span></div>
-            <div class="r-hero">
-              <div class="big"><b>412K</b><span class="unit">tokens saved<br />this week</span><span class="dollars">≈ $1.24</span></div>
-            </div>
-            <div class="r-lines">
-              <div class="r-line"><span>Recalls served from memory</span><span class="dots"></span><b class="gain">38</b></div>
-              <div class="r-line"><span>Stale memories caught &amp; withheld</span><span class="dots"></span><b class="warn">4</b></div>
-              <div class="r-line"><span>Caller questions answered from the graph</span><span class="dots"></span><b>11</b></div>
-            </div>
-            <div class="r-foot">your numbers, from your repo, at $3/1M (configurable) · <span style="color:var(--ink)">kage gains</span> or the viewer's live feed</div>
+      <!-- ——————————————— SCENE 2 · THE WALL ——————————————— -->
+      <section class="scene inset wall-band">
+        <div class="wrap">
+          <div class="wall-row l">&ldquo;tests pass&rdquo; · &ldquo;should work now&rdquo; · <span class="hot">&ldquo;I&rsquo;ve verified the fix&rdquo;</span><span class="tag">unproven</span>· &ldquo;all 34 green&rdquo; · &ldquo;confirmed working&rdquo; · &ldquo;lint is clean&rdquo; · &ldquo;tests pass&rdquo; · &ldquo;should work now&rdquo; · &ldquo;ready to merge&rdquo;</div>
+          <div class="wall-row r">&ldquo;everything builds&rdquo; · &ldquo;ready to merge&rdquo; · &ldquo;no regressions&rdquo; · <span class="hot">&ldquo;the suite is green&rdquo;</span><span class="tag">unproven</span>· &ldquo;typecheck is clean&rdquo; · &ldquo;everything builds&rdquo; · &ldquo;no regressions&rdquo; · &ldquo;done!&rdquo;</div>
+          <div class="wall-row l">&ldquo;done!&rdquo; · &ldquo;fixed and tested&rdquo; · &ldquo;works as expected&rdquo; · &ldquo;the feature is complete&rdquo; · <span class="hot">&ldquo;verified with npm test&rdquo;</span><span class="tag">unproven</span>· &ldquo;fixed and tested&rdquo; · &ldquo;works as expected&rdquo;</div>
+          <div class="wall-row r">&ldquo;all checks passing&rdquo; · &ldquo;implemented and verified&rdquo; · &ldquo;no breaking changes&rdquo; · &ldquo;the fix is in&rdquo; · &ldquo;all checks passing&rdquo; · &ldquo;ship it&rdquo; · &ldquo;implemented and verified&rdquo; · &ldquo;no breaking changes&rdquo;</div>
+          <div class="wall-cap">
+            <div class="l1">Every one of these ended a session.</div>
+            <div class="l2">None of them is evidence. A claim is where Kage starts — not where it stops.</div>
           </div>
         </div>
+      </section>
 
-        </section>
-
-      <!-- ——————————————— OPEN KNOWLEDGE FORMAT ——————————————— -->
-      <section class="okf-band">
+      <!-- ——————————————— SCENE 3 · CASE Nº 001 ——————————————— -->
+      <section class="scene">
         <div class="wrap">
-          <div class="section-head">
-            <div class="okf-lockup">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="21" height="21" rx="6" stroke="var(--green)" stroke-width="1.5"/>
-                <path d="M7.6 7.5 L16.4 8.6 M7.6 7.5 L11 16.2 M16.4 8.6 L11 16.2" stroke="var(--green)" stroke-width="1.1" opacity="0.55"/>
-                <circle cx="7.6" cy="7.5" r="2.1" fill="var(--green)"/><circle cx="16.4" cy="8.6" r="2.1" fill="var(--green)"/><circle cx="11" cy="16.2" r="2.1" fill="var(--green)"/>
-              </svg>
-              <span class="lbl">Open Knowledge Format</span>
-              <span class="sep">·</span>
-              <img src="assets/google-g.svg" alt="Google" width="18" height="18">
-              <span class="lbl">Google Cloud</span>
-            </div>
-            <h2>Kage called it. Google made it the <span class="accent">standard</span>.</h2>
-          </div>
-          <div class="okf-grid">
+          <div class="kick"><b>CASE Nº 001</b> — THE EMPTY BRANCH · THIS REPO · 2026-08-20</div>
+          <div class="case-grid">
             <div>
-              <p class="okf-lede">
-                Kage always kept agent memory as plain files in your repo — no cloud, no lock-in,
-                while everyone else built memory clouds. In June 2026, Google Cloud shipped
-                <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" target="_blank" rel="noopener">OKF</a>:
-                the same idea, now an open standard. <strong style="color:#e6ebe3">We adopted it on day one — and supercharge it.</strong>
-              </p>
-              <div class="okf-brings">
-                <div class="okf-bring"><span class="n">1</span><div><b>Verification</b><p>Every concept is checked against your real code; hallucinated citations are refused on write.</p></div></div>
-                <div class="okf-bring"><span class="n">2</span><div><b>Freshness</b><p>OKF has no notion of staleness. Kage catches drift the moment code changes and withholds it.</p></div></div>
-                <div class="okf-bring"><span class="n">3</span><div><b>Code-grounding</b><p>A code graph anchors each concept to the exact symbols it describes.</p></div></div>
+              <div class="q-obj">Feature complete — review gate wired through <span class="path">contract.ts</span>, <span class="path">review.ts</span>, <span class="path">ratify.ts</span>. Verified and ready to merge.</div>
+              <div class="q-src">agent final message · wave 1 · verbatim shape</div>
+            </div>
+            <div class="find">
+              <div><span class="p">$</span> git log db368cd..HEAD</div>
+              <div class="zero">(empty)</div>
+              <div><span class="dim">commits on the branch</span> ·············· <span class="zero">0</span></div>
+              <div><span class="dim">files touched</span> ····················· <span class="zero">0</span></div>
+              <div><span class="dim">paths cited in the claim</span> ·········· 4</div>
+              <div><span class="dim">of those that actually changed</span> ···· <span class="zero">0</span></div>
+              <div class="smallstamp">Merge refused</div>
+            </div>
+          </div>
+          <p class="case-prose">It happened here, in the repo Kage builds itself. The summary was fluent, specific and <em>false</em> — the branch had no commits. The refusal became law the same week: an empty feature diff cannot merge. Not here, not anywhere Kage runs.</p>
+          <div class="case-foot">shipped as the merge-honesty guard — mergeRun() refuses zero-commit feature branches, and never deletes the worktree on refusal</div>
+        </div>
+      </section>
+
+      <!-- ——————————————— SCENE 4 · THE LOOP ——————————————— -->
+      <section class="scene" id="the-loop">
+        <div class="wrap">
+          <div class="kick"><span class="grn">№ 002</span> — THE LOOP</div>
+          <h2>One loop. Three artifacts. Zero trust.</h2>
+          <p class="lead">State an intent. Kage compiles a brief from your repo&rsquo;s verified memory, hires an agent into a clean worktree, and re-runs every check itself when the agent claims done. Merging is one act: land the code, ratify what the run learned.</p>
+          <div class="objects">
+            <div class="obj">
+              <div class="tag-ev">Artifact 01 — the brief</div>
+              <div class="memo">
+                <div class="lh"><span>Kage · brief</span><span>from repo memory</span></div>
+                <h4>Add a review gate to the merge path</h4>
+                <div class="cite">⚑ convention — the app renderer is CommonJS; no import.meta, no top-level await <span class="who">· 2026-08-12, kushal</span></div>
+                <div class="cite">⚑ gotcha — escapes are doubled inside the template literals; a single \n ships a real newline <span class="who">· 2026-08-14, kage</span></div>
+                <div class="cite">⚑ decision — verdicts are derived at read time, never persisted <span class="who">· 2026-08-16, kushal</span></div>
+                <div class="mf">621 packets on file · 3 carried · every line has an author and a date</div>
               </div>
-              <p class="okf-closer">OKF standardizes the store. <b>Kage is the verification layer Google left out</b> — in OKF-legal <code>x-kage-*</code> fields, so a Kage bundle stays 100% conformant.</p>
             </div>
-            <div class="okf-concept" aria-label="A Kage memory is a conformant OKF concept">
-              <div class="h"><span>orders.md — a Kage memory, as an OKF concept</span><span class="ok">verified ✓</span></div>
-<pre><span class="cm"># OKF fields — readable by any OKF consumer</span>
-type: Decision
-title: Auth uses jose, not jsonwebtoken
-resource: src/auth/session.ts
-tags: [auth, security]
-<span class="cm"># Kage's verification layer (OKF-legal extension)</span>
-<span class="kx">x-kage-verified</span>: fresh
-<span class="kx">x-kage-anchors</span>: [src/auth/session.ts@9f3c1a…]
-<span class="kx">x-kage-freshness</span>: { ttl_days: 365, policy: source_hash }
----
-<span class="cm"># … prose + # Citations, kept true to the code.</span></pre>
+            <div class="obj">
+              <div class="tag-ev">Artifact 02 — the run</div>
+              <div class="term-obj">
+                <div class="bar"><i></i><i></i><i></i></div>
+                <pre><span class="p">$</span> worktree .kage/wt-a41f created
+<span class="p">$</span> claude -p --output-format stream-json
+<span class="dim">  … 134 tool calls · 16.6 min</span>
+<span class="dim">  claim received — kage-claim-v1</span>
+<span class="p">→</span> checks handed to the kernel
+<span class="dim">  the agent&rsquo;s word ends here</span></pre>
+              </div>
+            </div>
+            <div class="obj">
+              <div class="tag-ev">Artifact 03 — the receipt</div>
+              <div class="receipt-obj">
+                <div class="stamp-row"><span class="stamp-g">Verified <span class="c">5/5</span></span></div>
+                <div class="vsub">Independently checked by Kage — not the agent&rsquo;s self-report</div>
+                <div>
+                  <div class="ck"><span class="m">✓</span><span>tests</span><span class="reg">ran</span><span class="d">npm test --prefix mcp → exit 0</span></div>
+                  <div class="ck"><span class="m">✓</span><span>typecheck</span><span class="reg">ran</span><span class="d">npx tsc --noEmit → exit 0</span></div>
+                  <div class="ck"><span class="m">✓</span><span>app-parse</span><span class="reg">ran</span><span class="d">composed page parses → exit 0</span></div>
+                  <div class="ck"><span class="m">✓</span><span>diff-size</span><span class="reg insp">inspected</span><span class="d">362 lines · budget 800</span></div>
+                  <div class="ck"><span class="m">✓</span><span>citations</span><span class="reg insp">inspected</span><span class="d">every cited path exists</span></div>
+                </div>
+                <div class="rc-tot"><span class="lab">touched</span><span class="dots"></span><span>7 files · 362 lines</span></div>
+                <div class="rc-tot"><span class="lab">cost</span><span class="dots"></span><span>$6.49 · 16.6 min</span></div>
+                <div class="rc-tot"><span class="lab">memory</span><span class="dots"></span><span>5 learnings ratified on merge</span></div>
+              </div>
             </div>
           </div>
+          <div class="loop-foot">the brief teaches → the run works → the receipt proves → <b>the merge teaches back.</b> the next brief — yours or a teammate&rsquo;s — already knows what this one had to discover.</div>
         </div>
       </section>
 
-      <!-- ——————————————— HOW IT WORKS ——————————————— -->
-      <section class="section" id="how">
+      <!-- ——————————————— SCENE 4B · THE MEMORY ——————————————— -->
+      <section class="scene" id="the-memory">
         <div class="wrap">
-          <div class="section-head">
-            <span class="eyebrow">How it works</span>
-            <h2>Install once. It runs itself.</h2>
+          <div class="kick"><span class="grn">№ 003</span> — THE MEMORY</div>
+          <h2>The receipt expires. The memory compounds.</h2>
+          <div class="two-col">
+            <div class="packet">
+              <div class="ph"><span>packet · gotcha</span><span>.agent_memory/packets/ · plain markdown</span></div>
+              <div class="pt">A packaged feature can pass every source-checkout test and still be 404-broken from npm</div>
+              <div class="pl"><span class="k">cites</span> mcp/viewer/serve.ts · package.json <span class="k">files</span></div>
+              <div class="pl"><span class="k">evidence</span> reproduced on v4.0.0, fixed and re-verified on v4.0.1</div>
+              <div class="pl"><span class="k">carried into</span> 14 briefs since — nobody rediscovers this</div>
+              <div class="pf"><span class="fresh">grounding: fingerprint fresh</span><span>helpful · wrong · stale</span></div>
+            </div>
+            <div>
+              <p class="claim-copy">Every merged run writes what it learned into the repo. The next brief — yours or a teammate&rsquo;s — <em>already knows.</em></p>
+              <div class="stat-rows">
+                <div class="stat-row"><span>packets on file, committed through git</span><span class="dots"></span><span class="v">621</span></div>
+                <div class="stat-row"><span>recalls served into briefs</span><span class="dots"></span><span class="v">301</span></div>
+                <div class="stat-row"><span>stale memories caught before they could mislead</span><span class="dots"></span><span class="v">2,771</span></div>
+                <div class="stat-row"><span>tokens not re-spent on rediscovery</span><span class="dots"></span><span class="v">~19M</span><span class="est">ESTIMATE — LABELLED</span></div>
+              </div>
+            </div>
           </div>
-          <div class="cards cards-4">
-            <div class="card"><h3>1 · Install</h3><p>One command creates repo memory, builds the code graph, and auto-wires Claude Code and Codex — with a paste-in snippet for every other agent.</p></div>
-            <div class="card"><h3>2 · It takes notes</h3><p>Learnings become packets — explicit or auto-distilled — and every citation is verified against your repo before it's written.</p></div>
-            <div class="card"><h3>3 · Recall, right when it's needed</h3><p>On Claude Code, verified memory for your task is injected as you work — recalled on each prompt and the moment the agent reads a cited file. Other agents pull the same memory through the MCP tools.</p></div>
-            <div class="card"><h3>4 · Diffs get checked</h3><p><code>kage pr check</code> warns when your change invalidates team memory — before the PR lands.</p></div>
-          </div>
+          <div class="scene-foot">memory is checked like code: every packet cites real paths, gets fingerprinted against the tree, and is withheld the moment it goes stale. OKF-conformant markdown — readable by anything, locked into nothing.</div>
         </div>
       </section>
 
-      <!-- ——————————————— FEATURES ——————————————— -->
-      <section class="section">
-        <div class="wrap feature">
-          <div class="feature-copy">
-            <span class="eyebrow">Capture — with proof</span>
-            <h2>It takes notes. Then it checks them.</h2>
-            <p class="lede">Every memory is checked against your code before it's saved — cite a file that doesn't exist and it's refused on the spot.</p>
-            <a class="more" href="guide.html#lifecycle">How a packet earns trust →</a>
-          </div>
-          <div class="stream" aria-label="Memory packets being written, verification visible">
-            <div class="pktcard">
-              <div class="meta"><span class="kind">gotcha</span><span class="t">09:24</span></div>
-              <b>Don't merge the retry paths — one uses idempotency keys</b>
-              <span class="check">✓ citations verified · src/payments/retry.ts · fingerprinted</span>
-            </div>
-            <div class="pktcard">
-              <div class="meta"><span class="kind">decision</span><span class="t">09:41</span></div>
-              <b>Auth uses jose, not jsonwebtoken — CVE in the transitive dep</b>
-              <span class="check">✓ citations verified · src/auth/session.ts · fingerprinted</span>
-            </div>
-            <div class="pktcard is-rejected">
-              <div class="meta"><span class="kind">refused</span><span class="t">09:52</span></div>
-              <b>"Use the helper in src/ghost.ts"</b>
-              <span class="check">✗ rejected on write — no such path in this repo</span>
-            </div>
-            <div class="pktcard is-withheld">
-              <div class="meta"><span class="kind">stale</span><span class="t">10:05</span></div>
-              <b>Legacy retry helper is the fallback</b>
-              <span class="check">⊘ withheld from recall — cited file deleted since capture</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section">
-        <div class="wrap feature">
-          <div class="feature-copy">
-            <span class="eyebrow">Catch — before it merges</span>
-            <h2>Your diff gets fact-checked.</h2>
-            <p class="lede">When your change invalidates what the team knew, <code>kage pr check</code> flags it in the same review — the fix one command away.</p>
-            <a class="more" href="guide.html#cli">The stale-catch commands →</a>
-          </div>
-          <div class="prwarn" aria-label="kage pr check stale-catch output">
-            <div class="head">⚠ Your changes invalidated 2 team memories</div>
-            <div class="row">
-              <b>Auth uses jose, not jsonwebtoken</b>
-              <span>cites src/auth/session.ts — file changed in this diff</span>
-              <span class="fix">fix: kage reverify --packet auth-jose · or kage supersede --packet &lt;old&gt; --replacement &lt;new&gt;</span>
-            </div>
-            <div class="row">
-              <b>Webhook retries are capped at 3</b>
-              <span>cites src/webhooks/retry.ts — constant removed</span>
-              <span class="fix">fix: kage learn (update) — then this warning disappears</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ——————————————— COMPARE ——————————————— -->
-      <section class="section" id="compare">
+      <!-- ——————————————— SCENE 4C · WHILE YOU WERE OUT ——————————————— -->
+      <section class="scene inset">
         <div class="wrap">
-          <div class="section-head">
-            <span class="eyebrow">Compare</span>
-            <h2>Remembering is solved. Trusting isn't.</h2>
-            <p class="lede">Capture-everything memory solves <em>remembering</em>. Kage solves <em>trusting what's remembered</em> — it re-checks every claim against your code.</p>
+          <div class="kick"><span class="grn">№ 004</span> — WHILE YOU WERE OUT</div>
+          <h2>Dispatch a goal. Go to sleep.</h2>
+          <div class="two-col">
+            <div class="night">
+              <div class="nrow"><span class="tm">23:41</span><span class="tx"><b>goal dispatched</b> — &ldquo;ship the review gate&rdquo; · 2 waves planned</span></div>
+              <div class="nrow"><span class="tm">00:19</span><span class="tx">wave 1 · 3 runs claimed done — kernel re-ran every check</span><span class="chip exhibit-chip ok">VERIFIED</span></div>
+              <div class="nrow"><span class="tm">00:20</span><span class="tx">wave 1 merged · 5 learnings ratified into memory</span></div>
+              <div class="nrow"><span class="tm">03:12</span><span class="tx"><b>wave 2 dispatched itself</b> — its briefs already carry wave 1&rsquo;s learnings</span></div>
+              <div class="nrow"><span class="tm">03:58</span><span class="tx">one worker crashed — run kept, worktree kept, nothing lost</span><span class="chip exhibit-chip">RECOVERABLE</span></div>
+              <div class="nrow"><span class="tm">08:04</span><span class="tx">you&rsquo;re back. one decision is waiting, with its receipt</span></div>
+            </div>
+            <div>
+              <p class="claim-copy" style="max-width:28ch">Runs survive the app, the daemon, even the machine — and recovered work is still <b>unverified</b> work until the kernel re-checks it.</p>
+              <div class="vocab">
+                <div class="vrow"><span class="vcmd">kage resume-run --budget-usd 12</span><span class="what">continue a stalled run, with a hard spend ceiling</span></div>
+                <div class="vrow"><span class="vcmd">kage adopt</span><span class="what">claim work found in an orphan worktree — stated honestly as a claim nobody wrote</span></div>
+                <div class="vrow"><span class="vcmd">close as landed</span><span class="what">only when the branch truly carries commits beyond the merge-base</span></div>
+              </div>
+            </div>
           </div>
-          <div class="compare-scroll">
-            <table class="compare">
-              <thead>
-                <tr>
-                  <th scope="col"></th>
-                  <th scope="col" class="is-kage">Kage</th>
-                  <th scope="col">claude-mem</th>
-                  <th scope="col">mem0 / Zep</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <th scope="row">Automatic capture + session-start recall</th>
-                  <td class="is-kage"><span class="yes">✓</span></td>
-                  <td><span class="yes">✓</span></td>
-                  <td>via SDK</td>
-                </tr>
-                <tr>
-                  <th scope="row">Hallucinated citations rejected at write time</th>
-                  <td class="is-kage"><span class="yes">✓</span></td>
-                  <td><span class="no">—</span></td>
-                  <td><span class="no">—</span></td>
-                </tr>
-                <tr>
-                  <th scope="row">Stale memory withheld at recall</th>
-                  <td class="is-kage"><span class="yes">✓</span></td>
-                  <td><span class="no">—</span></td>
-                  <td><span class="no">—</span></td>
-                </tr>
-                <tr>
-                  <th scope="row">Diff-time stale-catch before the PR lands</th>
-                  <td class="is-kage"><span class="yes">✓</span></td>
-                  <td><span class="no">—</span></td>
-                  <td><span class="no">—</span></td>
-                </tr>
-                <tr>
-                  <th scope="row">Memory reviewed in git, same PR as the code</th>
-                  <td class="is-kage"><span class="yes">✓</span> plain files</td>
-                  <td>SQLite + cloud</td>
-                  <td>hosted API</td>
-                </tr>
-                <tr>
-                  <th scope="row">Savings receipts (tokens + $ per recall)</th>
-                  <td class="is-kage"><span class="yes">✓</span> per-recall</td>
-                  <td>token index</td>
-                  <td><span class="no">—</span></td>
-                </tr>
-                <tr>
-                  <th scope="row">Cross-machine sync</th>
-                  <td class="is-kage"><span class="yes">✓</span> your own git remote</td>
-                  <td>their cloud</td>
-                  <td>their cloud</td>
-                </tr>
-                <tr>
-                  <th scope="row">Account / API key required</th>
-                  <td class="is-kage">none</td>
-                  <td>cloud optional</td>
-                  <td>yes</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="lede" style="margin-top:18px; font-size:15px;">Already running claude-mem? Audit your existing store — read-only, no account: <code>npx -y @kage-core/kage-graph-mcp audit-claude-mem</code> classifies every observation as verified, drifted, gone, or uncited.</p>
         </div>
       </section>
 
-      <!-- ——————————————— PROOF ——————————————— -->
-      <section class="section">
+      <!-- ——————————————— SCENE 5 · EXHIBITS ——————————————— -->
+      <section class="scene" id="exhibits">
         <div class="wrap">
-          <div class="section-head">
-            <span class="eyebrow">Proof</span>
-            <h2>Trust you can measure — on your own repo.</h2>
-            <p class="lede">Most memory tools benchmark recall. Kage benchmarks the thing that matters when an agent acts: whether the memory can be trusted. Run it yourself; every gate executes in front of you.</p>
-          </div>
-          <div class="terminal">
-            <div class="terminal-head">
-              <span>kage benchmark --trust</span>
-              <span>no API key · runs locally</span>
+          <div class="kick"><b>№ 005</b> — EXHIBITS</div>
+          <h2>Two boards, one lie.</h2>
+          <div class="exhibits">
+            <div class="frame">
+              <div class="slop">
+                <div class="gh">✨ Agent finished</div>
+                <div class="gb">
+                  Task completed successfully! All tests passing ✅
+                  <div class="row2"><span class="dot2"></span>Done · 2m ago</div>
+                  <div class="btn2">Merge now</div>
+                </div>
+              </div>
+              <div class="xmark"></div>
+              <div class="plate"><b>Exhibit A</b> — a board that believes the agent.<br />collected 2026 · various vendors</div>
             </div>
-            <pre>Trust score: 99/100  (PASS)   · example, depends on your repo
-  Hallucinated-citation rejection: 100%
-  Stale-memory exclusion:          100%
-  Live grounding rate:              98%</pre>
+            <div class="frame">
+              <div class="exhibit-card">
+                <div class="t">Harden steer delivery vocabulary</div>
+                <div class="slug">run-steer-vocab-260818 · worktree wt-a41f</div>
+                <div class="row3"><span class="exhibit-chip ok">VERIFIED 5/5</span><span class="exhibit-chip">$6.49 · 36m</span><span class="exhibit-chip">+362 −41</span></div>
+                <div class="rerun">checks re-run 09:14 — a stale pass is never shown as fresh</div>
+              </div>
+              <div class="plate"><b>Exhibit B</b> — a board that re-ran the checks itself.<br />the chip is an exit code, not a feeling</div>
+            </div>
           </div>
-          <div class="terminal" aria-label="kage demo — the trust loop running live in a sandbox">
-            <div class="terminal-head"><span>kage demo</span><span>live sandbox · nothing canned</span></div>
-            <pre>$ npx -y @kage-core/kage-graph-mcp demo
-Seeded 3 grounded memories in a throwaway repo
-
-1 · Hallucinated citation
-   <span style="color:var(--danger)">✗ rejected on write</span> — "Use the helper in src/ghost.ts", file never existed
-
-2 · Stale memory (cited file deleted)
-   <span style="color:var(--warn)">⊘ withheld from recall</span> — "Legacy retry helper", src/legacy-retry.ts gone
-
-3 · Recall returns only grounded, current memory
-   <span style="color:var(--green-strong)">✓</span> Payments must be idempotent
-   <span style="color:var(--green-strong)">✓</span> Auth uses jose, not jsonwebtoken
-
-<span style="color:var(--green-strong)">Checks: write-time rejection ✓ · stale withholding ✓ · grounded recall ✓</span></pre>
-          </div>
-          <p class="demo-cap">See what your own repo is hiding first: <code>npx -y @kage-core/kage-graph-mcp scan --project .</code></p>
         </div>
       </section>
 
-      <!-- ——————————————— USED EVERYWHERE ——————————————— -->
-      <section class="section">
+      <!-- ——————————————— SCENE 6 · THE LEDGER ——————————————— -->
+      <section class="scene">
         <div class="wrap">
-          <div class="section-head">
-            <span class="eyebrow">Used everywhere</span>
-            <h2>Every MCP agent. Built in the open.</h2>
-            <p class="lede"><code>kage install</code> auto-detects your agents — wiring Claude Code and Codex directly, and printing a paste-in MCP snippet for the rest. Claude Code users can also <code>/plugin marketplace add kage-core/Kage</code>.</p>
+          <div class="kick"><b>№ 006</b> — THE LEDGER</div>
+          <div class="strike-row">
+            <div class="struck">The fastest agent memory ever built.</div>
+            <div class="struck-tag">struck — unverifiable</div>
           </div>
-          <div class="agents">
-            <span class="agent">Claude Code</span>
-            <span class="agent">Codex</span>
-            <span class="agent">Cursor</span>
-            <span class="agent">Windsurf</span>
-            <span class="agent">Gemini CLI</span>
-            <span class="agent">Cline</span>
-            <span class="agent">Goose</span>
-            <span class="agent">Roo Code</span>
-            <span class="agent">Kilo Code</span>
-            <span class="agent">OpenCode</span>
-            <span class="agent">Aider</span>
-            <span class="agent">Claude Desktop</span>
-            <span class="agent">Copilot</span>
-            <span class="agent">OpenClaw</span>
-            <span class="agent">Hermes</span>
-            <span class="agent">any MCP client</span>
+          <div class="measured">We publish what we measured.</div>
+          <div class="ledger">
+            <div class="lrow"><span class="name">cold index · 10,000 files</span><span class="dots"></span><span class="val">8.3s</span><span class="meth">measured 2026-08-20 · kage benchmark --files 10000 · both backends</span></div>
+            <div class="lrow"><span class="name">recall query · 1,000 files</span><span class="dots"></span><span class="val">76ms</span><span class="meth">node:sqlite backend · zero new dependencies</span></div>
+            <div class="lrow miss"><span class="name">warm re-index · 10,000 files</span><span class="dots"></span><span class="val">15.9s</span><span class="meth">target was 10s. not met — shipping the number anyway.</span></div>
+            <div class="lrow"><span class="name">tests on this repo</span><span class="dots"></span><span class="val">1,113 + 12</span><span class="meth">unit + dogfood · every merge independently verified</span></div>
+            <div class="lrow"><span class="name">tokens saved this quarter</span><span class="dots"></span><span class="val">~19M</span><span class="meth">an estimate — and labelled as one, like every estimate in the product</span></div>
           </div>
-          <div class="stat-strip" aria-label="Kage signals">
-            <div class="stat-chip"><strong>100%</strong><span>hallucination &amp; stale rejection</span></div>
-            <div class="stat-chip"><strong>no account</strong><span>no API key, no database — just files in git</span></div>
-            <div class="stat-chip"><strong>360+</strong><span>tests passing on every release</span></div>
-            <div class="stat-chip"><strong>Git-native</strong><span>memory reviewed in the same PR as code</span></div>
-          </div>
-          <div style="display:flex; gap:8px; margin-top:18px; flex-wrap:wrap;">
-            <img alt="npm version" src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?style=flat-square&color=43c98a" style="height:20px" />
-            <img alt="npm downloads" src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?style=flat-square&color=43c98a" style="height:20px" />
-            <img alt="GitHub stars" src="https://img.shields.io/github/stars/kage-core/Kage?style=flat-square&color=41463f" style="height:20px" />
-          </div>
+          <div class="ledger-foot"><span class="p">$</span> kage benchmark — run every number yourself</div>
         </div>
       </section>
 
-      <!-- ——————————————— PRICING ——————————————— -->
-      <section class="section" id="pricing">
-        <div class="wrap">
-          <div class="section-head">
-            <span class="eyebrow">Pricing</span>
-            <h2>Free where it matters. Verified everywhere.</h2>
-            <p class="lede">The open-source core is complete on its own — verification, receipts, sync over your own git remote. Local-first, private by default: secrets are scanned out and <code>&lt;private&gt;…&lt;/private&gt;</code> is never stored.</p>
+      <!-- ——————————————— SCENE 7 · THE TOTAL ——————————————— -->
+      <section class="scene finale-band">
+        <div class="wrap finale">
+          <div class="stamp-final">Verified — check it yourself</div>
+          <div class="cmd">
+            <span class="ps1">$</span>
+            <span id="install-cmd">npx -y @kage-core/kage-graph-mcp install</span>
+            <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
           </div>
-          <div class="cards">
-            <div class="card">
-              <h3>Open source</h3>
-              <p style="font: 600 26px/1 var(--serif); color: var(--ink); margin-top: 10px;">$0 <span style="font: 400 13px/1 var(--sans); color: var(--muted);">forever</span></p>
-              <p>Everything on this page: verified memory, Truth Report, receipts, auto-capture, repair, live viewer, 15 agents, <code>kage sync</code> over your own private git remote. No account, no API key.</p>
-            </div>
-            <div class="card" style="border-color: var(--hairline-green);">
-              <h3>Kage Cloud</h3>
-              <p style="font: 600 26px/1 var(--serif); color: var(--ink); margin-top: 10px;">$0 <span style="font: 400 13px/1 var(--sans); color: var(--muted);">early access</span></p>
-              <p>Memory that follows you: your packets on every machine behind one private MCP link — verification stays client-side, so the cloud never sees your code.</p>
-              <p style="margin-top: 12px;"><a class="button primary" href="#access">Join the waitlist</a></p>
-            </div>
-            <div class="card">
-              <h3>Team</h3>
-              <p style="font: 600 26px/1 var(--serif); color: var(--ink); margin-top: 10px;">Coming soon</p>
-              <p>Shared team memory with review gates — the same PR-reviewed trust model, hosted. Early design partners shape it.</p>
-              <p style="margin-top: 12px;"><a class="button" href="demo.html">Book a demo</a></p>
-            </div>
+          <div class="tot-rows">
+            <div class="trow"><span>price</span><span class="dots"></span><span class="v">GPL-3.0 · free</span></div>
+            <div class="trow"><span>dependencies</span><span class="dots"></span><span class="v">6</span></div>
+            <div class="trow"><span>accounts · servers · telemetry</span><span class="dots"></span><span class="v">none — local-first</span></div>
+            <div class="trow"><span>your repo</span><span class="dots"></span><span class="v">stays yours</span></div>
+          </div>
+          <div class="barcode"></div>
+          <div class="micro">Kage · manages your memory and agents · built with Kage · verified by Kage</div>
+          <div class="f-links">
+            <span><a href="https://github.com/kage-core/Kage">github</a></span>
+            <span><a href="guide.html">docs</a></span>
+            <span><a href="benchmarks.html">benchmarks</a></span>
           </div>
         </div>
       </section>
-
-      <!-- ——————————————— EARLY ACCESS ——————————————— -->
-      <section class="section" id="access">
-        <div class="wrap">
-          <div class="access">
-            <span class="eyebrow">Early access</span>
-            <h2>Stop letting your agent forget.</h2>
-            <p class="lede">The open-source core installs in 60 seconds. Kage Cloud — memory on every machine behind one private MCP link — is rolling out to the waitlist first.</p>
-            <div class="actions">
-              <a class="button primary" href="https://github.com/kage-core/Kage/issues/74">Join the Cloud waitlist</a>
-              <a class="button" href="demo.html">Book a demo</a>
-            </div>
-            <p class="fine">Waitlist is one click on GitHub — 👍 or comment to join. Demos are 30 minutes, your repo, live. Or skip the line: <a href="guide.html#quickstart">install the open-source core now</a>.</p>
-          </div>
-        </div>
-      </section>
-
     </main>
 
     <footer class="footer">
       <div class="wrap footer-inner">
         <span>
           <strong style="color:var(--ink);font:700 14px/1 var(--serif)">Kage</strong><br />
-          Git-native memory your team shares.<br />
+          The orchestrator that doesn&rsquo;t take the agent&rsquo;s word for it.<br />
           <span style="color:var(--faint);font-size:12px">© 2026 Kage · GPL-3.0 · no account, no API key</span>
         </span>
         <span>
           <strong style="color:var(--ink)">Product</strong><br />
-          <a href="./#how">How it works</a><br />
-          <a href="./#compare">Compare</a><br />
-          <a href="./#pricing">Pricing</a><br />
-          <a href="viewer/">Viewer</a>
+          <a href="#the-claim">The claim</a><br />
+          <a href="#the-loop">The loop</a><br />
+          <a href="#the-memory">The memory</a><br />
+          <a href="#exhibits">Exhibits</a>
         </span>
         <span>
           <strong style="color:var(--ink)">Learn</strong><br />
-          <a href="guide.html#quickstart">Quickstart</a><br />
-          <a href="guide.html">Docs</a><br />
+          <a href="guide.html">Guide</a><br />
           <a href="benchmarks.html">Benchmarks</a><br />
-          <a href="releases.html">Releases</a>
+          <a href="releases.html">Releases</a><br />
+          <a href="viewer/">Viewer</a>
         </span>
         <span>
           <strong style="color:var(--ink)">Company</strong><br />
           <a href="https://github.com/kage-core/Kage">GitHub</a><br />
           <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp">npm</a><br />
-          <a href="https://github.com/kage-core/Kage/issues/74">Cloud waitlist</a><br />
           <a href="demo.html">Book a demo</a>
         </span>
       </div>
     </footer>
-      <script src="assets/stars.js" defer></script>
+    <script src="assets/stars.js" defer></script>
   </body>
 </html>
