@@ -71,7 +71,7 @@ module.exports = {
   appId: "dev.kage.desktop",
   productName: "Kage",
   directories: { output: "dist", buildResources: "build" },
-  files: ["main.js", "update.js", "package.json", "build/icon.icns", "node_modules/**/*"],
+  files: ["main.js", "update.js", "bootstrap.js", "package.json", "build/icon.icns", "node_modules/**/*"],
   // `autoUpdateSigned` rides into the packaged package.json so update.js can read, at
   // runtime, the same signing decision made here at build time — see update.js for why
   // an ad-hoc-signed bundle must degrade to notify-only instead of attempting installs
