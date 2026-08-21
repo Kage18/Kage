@@ -65,6 +65,21 @@ APPLE_ID="you@example.com" APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx" APP
 The config picks all of this up on its own — nothing in it needs editing. It prints
 which path it took at the start of every build.
 
+## Auto-update
+
+A packaged app checks for updates on launch (after the window shows) and every 4
+hours, downloads in the background, and never interrupts a working session with a
+dialog — a ready update shows as a dock badge, a native notification, and a "Restart to
+Update…" File menu item, all calling the same install path. Disabled entirely in dev
+(`npm start`) and behind the `KAGE_NO_AUTO_UPDATE=1` kill-switch. See `shell/update.js`
+for the full policy and the release flow (version bump → build dmg+zip → publish to
+GitHub Releases so `latest-mac.yml` exists) — it's documented there rather than
+duplicated here.
+
+Auto-update only *installs* on a Developer-ID-signed build (see Signing, above): an
+ad-hoc build degrades to notify-only, pointing the user at the releases page instead of
+pretending an install happened.
+
 ## The icon
 
 `build/icon.icns` is generated from Kage's 影 seal at all ten sizes macOS asks for. The
