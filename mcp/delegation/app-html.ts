@@ -76,7 +76,7 @@ ${APP_STYLES}
   <button class="iconbtn" id="m-settings" title="project settings">⚙</button>
   <span class="bellwrap"><button class="iconbtn" id="m-bell" title="notify when a run needs you">🔔</button><span class="badge" id="bell-badge" style="display:none">0</span></span>
 </div>
-<div class="notif" id="notif"><div class="nh">Notifications</div><div class="nlist" id="notif-list"></div></div>
+<div class="notif" id="notif"><div class="nh">Notifications</div><div class="nlist" id="notif-list"></div><div class="nhint">Notifications resolve themselves when the state changes — nothing to dismiss.</div></div>
 <div class="errbar" id="errbar"><span class="et" id="errbar-text"></span><button class="ex" id="errbar-x">✕</button></div>
 <div class="offline-ribbon" id="offline-ribbon">connection lost — showing the last known state · reconnecting…</div>
 <div class="split">
@@ -152,7 +152,7 @@ ${APP_STYLES}
         <div class="list"><div class="card hand" id="handover" style="display:none"></div><div id="goal-cards"></div><div id="run-list"></div></div>
         <div class="detail">
           <div id="run-detail"></div>
-          <div id="run-term-pane"><div class="term-head"><span id="run-term-run"></span><button class="btn sm" id="run-term-handback">Hand Back</button></div><div id="run-term"></div></div>
+          <div id="run-term-pane"><div class="term-banner">Supervision is paused while you drive. Kage is not recording checks until you hand back.</div><div class="term-head"><span id="run-term-run"></span><span class="chip warn">taken over</span><span class="chip">same session — your keyboard now</span><button class="btn sm" id="run-term-handback">Hand Back</button></div><div id="run-term"></div><div class="term-foot">hand back to resume supervision — the kernel re-runs every check before this can merge, no matter what happens here</div></div>
         </div>
       </div>
       <div class="board-scroll" id="work-board"><div class="board" id="board-cols"></div></div>
@@ -174,14 +174,14 @@ ${APP_STYLES}
   <div class="overlay" id="packet-overlay">
     <div class="packet">
       <div class="ph"><h3 id="packet-title"></h3><button class="btn" id="packet-close">Close</button></div>
+      <div class="pchips" id="packet-chips"></div>
       <div class="pbody" id="packet-body"></div>
       <div class="pfly" id="packet-flywheel"></div>
       <div class="pfoot">
-        <span class="pf-label">Is this still true?</span>
-        <button class="btn" data-fb="helpful">Helpful</button>
-        <button class="btn" data-fb="stale">Out of date</button>
-        <button class="btn" data-fb="wrong">Wrong</button>
-        <span class="msg" id="packet-msg"></span>
+        <button class="fb" data-fb="helpful">helpful</button>
+        <button class="fb" data-fb="wrong">wrong</button>
+        <button class="fb" data-fb="stale">stale</button>
+        <span class="msg" id="packet-msg">feedback tunes what future briefs carry</span>
       </div>
     </div>
   </div>
@@ -237,7 +237,7 @@ ${APP_STYLES}
       </div>
     </div>
     <div class="sfoot">
-      <button class="btn primary" id="addproject-go" disabled>Create and start</button>
+      <button class="btn primary" id="addproject-go" disabled>Create and open its Room</button>
       <button class="btn" id="addproject-cancel">Cancel</button>
       <span class="msg" id="addproject-msg"></span>
     </div>

@@ -261,7 +261,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .mem-col { max-width:940px; margin:0 auto; padding:26px 24px 60px; }
   .mem-hero { border:1px solid var(--line); border-radius:var(--r-card); background:var(--surface);
     padding:22px 24px; box-shadow:var(--shadow-sm); margin-bottom:14px; }
-  .mem-hero .eyebrow { font-size:10.5px; font-weight:650; letter-spacing:.1em; text-transform:uppercase;
+  .mem-hero .eyebrow { font-family:var(--mono); font-size:10px; font-weight:400; letter-spacing:.16em; text-transform:uppercase;
     color:var(--text3); margin-bottom:14px; }
   .mem-figs { display:flex; flex-wrap:wrap; gap:30px; }
   /* The site sets stat figures in the SERIF face (.stat-chip strong: 600 22px
@@ -290,9 +290,9 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     border-radius:var(--r-card); border:1px solid var(--line); background:var(--inset); color:var(--text); }
   #mem-search:focus { outline:none; border-color:var(--seal); }
   .mem-types { display:flex; flex-wrap:wrap; gap:6px; }
-  .mem-chip { font-family:var(--mono); font-size:11px; padding:4px 10px; border-radius:999px;
+  .mem-chip { font-family:var(--mono); font-size:11px; padding:4px 10px; border-radius:var(--r-panel);
     border:1px solid var(--line); color:var(--text3); background:var(--surface); }
-  .mem-chip.on { border-color:var(--seal); color:var(--seal); }
+  .mem-chip.on { border-color:var(--seal); color:var(--seal); background:var(--green-soft); }
   .mem-chip .c { opacity:.6; margin-left:5px; }
 
   .mem-row { border:1px solid var(--line); border-top:none; background:var(--surface); padding:13px 16px; cursor:pointer; }
@@ -313,8 +313,9 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card); box-shadow:var(--shadow-md); }
   .packet .ph { display:flex; align-items:center; gap:14px; padding:17px 20px; border-bottom:1px solid var(--line); }
   .packet .ph h3 { margin:0; font-family:var(--serif); font-size:17px; font-weight:600; flex:1; letter-spacing:.005em; }
-  .packet .pbody { overflow-y:auto; padding:18px 22px 24px; font-size:13.5px; line-height:1.65;
-    white-space:pre-wrap; word-break:break-word; color:var(--text2); font-family:var(--mono); }
+  .packet .pchips { display:flex; flex-wrap:wrap; gap:8px; padding:0 20px 14px; }
+  .packet .pbody { overflow-y:auto; padding:0 22px 24px; font-size:13.5px; line-height:1.65;
+    white-space:pre-wrap; word-break:break-word; color:var(--text); }
   /* The flywheel: which run taught this memory, which briefs carried it onward. */
   .packet .pfly { display:none; border-top:1px solid var(--line2); padding:10px 20px 12px; }
   .flyrow { display:grid; grid-template-columns:86px 1fr auto; gap:12px; align-items:baseline;
@@ -328,8 +329,11 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .note-row.taught:hover .t { text-decoration:underline; text-underline-offset:3px; }
   .packet .pfoot { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
     padding:13px 20px; border-top:1px solid var(--line); }
-  .packet .pf-label { font-size:12px; color:var(--text3); margin-right:2px; }
-  .packet .pfoot .msg { font-size:11.5px; color:var(--text3); margin-left:auto; }
+  .packet .pfoot .fb { font-family:var(--mono); font-size:10.5px; padding:5px 13px;
+    border-radius:var(--r-panel); border:1px solid var(--line); color:var(--text2); background:transparent; }
+  .packet .pfoot .fb:hover { border-color:var(--text3); }
+  .packet .pfoot .fb.primary { border-color:color-mix(in srgb, var(--jade) 45%, transparent); color:var(--jade); }
+  .packet .pfoot .msg { font-family:var(--mono); font-size:9.5px; color:var(--text3); margin-left:auto; }
 
   /* goal detail overlay — read-and-navigate: a one-line title, a summary chip row,
      the full intent behind the same foldrow/rawpane expander run detail uses,
@@ -356,7 +360,6 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .gd-wave-block .btn.sm { margin:2px 10px 0; }
   .gd-foot { display:flex; align-items:center; gap:10px; margin-top:6px;
     padding-top:14px; border-top:1px solid var(--line2); }
-  .gd-foot .atom { margin-right:auto; font-family:var(--mono); }
   .chip.wave-due { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
 
   .view.on { display:flex; flex-direction:column; }
@@ -438,7 +441,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .toolgroupitem { font-family:var(--mono); font-size:11px; color:var(--text3); }
   .turn .bubble2 { font-size:14.5px; line-height:1.7; white-space:pre-wrap; }
   .turn.you .bubble2 { color:var(--text2); max-width:68ch;
-    border-left:2px solid var(--green); padding-left:14px; }
+    border-left:3px solid var(--green); padding-left:14px; }
   .turn.kage .bubble2 { color:var(--text); max-width:68ch; }
   /* Kage speaks markdown — a blank line is a paragraph break, inline code gets the
      mono/code treatment already used everywhere else in the app. */
@@ -483,7 +486,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .room-cwrap:focus-within { border-color:var(--text3); }
   .room-cwrap textarea { flex:1; border:none; background:none; color:var(--text); font-size:14px; font-family:var(--sans);
     outline:none; resize:none; max-height:140px; line-height:1.5; padding:2px 0; }
-  .room-send { background:var(--seal); color:#fff; border-radius:var(--r-card); padding:7px 14px; font-size:12.5px; font-weight:600; }
+  .room-send { background:var(--seal); color:#0c130f; border-radius:var(--r-card); padding:7px 14px; font-size:12.5px; font-weight:700; }
   .room-send:disabled { opacity:.45; cursor:default; }
   .room-hint { text-align:center; font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:8px; }
   /* Presence banner (docs/design/SESSIONS_SURFACE.md §6): absence stated, not a blank
@@ -585,7 +588,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      never re-derived. */
   .atom.statedot { display:inline-flex; align-items:center; gap:5px; }
   .atom.statedot .dot { margin-top:0; }
-  .atom.vchip { border:1px solid currentColor; border-radius:999px; padding:1px 7px; opacity:.9; }
+  .atom.vchip { border:1px solid currentColor; border-radius:var(--r-panel); padding:1px 7px; opacity:.9; letter-spacing:.04em; }
   .qtime { font-family:var(--mono); font-size:10.5px; color:var(--text3); padding-top:3px; }
 
   /* handover card */
@@ -632,10 +635,17 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      room's terminal pane lives outside the chat column instead of inside it. */
   #run-detail { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
   #run-term-pane { display:none; flex-direction:column; flex:1; min-height:0; min-width:0; background:var(--code-bg); }
-  .term-head { display:flex; align-items:center; justify-content:space-between; padding:10px 16px;
+  /* Take-over is a supervision hand-off, not just a terminal window: while it's active
+     Kage records nothing, so the pane says so up front rather than leaving that implicit. */
+  .term-banner { flex:none; font-size:12px; color:var(--amber); background:color-mix(in srgb, var(--amber) 10%, var(--code-bg));
+    border-bottom:1px solid color-mix(in srgb, var(--amber) 35%, transparent); padding:9px 16px; }
+  .term-head { display:flex; align-items:center; gap:10px; padding:10px 16px;
     border-bottom:1px solid var(--line2); flex:none; }
   .term-head span { font-family:var(--mono); font-size:11px; color:var(--text3); }
+  .term-head #run-term-handback { margin-left:auto; border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); color:var(--amber); }
   #run-term { flex:1; min-width:0; width:100%; padding:10px 16px; }
+  .term-foot { flex:none; font-family:var(--mono); font-size:10.5px; color:var(--text3); padding:8px 16px;
+    border-top:1px solid var(--line2); }
   .plancard { margin-bottom:14px; }
   .plancard .rawpane { margin:8px 0 12px; }
   .qrow { padding:10px 14px; border:1px solid var(--line); border-radius:var(--r-card);
@@ -647,6 +657,12 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     border-radius:var(--r-control); border:1px solid var(--line); background:var(--inset); color:var(--text); }
   .qrow-text { font-size:13px; color:var(--text2); }
   .qrow-ctrls { display:flex; gap:6px; margin-top:8px; }
+  /* The in-DOM stand-in for window.prompt()/confirm() (unsupported in Electron/the
+     embedded browser) — a trigger button swaps for this row, then swaps back. */
+  .inline-ask { display:inline-flex; align-items:center; gap:6px; }
+  .inline-ask-msg { font-size:11.5px; color:var(--text2); white-space:nowrap; }
+  .inline-ask-input { font:inherit; font-size:12px; padding:5px 9px; min-width:120px;
+    border-radius:var(--r-control); border:1px solid var(--line); background:var(--inset); color:var(--text); }
   .dhead { position:relative; padding:18px 26px 0; background:var(--surface); border-bottom:1px solid var(--line); flex:none; }
   /* Rendered in both List and Board layouts now (renderDetail), but it only ever
      reads as a control where there is somewhere for it to send you: Board's
@@ -656,14 +672,16 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     padding:4px 9px; border-radius:var(--r-control); display:none; }
   .dclose:hover { color:var(--text); background:var(--surface2); }
   #v-work.layout-board .dclose { display:block; }
-  .dhead h2 { margin:0 0 9px; padding-right:36px; font-size:16.5px; font-weight:650; letter-spacing:-.014em; line-height:1.35;
+  .dhead h2 { margin:0 0 9px; padding-right:36px; font-family:var(--serif); font-size:19px; font-weight:600; letter-spacing:-.008em; line-height:1.3;
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
   .dhead .foldrow { margin:0 0 12px; }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:var(--r-panel);
     border:1px solid var(--line); color:var(--text2); background:var(--surface2);
     max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chip.warn { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
   .chip.state-ready { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line)); }
+  .chip.state-running { color:var(--jade); border-color:color-mix(in srgb, var(--jade) 40%, var(--line)); }
   .chip.blast-hot { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, var(--line)); }
   .chip.state-blocked { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 40%, var(--line)); }
   .chip.state-merged { color:var(--text3); }
@@ -692,6 +710,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     border-left:1px solid var(--line); background:var(--surface); }
   .pnl-sec { margin-bottom:22px; }
   .pnl-sec .paper-receipt { margin:8px 0 0; max-width:none; }
+  .pnl-ctl-row { display:flex; justify-content:space-between; align-items:center; }
+  .pnl-ctl-label { font-size:12.5px; color:var(--text2); }
   .modepill.on { border-color:var(--amber); color:var(--amber); }
   .pnl-timeline { display:flex; flex-direction:column; gap:9px; margin-top:10px; }
   .pnl-tl-row { font-size:11.5px; display:flex; flex-wrap:wrap; gap:7px; align-items:baseline; }
@@ -824,6 +844,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     text-transform:uppercase; color:var(--text3); margin:16px 0 6px; }
   .paper-receipt .seclabel-sm { color:color-mix(in srgb, var(--code-text) 55%, transparent);
     border-top:1px dashed color-mix(in srgb, var(--code-text) 25%, transparent); padding-top:12px; margin-top:12px; }
+  .rc-rev { font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.08em;
+    color:color-mix(in srgb, var(--code-text) 45%, transparent); text-align:center; margin-top:12px; }
 
   /* diff + raw */
   /* The changed-files tree: one chip per file, click to jump; the toggle switches
@@ -889,7 +911,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .btn { font-size:12.5px; font-weight:550; padding:7px 15px; border-radius:var(--r-card);
     border:1px solid var(--line); background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm); }
   .btn:hover { border-color:var(--text3); }
-  .btn.primary { background:var(--jade); border-color:var(--jade); color:#fff; }
+  .btn.primary { background:var(--jade); border-color:var(--jade); color:#0c130f; font-weight:700; }
   .btn.danger { color:var(--crimson); }
   .flash { font-family:var(--mono); font-size:11px; color:var(--text2); margin-left:auto;
     max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -965,15 +987,18 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card); box-shadow:var(--shadow-md);
     overflow:hidden; }
   .notif.on { display:block; }
-  .notif .nh { padding:13px 16px; border-bottom:1px solid var(--line2); font-size:14px; font-weight:600; }
+  .notif .nh { padding:13px 16px; border-bottom:1px solid var(--line2); font-family:var(--mono);
+    font-size:10.5px; font-weight:400; letter-spacing:.12em; text-transform:uppercase; color:var(--text3); }
   .notif .nlist { max-height:340px; overflow-y:auto; }
+  .notif .nhint { font-family:var(--mono); font-size:9.5px; color:var(--text3); padding:9px 16px;
+    border-top:1px solid var(--line2); }
   .notif .nrow { display:grid; grid-template-columns:20px 1fr auto; gap:11px; padding:12px 16px;
     border-bottom:1px solid var(--line2); cursor:pointer; align-items:baseline; }
   .notif .nrow:last-child { border-bottom:none; }
   .notif .nrow:hover { background:var(--surface2); }
   .notif .nrow .ic { text-align:center; }
-  .notif .nrow .t { font-size:13.5px; line-height:1.4; }
-  .notif .nrow .s { font-size:11.5px; color:var(--text3); margin-top:3px; }
+  .notif .nrow .t { font-size:13.5px; font-weight:600; line-height:1.4; }
+  .notif .nrow .s { font-size:11.5px; color:var(--text2); margin-top:3px; }
   .notif .nrow .when { font-family:var(--mono); font-size:10px; color:var(--text3); }
   .notif .none { padding:26px; text-align:center; color:var(--text3); font-size:13px; }
 
@@ -1008,8 +1033,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .srow { display:grid; grid-template-columns:1fr 230px; gap:16px; align-items:center;
     padding:13px 0; border-bottom:1px solid var(--line2); }
   .srow:last-child { border-bottom:none; }
-  .srow .label { font-size:13.5px; }
-  .srow .desc { font-size:11.5px; color:var(--text3); margin-top:3px; line-height:1.45; }
+  .srow .label { font-size:13.5px; font-weight:600; }
+  .srow .desc { font-size:11.5px; color:var(--text2); margin-top:3px; line-height:1.45; }
   .srow input[type=text], .srow input[type=number] { width:100%; background:var(--inset); color:var(--text);
     border:1px solid var(--line); border-radius:var(--r-panel); padding:7px 10px; font-family:var(--mono);
     font-size:12px; outline:none; }
@@ -1019,7 +1044,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .srow .toggle.on { background:var(--jade); }
   .srow .toggle i { position:absolute; top:3px; left:3px; width:17px; height:17px; border-radius:50%;
     background:#fff; display:block; transition:left .12s; }
-  .srow .toggle.on i { left:22px; }
+  .srow .toggle.on i { left:22px; background:#0c130f; }
   .settings .sfoot { padding:13px 20px; border-top:1px solid var(--line2); display:flex; gap:10px; align-items:center; }
   .settings .sfoot .msg { font-family:var(--mono); font-size:11px; color:var(--text3); margin-left:auto; }
   .settings .sfoot .msg.err { color:var(--crimson); }
@@ -1027,6 +1052,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     border-radius:var(--r-panel); padding:7px 10px; font-family:var(--mono); font-size:12px; outline:none; }
   .addproject-candidates { display:flex; flex-direction:column; gap:6px; padding:0 0 13px; }
   .addproject-cand { display:block; width:100%; text-align:left; font-family:var(--mono); font-size:11.5px; }
+  #addproject-orchestrator-value { font-family:var(--mono); font-size:11.5px; color:var(--text2);
+    background:var(--surface2); border:1px solid var(--line); border-radius:var(--r-panel); padding:7px 13px; }
 
   /* ---- dispatch modal ---- */
   .overlay { position:fixed; inset:0; background:rgba(10,12,14,.42); display:none; align-items:flex-start;

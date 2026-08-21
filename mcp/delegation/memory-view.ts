@@ -173,7 +173,20 @@ function countByType(packets: MemoryPacketSummary[]): Array<{ type: string; coun
  * but the file is found by matching the catalog id, never by joining a caller-supplied
  * string onto a path, so a crafted id cannot walk out of the packets directory.
  */
-export function readMemoryPacket(projectDir: string, id: string): { ok: boolean; id: string; title?: string; body?: string; error?: string } {
+export function readMemoryPacket(
+  projectDir: string,
+  id: string,
+): {
+  ok: boolean;
+  id: string;
+  title?: string;
+  body?: string;
+  type?: string;
+  status?: string;
+  paths?: string[];
+  updated_at?: string;
+  error?: string;
+} {
   const catalog = readJson<CatalogFile>(join(memoryDir(projectDir), "indexes", "catalog.json"), {});
   const match = (catalog.packets ?? []).find((entry) => String(entry.id) === id);
   if (!match) return { ok: false, id, error: "no such memory in this repo" };
@@ -183,7 +196,16 @@ export function readMemoryPacket(projectDir: string, id: string): { ok: boolean;
   if (!file) return { ok: false, id, error: "the catalog lists this memory but its file is missing — run kage refresh" };
 
   const raw = readFileSync(file, "utf8");
-  return { ok: true, id, title: String(match.title ?? ""), body: stripPacketChrome(raw) };
+  return {
+    ok: true,
+    id,
+    title: String(match.title ?? ""),
+    body: stripPacketChrome(raw),
+    type: match.type ? String(match.type) : undefined,
+    status: match.status ? String(match.status) : undefined,
+    paths: Array.isArray(match.paths) ? match.paths.map(String) : [],
+    updated_at: match.updated_at ? String(match.updated_at) : undefined,
+  };
 }
 
 function findPacketFile(packetsDir: string, id: string): string | null {

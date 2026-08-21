@@ -775,13 +775,20 @@ function dueWaveIndex(goal) {
   }
   return -1;
 }
-function abandonGoalClick(goal) {
-  if (!window.confirm("Abandon “" + goal.intent + "”? Its runs are not touched — only the goal stops tracking them.")) return;
+function doAbandonGoal(goal) {
   api("/goals/" + goal.id + "/abandon", { method: "POST" }).then(function (out) {
     if (!out.ok) { showError(out.error || "could not abandon the goal"); return; }
     flash("goal abandoned");
     closeGoalDetail();
     refresh();
+  });
+}
+function abandonGoalClick(goal, trigger) {
+  inlineAsk(trigger, {
+    type: "confirm",
+    message: "Abandon — its runs are not touched, only the goal stops tracking them.",
+    confirmLabel: "Abandon",
+    onConfirm: function () { doAbandonGoal(goal); },
   });
 }
 // The card's inner content, shared by creation and by the keyed-reuse patch below — a
@@ -822,7 +829,7 @@ function fillGoalCard(card, goal) {
   var spend = goalSpendLabel(goal);
   if (spend) foot.appendChild(h("span", "atom", spend));
   var abandon = h("button", "btn danger sm", "Abandon");
-  abandon.onclick = function (ev) { ev.stopPropagation(); abandonGoalClick(goal); };
+  abandon.onclick = function (ev) { ev.stopPropagation(); abandonGoalClick(goal, abandon); };
   foot.appendChild(abandon);
   card.appendChild(foot);
 }
@@ -943,7 +950,7 @@ function renderGoalDetail() {
   // needs a real DOM, and this overlay is exercised directly (renderGoalDetail) by a
   // minimal fake-element sandbox elsewhere in the test suite that does not implement
   // it — reopening the overlay already refreshes this, so live-ticking buys little.
-  chips.appendChild(h("span", "chip", ago(goal.created_at) + " ago"));
+  chips.appendChild(h("span", "chip", "started " + ago(goal.created_at) + " ago"));
   body.appendChild(chips);
   body.appendChild(h("p", "gd-autonomy", autonomyExplain(goal)));
 
@@ -976,7 +983,7 @@ function renderGoalDetail() {
           : (status.due ? "due now — wave " + idx + " merged" : "waiting — dispatches after wave " + idx + " merges");
         block.appendChild(h("div", "gd-wave-status" + (status.due ? " due" : ""), lineText));
         if (status.due && !state.dispatchWaveUnsupported) {
-          var dispatchBtn = h("button", "btn sm", "Dispatch wave");
+          var dispatchBtn = h("button", "btn primary sm", "Dispatch wave");
           dispatchBtn.onclick = function () { dispatchWaveClick(goal, idx, dispatchBtn); };
           block.appendChild(dispatchBtn);
         }
@@ -986,10 +993,9 @@ function renderGoalDetail() {
   });
 
   var foot = h("div", "gd-foot");
-  foot.appendChild(h("span", "atom", spend || "no spend yet"));
   if (goal.state === "planning" || goal.state === "executing") {
     var abandon = h("button", "btn danger sm", "Abandon");
-    abandon.onclick = function () { abandonGoalClick(goal); };
+    abandon.onclick = function () { abandonGoalClick(goal, abandon); };
     foot.appendChild(abandon);
   }
   body.appendChild(foot);
@@ -1611,6 +1617,7 @@ function renderMemory() {
     list.appendChild(h("div", "mem-empty", "Showing 200 of " + num(shown.length) + " — narrow it with search or a type."));
   }
 }
+var PACKET_FEEDBACK_HINT = "feedback tunes what future briefs carry";
 function sendPacketFeedback(id, kind, button) {
   var msg = document.getElementById("packet-msg");
   msg.textContent = "";
@@ -1654,16 +1661,26 @@ function openPacket(id) {
   var overlay = document.getElementById("packet-overlay");
   document.getElementById("packet-title").textContent = "Loading…";
   document.getElementById("packet-body").textContent = "";
+  document.getElementById("packet-chips").textContent = "";
   document.getElementById("packet-flywheel").style.display = "none";
   overlay.classList.add("on");
   Array.prototype.forEach.call(overlay.querySelectorAll("[data-fb]"), function (button) {
     button.classList.remove("primary");
     button.onclick = function () { sendPacketFeedback(id, button.getAttribute("data-fb"), button); };
   });
-  document.getElementById("packet-msg").textContent = "";
+  document.getElementById("packet-msg").textContent = PACKET_FEEDBACK_HINT;
   api("/memory/" + encodeURIComponent(id)).then(function (out) {
     document.getElementById("packet-title").textContent = out.ok ? out.title : "Not found";
     document.getElementById("packet-body").textContent = out.ok ? out.body : (out.error || "");
+    var chips = document.getElementById("packet-chips");
+    chips.textContent = "";
+    if (out.ok) {
+      if (out.type) chips.appendChild(h("span", "chip", out.type));
+      if (out.updated_at) chips.appendChild(ageSpan("chip", out.updated_at, "", " ago"));
+      if ((out.paths || []).length) {
+        chips.appendChild(h("span", "chip", out.paths.length + (out.paths.length === 1 ? " file" : " files")));
+      }
+    }
     renderPacketFlywheel(document.getElementById("packet-flywheel"), out.ok ? out : {});
   });
 }
@@ -1691,8 +1708,12 @@ function renderThreads() {
       close.onclick = function (event) {
         event.stopPropagation();
         // Deleting a transcript is irreversible — a hover title is not a warning.
-        if (!window.confirm("Close “" + session.title + "”? Its transcript is deleted — there is no undo.")) return;
-        closeThread(session.key);
+        inlineAsk(close, {
+          type: "confirm",
+          message: "Close — its transcript is deleted, there is no undo.",
+          confirmLabel: "Close",
+          onConfirm: function () { closeThread(session.key); },
+        });
       };
       tab.appendChild(close);
     }
@@ -2170,7 +2191,8 @@ function openRunTerminal(runId) {
   if (runTerm && state.runTermRunId !== runId) runTerm.reset();
   state.runTerminalActive = true;
   state.runTermRunId = runId;
-  document.getElementById("run-term-run").textContent = runId;
+  var termRun = state.runs.filter(function (r) { return r.id === runId; })[0];
+  document.getElementById("run-term-run").textContent = termRun ? displayName(termRun) : runId;
   document.getElementById("run-detail").style.display = "none";
   document.getElementById("run-term-pane").style.display = "flex";
   // Same reason as the room's terminal: build/prime only after the pane is laid out,
@@ -2329,6 +2351,15 @@ function renderReceipt(bodyOuter, claim, run, verdict, taught) {
   }
   if (totals.children.length) body.appendChild(totals);
 
+  // A reverification date is proof the pass shown here was checked against the CURRENT
+  // worktree, not just trusted from whenever the run originally finished — the same
+  // fact verify.ts's plain-text receipt has stated for a while (its own "reverified"
+  // line), just never carried into this structured card.
+  if (claim.reverified_at) {
+    var revText = String(claim.reverified_at).replace("T", " ").slice(0, 16);
+    body.appendChild(h("div", "rc-rev", "checks re-run " + revText + " — a stale pass is never shown as fresh"));
+  }
+
   // Once ratified, the learnings ARE packets — show them as the memory they became,
   // each row a door into the Memory view. Before merge, show what WILL be learned.
   if ((taught || []).length) {
@@ -2435,31 +2466,43 @@ function suggestedUsdRaise(run) {
 function suggestedMinutesRaise(run) {
   return Math.max(Math.ceil(run.spend.minutes + 10), run.budgets.minutes * 2);
 }
-function resumeRunClick(run) {
+function resumeRunClick(run, trigger) {
   var cap = parseCapFromStopNote(lastNoteFor(run, "stopped"));
   if (cap === "usd") {
     var suggestedUsd = suggestedUsdRaise(run);
-    var val = window.prompt(
-      "Resume " + run.id + " with a higher usd budget (stopped at $" + run.spend.usd_est.toFixed(2) + " against $" + run.budgets.usd.toFixed(2) + "):",
-      suggestedUsd.toFixed(2));
-    if (val === null) return;
-    var n = Number(val);
-    if (!Number.isFinite(n)) { showError("enter a number"); return; }
-    actOnRun(run.id, "resume-run", { budget_usd: n }, "Resuming…", "resumed");
+    inlineAsk(trigger, {
+      type: "number",
+      value: suggestedUsd.toFixed(2),
+      confirmLabel: "Resume",
+      onConfirm: function (n) { actOnRun(run.id, "resume-run", { budget_usd: n }, "Resuming…", "resumed"); },
+    });
   } else if (cap === "minutes") {
     var suggestedMin = suggestedMinutesRaise(run);
-    var valM = window.prompt(
-      "Resume " + run.id + " with a higher minutes budget (current " + run.budgets.minutes + "):",
-      String(suggestedMin));
-    if (valM === null) return;
-    var nm = Number(valM);
-    if (!Number.isFinite(nm)) { showError("enter a number"); return; }
-    actOnRun(run.id, "resume-run", { budget_minutes: nm }, "Resuming…", "resumed");
+    inlineAsk(trigger, {
+      type: "number",
+      value: String(suggestedMin),
+      confirmLabel: "Resume",
+      onConfirm: function (nm) { actOnRun(run.id, "resume-run", { budget_minutes: nm }, "Resuming…", "resumed"); },
+    });
   } else {
     // Unrecognized note (e.g. a stall) — plain resume, no prefill, matches
     // resumeStoppedRun's own unconditional-resume behavior for a stalled run.
     actOnRun(run.id, "resume-run", {}, "Resuming…", "resumed");
   }
+}
+
+// Shared by both Reject affordances (the claimless-stopped-receipt shortcut and the
+// main actionbar) — the reason is kept as memory for the next brief, but is never
+// required: an empty reason still rejects the run, just without that context.
+function rejectRunClick(run, trigger) {
+  inlineAsk(trigger, {
+    type: "text",
+    placeholder: "why? optional — kept as memory for the next brief",
+    confirmLabel: "Reject",
+    onConfirm: function (reason) {
+      actOnRun(run.id, "reject", reason ? { reason: reason } : {}, "Rejecting…", "rejected");
+    },
+  });
 }
 
 function panelSection(panel, title) {
@@ -2500,11 +2543,14 @@ function renderDetailPanel(panel, d, run) {
   // row. Both positions now state a word, not a mix of a command and a gerund (the
   // standing mode-pill defect): "Delivers now" / "Queues".
   var controlsSec = panelSection(panel, "Session controls");
+  var controlsRow = h("div", "pnl-ctl-row");
+  controlsRow.appendChild(h("span", "pnl-ctl-label", "Message delivery"));
   var queueToggle = h("button", "btn sm modepill" + (state.steerQueueMode ? " on" : ""),
     state.steerQueueMode ? "Queues" : "Delivers now");
   queueToggle.title = "Toggle whether ⏎ delivers immediately or queues for later — ⌘⏎ always queues";
   queueToggle.onclick = function () { state.steerQueueMode = !state.steerQueueMode; renderDetail(); };
-  controlsSec.appendChild(queueToggle);
+  controlsRow.appendChild(queueToggle);
+  controlsSec.appendChild(controlsRow);
 
   // 3. ACTIVITY — state_history as a compact timeline, real kernel records
   // (transitionRun, contract.ts) never rendered in the browser before this.
@@ -2548,14 +2594,10 @@ function renderClaimlessStoppedReceipt(body, run) {
   body.appendChild(emptyBlock("No claim exists", "The run stopped before reporting. Resume it to continue, or Reject to close.", null));
   var receiptActs = h("div", "empty-actions");
   var receiptResume = h("button", "btn primary sm", "Resume");
-  receiptResume.onclick = function () { resumeRunClick(run); };
+  receiptResume.onclick = function () { resumeRunClick(run, receiptResume); };
   receiptActs.appendChild(receiptResume);
   var receiptReject = h("button", "btn danger sm", "Reject");
-  receiptReject.onclick = function () {
-    var reason = window.prompt("Why? The reason is kept as memory — the next brief carries it.");
-    if (!reason) return;
-    actOnRun(run.id, "reject", { reason: reason }, "Rejecting…", "rejected");
-  };
+  receiptReject.onclick = function () { rejectRunClick(run, receiptReject); };
   receiptActs.appendChild(receiptReject);
   body.appendChild(receiptActs);
 }
@@ -2816,7 +2858,7 @@ function renderDetail() {
     // stop note names.
     var resume = h("button", "btn primary", pendingLabel === "Resuming…" ? pendingLabel : "Resume");
     if (pendingLabel) resume.disabled = true;
-    resume.onclick = function () { resumeRunClick(run); };
+    resume.onclick = function () { resumeRunClick(run, resume); };
     bar.appendChild(resume);
   }
   if (run.branch_landed && (run.display_state === "stopped" || run.display_state === "failed")) {
@@ -2851,11 +2893,7 @@ function renderDetail() {
   if (["merged", "rejected"].indexOf(run.display_state) < 0) {
     var reject = h("button", "btn danger", "Reject…");
     if (pendingLabel) reject.disabled = true;
-    reject.onclick = function () {
-      var reason = window.prompt("Why? The reason is kept as memory — the next brief carries it.");
-      if (!reason) return;
-      actOnRun(run.id, "reject", { reason: reason }, "Rejecting…", "rejected");
-    };
+    reject.onclick = function () { rejectRunClick(run, reject); };
     bar.appendChild(reject);
   }
   var fl = h("span", "flash");
@@ -2889,6 +2927,60 @@ function showError(text) {
 document.getElementById("errbar-x").onclick = function () {
   document.getElementById("errbar").classList.remove("on");
 };
+
+// window.prompt()/confirm()/alert() throw in Electron and the app's own embedded
+// browser ("prompt() is not supported") — every place that used to ask a quick
+// question now swaps the trigger element in place for a small in-DOM row (an
+// optional input, then confirm/cancel), restoring the trigger on cancel or Escape.
+// No overlay, no focus trap: this is a row-level affordance, not a modal.
+function inlineAsk(trigger, opts) {
+  var parent = trigger.parentNode;
+  if (!parent) return;
+  var row = h("span", "inline-ask");
+  var input = null;
+  if (opts.type !== "confirm") {
+    input = h("input", "inline-ask-input");
+    input.type = opts.type === "number" ? "number" : "text";
+    if (opts.placeholder) input.placeholder = opts.placeholder;
+    if (opts.value !== undefined && opts.value !== null) input.value = opts.value;
+    row.appendChild(input);
+  } else if (opts.message) {
+    row.appendChild(h("span", "inline-ask-msg", opts.message));
+  }
+  var okBtn = h("button", "btn danger sm", opts.confirmLabel || "Confirm");
+  var cancelBtn = h("button", "btn sm", "Cancel");
+  row.appendChild(okBtn);
+  row.appendChild(cancelBtn);
+
+  function restore() {
+    if (row.parentNode) row.parentNode.replaceChild(trigger, row);
+  }
+  function submit() {
+    if (opts.type === "number") {
+      var n = Number(input.value.trim());
+      if (!Number.isFinite(n)) { showError("enter a number"); return; }
+      restore();
+      opts.onConfirm(n);
+      return;
+    }
+    var value = input ? input.value.trim() : undefined;
+    restore();
+    opts.onConfirm(value);
+  }
+  function onKey(ev) {
+    if (ev.key === "Escape") { ev.preventDefault(); restore(); }
+    else if (ev.key === "Enter" && ev.target === (input || okBtn)) { ev.preventDefault(); submit(); }
+  }
+  okBtn.onclick = submit;
+  cancelBtn.onclick = restore;
+  // Scoped to the row itself (keydown bubbles up from input/okBtn/cancelBtn) rather
+  // than a document-level listener — if an external re-render ever tears this row out
+  // without going through restore()/submit(), the row and this listener are simply
+  // garbage collected together instead of leaking a listener that outlives its row.
+  row.addEventListener("keydown", onKey);
+  parent.replaceChild(row, trigger);
+  if (input) { input.focus(); } else { okBtn.focus(); }
+}
 
 // Optimistic action state that SURVIVES re-renders. Mutating a button in place
 // ("Merging…") lasted only until the next SSE re-read rebuilt the row; the state
@@ -3291,7 +3383,7 @@ function renderAddProject() {
     orchRow.style.display = "none";
     goBtn.disabled = true;
   }
-  goBtn.textContent = ap.busy ? "Starting…" : "Create and start";
+  goBtn.textContent = ap.busy ? "Starting…" : "Create and open its Room";
   var msg = document.getElementById("addproject-msg");
   msg.textContent = ap.error || "";
   msg.className = "msg" + (ap.error ? " err" : "");
