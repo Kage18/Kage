@@ -26,7 +26,13 @@ import { isProcessAlive, readRun } from "./contract.js";
 import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
-  MANAGER_ALLOWED_TOOLS, collectManagerFacts, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
+  MANAGER_ALLOWED_TOOLS,
+  EMPTY_MANAGER_REPLY_TEXT,
+  collectManagerFacts,
+  managerEventFrom,
+  guardManagerProse,
+  type ManagerEvent,
+} from "./manager-client.js";
 import { MANAGER_CONSTITUTION, managerPromptFor } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import { readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
@@ -422,7 +428,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
         const parsed = JSON.parse(line) as { type?: string; result?: unknown };
         if (parsed.type === "result" && activeTurn) {
           const rawText = typeof parsed.result === "string" ? parsed.result : "";
-          const guarded = guardManagerProse(rawText || "(the manager returned nothing)", collectManagerFacts(projectDir));
+          const guarded = guardManagerProse(rawText || EMPTY_MANAGER_REPLY_TEXT, collectManagerFacts(projectDir));
           // Tool names arrived interleaved with "say" text in the tool-push above —
           // separate them back out by re-deriving from the raw lines would duplicate
           // parsing, so keep a dedicated tool list instead of reusing `text` pushes.

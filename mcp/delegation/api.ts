@@ -58,7 +58,7 @@ import { suggestedNextForRoom, suggestedNextPrompt } from "./suggest.js";
 import { readActivity } from "./progress.js";
 import { currentBranch, diffFileTree, git, type DiffFileEntry } from "./git.js";
 import { worktreePath } from "./worktree.js";
-import { askManager } from "./manager-client.js";
+import { askManager, EMPTY_REPLY_RETRY_NUDGE } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
 import {
   askRoomSupervisor,
@@ -608,12 +608,28 @@ export async function resolveRoomReply(
   }
 
   const ask = ctx.askManagerFn ?? askManager;
-  const reply = await ask({
-    projectDir,
-    question: message,
-    history: historyBefore.map((turn) => ({ role: turn.role, text: turn.text })),
-    onEvent: onDelta,
-  });
+  const priorTurns = historyBefore.map((turn) => ({ role: turn.role, text: turn.text }));
+  let reply = await ask({ projectDir, question: message, history: priorTurns, onEvent: onDelta });
+  if (!reply.ok) {
+    // One bounded retry, never a loop: a manager turn that resolved with no text gets
+    // exactly one more chance, nudged to answer plainly, before this leg gives up and
+    // reports an honest failure. See EMPTY_REPLY_RETRY_NUDGE's own doc.
+    const retryHistory = [...priorTurns, { role: "you" as const, text: message }, { role: "kage" as const, text: reply.text }];
+    reply = await ask({ projectDir, question: EMPTY_REPLY_RETRY_NUDGE, history: retryHistory, onEvent: onDelta });
+  }
+  if (!reply.ok) {
+    const detail = [
+      reply.exitCode !== undefined ? `exit code ${reply.exitCode}` : null,
+      reply.stderr ? `stderr: ${reply.stderr.slice(0, 200)}` : null,
+    ].filter((part): part is string => Boolean(part));
+    const why = detail.length ? detail.join("; ") : "returned empty twice";
+    return {
+      text: `The manager returned an empty reply twice in a row (${why}) — nothing to show for this turn.`,
+      tools: reply.tools,
+      manager: "headless",
+      failed: true,
+    };
+  }
   return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}), manager: "headless" };
 }
 

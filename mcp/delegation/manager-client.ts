@@ -45,7 +45,25 @@ export interface ManagerReply {
    * (see guardManagerProse).
    */
   corrections?: string[];
+  /** Set only when ok is false: the CLI's own exit code, for an honest failure turn. */
+  exitCode?: number;
+  /** Set only when ok is false and something landed on stderr, for an honest failure turn. */
+  stderr?: string;
 }
+
+/** The honesty fallback substituted when the manager's own text came back empty. Shared
+ * with room-supervisor.ts's held-session leg so both use exactly one sentinel string. */
+export const EMPTY_MANAGER_REPLY_TEXT = "(the manager returned nothing)";
+
+/**
+ * Appended (as the retry question, replacing the original) when a manager turn resolves
+ * with empty text — see resolveRoomReply's one bounded retry in api.ts. Never sent twice:
+ * a retry that is ALSO empty falls straight through to an honest, enriched failure turn.
+ */
+export const EMPTY_REPLY_RETRY_NUDGE =
+  "Your last reply had no text — that is never acceptable. Answer now in at least one " +
+  "plain sentence: say what you can do about the user's last message and do it (you have " +
+  "dispatch tools), or ask exactly one clarifying question.";
 
 export interface ManagerLaunch {
   command: string;
@@ -165,10 +183,22 @@ export async function askManager(options: {
       clearTimeout(timer);
       resolve({ ok: false, text: `manager could not run: ${String(error)}`, tools: [] });
     });
-    child.on("close", () => {
+    child.on("close", (code) => {
       clearTimeout(timer);
       const facts = collectManagerFacts(options.projectDir);
-      resolve(parseManagerStream(out, facts) ?? { ok: false, text: err.trim() || "the manager said nothing", tools: [] });
+      const reply = parseManagerStream(out, facts) ?? { ok: false, text: err.trim() || "the manager said nothing", tools: [] };
+      // Diagnostics only ride along on a failed turn — a successful reply has nothing to
+      // explain, and attaching stray stderr noise (deprecation warnings, etc.) to it would
+      // be misread as part of the manager's own answer.
+      if (reply.ok) {
+        resolve(reply);
+        return;
+      }
+      resolve({
+        ...reply,
+        ...(typeof code === "number" ? { exitCode: code } : {}),
+        ...(err.trim() ? { stderr: err.trim() } : {}),
+      });
     });
   });
 }
@@ -357,7 +387,7 @@ export function parseManagerStream(stdout: string, facts: ManagerFactCheck[] = [
   const guarded = guardManagerProse(text, facts);
   return {
     ok: Boolean(text),
-    text: guarded.text || "(the manager returned nothing)",
+    text: guarded.text || EMPTY_MANAGER_REPLY_TEXT,
     tools,
     ...(cost === undefined ? {} : { cost_usd: cost }),
     ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
