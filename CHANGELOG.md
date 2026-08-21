@@ -1,6 +1,6 @@
 # Changelog
 
-## v3.2.0 — Kage runs your agents, watches them work, and remembers what they learned
+## v5.0.0 — Kage runs your agents, watches them work, and remembers what they learned
 
 Kage was a memory tool with a dispatch command. It is now an orchestrator with a live
 app around it: you hand it an intent, it compiles a brief from repo memory, hires an
