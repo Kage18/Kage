@@ -67,6 +67,46 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     --shadow-md:0 1px 2px rgba(20,24,20,.06), 0 10px 28px rgba(20,24,20,.10);
     --glow-green:0 10px 28px rgba(31,157,99,.18);
   }
+  /* applyTheme's own comment ("explicit picks beat the media query in BOTH
+     directions") described this block before it existed — "system" mode removes
+     data-theme and left the app with no way to actually follow the OS's light
+     setting, so it silently rendered dark always. This is the other half: the
+     SAME light tokens as the explicit override above, applied only when nothing
+     was explicitly chosen (:not([data-theme="dark"]) lets an explicit dark pick
+     win even when the OS itself prefers light). */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg:#f2f4f1; --surface:#ffffff; --surface2:#e9ece7; --inset:#e3e7e1;
+      --line:#d5dad2; --line2:#e2e6df; --line-strong:#b3bbb0;
+      --text:#141714; --text2:#4d544c; --text3:#79806f;
+      --chrome:#e8ebe6;
+      --green:#1f9d63; --green-strong:#178552; --green-soft:rgba(31,157,99,.12);
+      --seal:#1f9d63; --jade:#1f9d63;
+      --code:#2f6fa8; --memory:#6f52a8; --amber:#9a6f14; --crimson:#a8465c;
+      --code-bg:#0e1110; --code-text:#cfe0d4;
+      --shadow-sm:0 1px 2px rgba(20,24,20,.05), 0 2px 8px rgba(20,24,20,.05);
+      --shadow-md:0 1px 2px rgba(20,24,20,.06), 0 10px 28px rgba(20,24,20,.10);
+      --glow-green:0 10px 28px rgba(31,157,99,.18);
+    }
+  }
+  /* An explicit dark pick, restated so it wins even when the OS prefers light —
+     the bare :root above already carries these values, but only this selector
+     outranks the light media query's :not([data-theme="dark"]) guard. */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:#121413; --surface:#1a1d1b; --surface2:#212522; --inset:#0e1110;
+    --line:#2c302c; --line2:#242a25; --line-strong:#41463f;
+    --text:#edefe9; --text2:#a4aba1; --text3:#767d74;
+    --chrome:#171a18;
+    --green:#43c98a; --green-strong:#5fdca0; --green-soft:rgba(67,201,138,.12);
+    --seal:#43c98a; --jade:#43c98a;
+    --code:#6fb4e8; --memory:#b095e8; --amber:#d9a93f; --crimson:#e07a8c;
+    --code-bg:#0e1110; --code-text:#cfe0d4;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.2), 0 6px 18px rgba(0,0,0,.22);
+    --shadow-md:0 1px 2px rgba(0,0,0,.2), 0 14px 36px rgba(0,0,0,.3);
+    --glow-green:0 10px 28px rgba(67,201,138,.22);
+  }
 
   /* notification badge on the bell */
   .bellwrap { position:relative; display:inline-flex; }
@@ -355,6 +395,26 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     font-family:var(--mono); font-weight:700; font-size:22px; display:flex; align-items:center; justify-content:center;
     margin:0 auto 18px; }
   .primer p { max-width:420px; margin:0 auto; font-size:13.5px; line-height:1.6; }
+  /* First-open teach screen (docs/design/mockups/FirstOpen.dc.html): the SAME
+     .primer slot as the default explainer above, swapped in by renderRoom when no
+     orchestrator has ever run and nothing has been dispatched yet — not a second,
+     competing empty state. text-align:left overrides .primer's own centered text
+     because the card's own copy reads left-to-right, not centered like the icon
+     explainer next to it. */
+  #primer-firstopen { display:none; }
+  .fo-card { width:min(480px,92vw); margin:0 auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--r-hero); padding:28px 32px; box-shadow:var(--shadow-sm);
+    display:flex; flex-direction:column; gap:16px; text-align:left; }
+  .fo-card h1 { font-family:var(--serif); font-weight:700; font-size:21px; margin:0; line-height:1.3; color:var(--text); }
+  .fo-card p { margin:0; font-size:13px; color:var(--text2); line-height:1.6; max-width:none; }
+  .fo-start { align-self:flex-start; font-family:var(--mono); font-size:12.5px; padding:10px 20px;
+    border-radius:var(--r-panel); background:var(--green); color:#06130d; font-weight:700; box-shadow:var(--glow-green); }
+  .fo-start:hover { background:var(--green-strong); }
+  .fo-start:disabled { opacity:.6; cursor:default; }
+  .fo-teach { display:flex; flex-direction:column; gap:8px; border-top:1px dashed var(--line); padding-top:14px; }
+  .fo-t { display:flex; gap:10px; font-size:12px; color:var(--text2); align-items:baseline; }
+  .fo-t .k { font-family:var(--mono); font-size:10px; color:var(--green); width:22px; flex:none; }
+  .fo-note { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
   /* Assistant prose gets NO bubble.
      Wrapping every message in a container is the single reason this read as heavy
      next to AO: a bubble is a frame, and framing continuous prose fights the reading.
@@ -923,11 +983,18 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .palette input { width:100%; border:none; background:none; color:var(--text); font-size:15px;
     padding:15px 18px; outline:none; border-bottom:1px solid var(--line2); font-family:var(--sans); }
   .palette .results { max-height:340px; overflow-y:auto; padding:6px; }
+  /* Section headers (docs/design/mockups/Palette.dc.html's own .grp: "GO"/"DO"/…),
+     one per contiguous run of same-group commands — a heading OVER the group,
+     replacing the old per-row grp label that repeated the group name on every row. */
+  .palette .pgrp { padding:10px 12px 4px; font-family:var(--mono); font-size:9px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--text3); }
+  .palette .pgrp:first-child { padding-top:6px; }
   .palette .row { display:flex; align-items:baseline; gap:11px; padding:9px 12px; border-radius:var(--r-card); cursor:pointer; }
   .palette .row.sel { background:var(--surface2); }
+  .palette .row .verb { font-family:var(--mono); font-size:9px; color:var(--green); letter-spacing:.1em; width:20px; flex:none; }
   .palette .row .name { font-size:13.5px; }
-  .palette .row .grp { font-family:var(--mono); font-size:10px; color:var(--text3); }
-  .palette .row .hint { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3); }
+  .palette .row .hint { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3);
+    border:1px solid var(--line); border-radius:6px; padding:1px 7px; }
   .palette .none { padding:22px; text-align:center; color:var(--text3); font-size:13px; }
 
   /* ---- settings ---- */
