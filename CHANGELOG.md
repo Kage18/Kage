@@ -41,6 +41,24 @@ so the next brief starts smarter. Everything below shipped on top of that loop.
   Room now teaches the three keystrokes (send, queue, orchestrate as a goal) and says
   plainly that nothing is simulated until you start one.
 
+### The manager talks back, and never goes quiet
+
+- **A manager reply can carry clickable options, proposals, or run links**, not just
+  prose — ask a question and get 2-4 option chips instead of having to type an answer,
+  get a proposal card with a Dispatch button when it recommends work, get a run chip
+  when it points at one. This rides every reply path, including a message routed to a
+  live terminal session: the chat view now shows the terminal's real answer instead of
+  a paraphrase telling you to go check the Terminal tab.
+- **A turn never ends empty.** When the manager can't do what you asked directly —
+  browse, edit a file, use the UI — it now proposes and dispatches a run or asks one
+  clarifying question instead of returning nothing. If a reply does come back empty, it
+  gets one retry with a nudge before a failure turn is shown, and that failure turn
+  says why (an error, or "returned empty twice") instead of just that it failed.
+- **A manager session that times out or wedges recycles itself.** A reply that missed
+  the answer window used to render as a normal, blank "done" turn; it now shows
+  honestly as a failed turn naming what happened, and the underlying session restarts
+  before your next message instead of risking another silent multi-minute wait.
+
 ### Recovering from anything
 
 - **A stalled run is caught and stopped on its own**, before it burns further budget —
@@ -83,6 +101,20 @@ so the next brief starts smarter. Everything below shipped on top of that loop.
   here rather than rounded away. Run `kage benchmark` or `node mcp/dist/bench/run.js`
   yourself.
 
+### Memory quality is enforced, not just measured
+
+- **A near-duplicate capture is rejected at write time**, told which packet it repeats,
+  and pointed at supersede instead of adding to the pile.
+- **A low-quality capture needs an explicit override to be admitted** — the quality
+  floor was already being scored; it is now actually enforced.
+- **`kage gc`** excludes superseded and deprecated packets from stale and warning lists
+  (they are resolved, not open work), merges near-duplicate packets with lineage kept,
+  and lists contradiction pairs ranked by how often they are actually recalled — one
+  command, an honest before/after count.
+- **The quality-score and token-savings numbers in the memory receipt are real**, not a
+  hardcoded zero, and the savings figure is labeled as an estimate rather than shown as
+  a measurement.
+
 ### Trust the receipt more
 
 - **Kage type-checks and parses your code before accepting a claim**, on top of
@@ -105,6 +137,10 @@ so the next brief starts smarter. Everything below shipped on top of that loop.
   tree it spawned is killed, not just the one command Kage started.
 - **Runs that exceed their budget say so.** A run whose estimated spend crosses its
   limit is halted with the limit and the actual figure named, and its work is kept.
+- **Two verifications on the same machine no longer flake each other.** Checks that
+  actually run a command (tests, typecheck, app-parse) now serialize per machine, with
+  the wait recorded in the check's own evidence — and a check that itself triggers a
+  nested verification no longer deadlocks waiting on its own outer lock.
 
 ### Living with it day to day
 
@@ -133,6 +169,17 @@ so the next brief starts smarter. Everything below shipped on top of that loop.
   the case for verification, a worked example, the memory ledger with its numbers
   labeled as measured or estimated, and the missed warm-refresh target shown rather
   than hidden — install instructions and the dependency count included.
+- **The Room's chat reads like a real conversation.** The thread column is centered
+  with even gutters instead of hugging the left edge; your messages and Kage's replies
+  now have distinct type treatments instead of one flat size everywhere; turn spacing
+  matches the design source; and a run of consecutive tool-call lines collapses into
+  one line instead of repeating "ran X" over and over.
+- **The sidebar and status bar say less.** An inactive project shows just its name, not
+  a permanently-visible path; the composer's shortcut hints disappear for good once
+  you have actually used them; the status bar keeps only the counts that matter.
+- **Board zone headers stop breaking.** "Idle / Working / Reviewing" and its counts no
+  longer wrap into a vertical stack at normal widths, and card stats like token counts
+  no longer split mid-word.
 
 ### Packaging
 
@@ -145,6 +192,10 @@ so the next brief starts smarter. Everything below shipped on top of that loop.
   Fixed, and the version guard now covers it.
 - **`node-pty` is an optional dependency.** A machine without a C++ toolchain could
   fail `npm i -g` entirely over a native module only the terminal view needs.
+- **A dmg download works without the CLI installed first.** Launching Kage.app with no
+  engine on the machine used to dead-end in a raw spawn error; it now offers to install
+  the engine for you, with your explicit consent, and continues the normal launch on
+  success — or points you at nodejs.org if node/npx themselves are missing.
 
 ### Behaviour changes worth knowing
 
