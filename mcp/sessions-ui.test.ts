@@ -638,13 +638,15 @@ test("goal overlay: a wave with no runs renders its PLANNED run intents as muted
       "absent the API's wave-status field, no waiting/due line must be invented");
   }
 
-  // Same fixture, now WITH a wave-status field on wave 2 — the waiting/due sentence
-  // must appear alongside the (still-rendered) planned rows.
+  // Same fixture, now WITH the API's derived wave_status array (api.ts's
+  // withWaveStatus — a TOP-LEVEL field on the goal, not on the wave itself) — the
+  // waiting/due sentence must appear alongside the (still-rendered) planned rows.
   const withStatus = makeGoal({
     plan: { waves: [
       { runs: [], run_ids: ["r1"] },
-      { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [], status: { due: false } },
+      { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [] },
     ] },
+    wave_status: [{ status: "merged" }, { status: "waiting" }],
   });
   {
     const { sandbox, elements } = loadGoalSandbox();
@@ -657,27 +659,32 @@ test("goal overlay: a wave with no runs renders its PLANNED run intents as muted
     const planned = kids(wave2).filter((c) => c.className === "gd-run-row gd-planned");
     assert.equal(planned.length, 1, "planned rows must still render even once a status field exists");
     const statusLine = kids(wave2).find((c) => String(c.className).indexOf("gd-wave-status") >= 0);
-    assert.ok(statusLine, "a waiting/due status line must render once the API supplies wave.status");
+    assert.ok(statusLine, "a waiting/due status line must render once the API supplies goal.wave_status");
     assert.match(String(statusLine!.textContent), /waiting.*wave 1 merges/);
   }
 });
 
-// FAILS ON REVERT: today's renderGoalDetail never reads wave.status at all, so a due
-// wave never grows a "Dispatch wave" button — the presence assertion below would fail.
-// There is no prior behavior for the "hidden after a not_found response" half either:
-// it is new, so reverting it means the button (once it exists at all) never hides.
+// FAILS ON REVERT: today's renderGoalDetail never reads goal.wave_status at all
+// (waveGateStatus reverted to the dead wave.status.due boolean the server never
+// sends), so a due wave never grows a "Dispatch wave" button — the presence
+// assertion below would fail. There is no prior behavior for the "hidden after a
+// not_found response" half either: it is new, so reverting it means the button
+// (once it exists at all) never hides.
 test("goal overlay: the Dispatch wave button appears only for a due, run-less wave with the endpoint present, and hides itself once the endpoint answers 404", async () => {
-  function waveGoal(status: { due: boolean } | undefined): Record<string, unknown> {
-    return makeGoal({ plan: { waves: [
-      { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [], status },
-    ] } });
+  function waveGoal(due: boolean): Record<string, unknown> {
+    return makeGoal({
+      plan: { waves: [
+        { runs: [{ intent: "Add the retry-queue worker.", type: "feature", files_scope: [] }], run_ids: [] },
+      ] },
+      wave_status: [{ status: due ? "due" : "waiting" }],
+    });
   }
 
   // due:false — no button offered.
   {
     const { sandbox, elements } = loadGoalSandbox();
     const state = sandbox.state as Record<string, unknown>;
-    state.goals = [waveGoal({ due: false })];
+    state.goals = [waveGoal(false)];
     state.runs = [];
     (sandbox.openGoalDetail as (id: string) => void)("g1");
     const wave = kids(elements["goal-body"]).find((c) => c.className === "gd-wave-block")!;
@@ -692,7 +699,7 @@ test("goal overlay: the Dispatch wave button appears only for a due, run-less wa
     return Promise.resolve({ status: 404, json: () => Promise.resolve({ ok: false, error: "not_found" }) });
   });
   const state = sandbox.state as Record<string, unknown>;
-  state.goals = [waveGoal({ due: true })];
+  state.goals = [waveGoal(true)];
   state.runs = [];
   (sandbox.openGoalDetail as (id: string) => void)("g1");
   let wave = kids(elements["goal-body"]).find((c) => c.className === "gd-wave-block")!;

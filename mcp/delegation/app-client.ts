@@ -22,6 +22,13 @@ var state = {
   steerQueueMode: false, runTerminalActive: false, runTermRunId: null, diffJumpTarget: null,
   goalIntentOpen: false, dispatchWaveUnsupported: false,
 };
+// Open inlineAsk rows (Reject's reason field, Resume's budget raise), keyed by a
+// "reject:<runId>" / "resume:<runId>" style string — see inlineAsk's opts.key below.
+// Declared up here (not near inlineAsk itself, far later in this file) so its
+// initializer always runs before anything else on the page, the same reason state
+// above is declared first: real-DOM top-level wiring later in this script can throw
+// before reaching a lower declaration, and this must never be caught mid-init.
+var openInlineAsks = {};
 try { if (localStorage.getItem("kageLayout") === "board") state.workLayout = "board"; } catch (e) {}
 try { if (localStorage.getItem("kageDiff") === "split") state.diffView = "split"; } catch (e) {}
 
@@ -758,19 +765,22 @@ function goalWaveLine(goal) {
   var started = waves.filter(function (w) { return w.run_ids.length > 0; }).length;
   return "wave " + Math.min(started || 1, waves.length) + " of " + waves.length;
 }
-// A wave's dispatch-readiness, read straight from the API's own per-wave status field
+// A wave's dispatch-readiness, read straight from the API's own derived status array
 // — never re-derived client-side, since the real gate also checks budgets and
 // files_scope collisions this client cannot see (goal.ts's checkGoalAcceptsNewRun).
-// The goal-continuity backend run that adds this field lands independently of this
-// redesign: absent field means absent opinion, so every wave here reads as neither
-// waiting nor due until it exists — only its planned runs render.
-function waveGateStatus(wave) {
-  return wave && wave.status && typeof wave.status.due === "boolean" ? wave.status : null;
+// api.ts's withWaveStatus ships this as a TOP-LEVEL goal.wave_status array (goal.ts's
+// goalWaveStatus), one entry per wave, each carrying a STRING status — never a boolean
+// on the wave object itself. Absent entry means absent opinion, so a wave whose status
+// hasn't landed yet reads as neither waiting nor due — only its planned runs render.
+function waveGateStatus(goal, index) {
+  var entry = goal.wave_status && goal.wave_status[index];
+  if (!entry || !entry.status) return null;
+  return { raw: entry.status, due: entry.status === "due", waiting: entry.status === "waiting", failed_run_ids: entry.failed_run_ids };
 }
 function dueWaveIndex(goal) {
   var waves = goal.plan.waves || [];
   for (var i = 0; i < waves.length; i += 1) {
-    var status = waveGateStatus(waves[i]);
+    var status = waveGateStatus(goal, i);
     if (status && status.due) return i;
   }
   return -1;
@@ -851,7 +861,8 @@ function goalCard(goal) {
 var goalCardCache = {};
 function goalCardHash(goal) {
   return stableStringify({ intent: goal.intent, state: goal.state, autonomy: goal.autonomy, plan: goal.plan,
-    spend: goalSpendLabel(goal), tones: (goal.plan.waves || []).map(function (w) { return w.run_ids.map(goalWaveTone); }) });
+    wave_status: goal.wave_status, spend: goalSpendLabel(goal),
+    tones: (goal.plan.waves || []).map(function (w) { return w.run_ids.map(goalWaveTone); }) });
 }
 function getOrPatchGoalCard(goal) {
   var cached = goalCardCache[goal.id];
@@ -962,8 +973,8 @@ function renderGoalDetail() {
     var block = h("div", "gd-wave-block");
     var whead = h("div", "gd-wave-head");
     whead.appendChild(h("div", "seclabel-sm", "Wave " + (idx + 1) + " of " + waves.length));
-    var status = waveGateStatus(wave);
-    if (status) whead.appendChild(h("span", "atom" + (status.due ? " amber" : " dim"), status.due ? "due" : "waiting"));
+    var status = waveGateStatus(goal, idx);
+    if (status) whead.appendChild(h("span", "atom" + (status.due ? " amber" : " dim"), status.raw));
     block.appendChild(whead);
 
     if (wave.run_ids.length) {
@@ -2466,22 +2477,26 @@ function suggestedUsdRaise(run) {
 function suggestedMinutesRaise(run) {
   return Math.max(Math.ceil(run.spend.minutes + 10), run.budgets.minutes * 2);
 }
-function resumeRunClick(run, trigger) {
+// presetValue (from openInlineAsks, on a post-rebuild reopen) overrides the suggested
+// default so a raise the user already typed is never clobbered back to the suggestion.
+function resumeRunClick(run, trigger, presetValue) {
   var cap = parseCapFromStopNote(lastNoteFor(run, "stopped"));
   if (cap === "usd") {
     var suggestedUsd = suggestedUsdRaise(run);
     inlineAsk(trigger, {
       type: "number",
-      value: suggestedUsd.toFixed(2),
+      value: presetValue !== undefined ? presetValue : suggestedUsd.toFixed(2),
       confirmLabel: "Resume",
+      key: "resume:" + run.id,
       onConfirm: function (n) { actOnRun(run.id, "resume-run", { budget_usd: n }, "Resuming…", "resumed"); },
     });
   } else if (cap === "minutes") {
     var suggestedMin = suggestedMinutesRaise(run);
     inlineAsk(trigger, {
       type: "number",
-      value: String(suggestedMin),
+      value: presetValue !== undefined ? presetValue : String(suggestedMin),
       confirmLabel: "Resume",
+      key: "resume:" + run.id,
       onConfirm: function (nm) { actOnRun(run.id, "resume-run", { budget_minutes: nm }, "Resuming…", "resumed"); },
     });
   } else {
@@ -2494,11 +2509,15 @@ function resumeRunClick(run, trigger) {
 // Shared by both Reject affordances (the claimless-stopped-receipt shortcut and the
 // main actionbar) — the reason is kept as memory for the next brief, but is never
 // required: an empty reason still rejects the run, just without that context.
-function rejectRunClick(run, trigger) {
+// presetValue restores typed-but-unsubmitted text after a background rebuild reopens
+// this row (see openInlineAsks / inlineAsk's opts.key).
+function rejectRunClick(run, trigger, presetValue) {
   inlineAsk(trigger, {
     type: "text",
     placeholder: "why? optional — kept as memory for the next brief",
     confirmLabel: "Reject",
+    value: presetValue,
+    key: "reject:" + run.id,
     onConfirm: function (reason) {
       actOnRun(run.id, "reject", reason ? { reason: reason } : {}, "Rejecting…", "rejected");
     },
@@ -2600,6 +2619,11 @@ function renderClaimlessStoppedReceipt(body, run) {
   receiptReject.onclick = function () { rejectRunClick(run, receiptReject); };
   receiptActs.appendChild(receiptReject);
   body.appendChild(receiptActs);
+  // A background rebuild (renderDetail's revision gate) recreates these triggers from
+  // scratch — reopen any row the user had open, with its typed text intact, instead of
+  // silently dropping back to a bare trigger button.
+  if (openInlineAsks["resume:" + run.id]) resumeRunClick(run, receiptResume, openInlineAsks["resume:" + run.id].value);
+  if (openInlineAsks["reject:" + run.id]) rejectRunClick(run, receiptReject, openInlineAsks["reject:" + run.id].value);
 }
 // The detail pane's own revision, kept PER RUN ID (not one shared slot) — flipping
 // back to a run you already viewed, whose data hasn't moved since, must not repaint
@@ -2860,6 +2884,9 @@ function renderDetail() {
     if (pendingLabel) resume.disabled = true;
     resume.onclick = function () { resumeRunClick(run, resume); };
     bar.appendChild(resume);
+    // Survives a background rebuild: reopen with whatever the user had already typed
+    // instead of leaving a bare "Resume" button after the row it replaced vanished.
+    if (!pendingLabel && openInlineAsks["resume:" + run.id]) resumeRunClick(run, resume, openInlineAsks["resume:" + run.id].value);
   }
   if (run.branch_landed && (run.display_state === "stopped" || run.display_state === "failed")) {
     // Finding 3: this run's own branch is already an ancestor of HEAD — landed some
@@ -2895,6 +2922,9 @@ function renderDetail() {
     if (pendingLabel) reject.disabled = true;
     reject.onclick = function () { rejectRunClick(run, reject); };
     bar.appendChild(reject);
+    // Survives a background rebuild: reopen with whatever the user had already typed
+    // instead of leaving a bare "Reject…" button after the row it replaced vanished.
+    if (!pendingLabel && openInlineAsks["reject:" + run.id]) rejectRunClick(run, reject, openInlineAsks["reject:" + run.id].value);
   }
   var fl = h("span", "flash");
   fl.id = "flash";
@@ -2933,6 +2963,15 @@ document.getElementById("errbar-x").onclick = function () {
 // question now swaps the trigger element in place for a small in-DOM row (an
 // optional input, then confirm/cancel), restoring the trigger on cancel or Escape.
 // No overlay, no focus trap: this is a row-level affordance, not a modal.
+//
+// A run-detail rebuild (renderDetail's revision gate) tears out and recreates the
+// whole actionbar on any background poll change, including one that has nothing to
+// do with the row itself — that used to silently delete an open row and its typed
+// text. opts.key (a "reject:<runId>" / "resume:<runId>" style string) opts a row into
+// surviving that: its live text is mirrored into openInlineAsks (declared up near
+// state, at the top of this file) as the user types, and each call site
+// (rejectRunClick/resumeRunClick) checks that map after a rebuild to reopen itself
+// with the same text instead of leaving a bare trigger button behind.
 function inlineAsk(trigger, opts) {
   var parent = trigger.parentNode;
   if (!parent) return;
@@ -2952,7 +2991,15 @@ function inlineAsk(trigger, opts) {
   row.appendChild(okBtn);
   row.appendChild(cancelBtn);
 
+  if (opts.key) {
+    openInlineAsks[opts.key] = { value: input ? input.value : "" };
+    if (input) {
+      input.addEventListener("input", function () { openInlineAsks[opts.key].value = input.value; });
+    }
+  }
+
   function restore() {
+    if (opts.key) delete openInlineAsks[opts.key];
     if (row.parentNode) row.parentNode.replaceChild(trigger, row);
   }
   function submit() {
