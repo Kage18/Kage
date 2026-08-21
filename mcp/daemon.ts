@@ -1,5 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync, type FSWatcher, chmodSync } from "node:fs";
+import { spawn } from "node:child_process";
+import type { AddressInfo } from "node:net";
+import { networkInterfaces } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import {
   benchmarkCodingMemoryQuality,
@@ -11,7 +14,6 @@ import {
   capture,
   deleteContextSlot,
   distillSession,
-  indexProject,
   kageDependencyPath,
   kageContributors,
   kageContextSlots,
@@ -50,6 +52,13 @@ import {
   validateProject,
   type ObservationEvent,
 } from "./kernel.js";
+import { guardRequest, lanOrigins, loopbackOrigins, makeToken } from "./delegation/guard.js";
+import { lanModeEnabled } from "./delegation/config.js";
+import { createDelegationFeed, createPtyState, createRoomState, handleDelegationRoute } from "./delegation/api.js";
+import { APP_ROUTE, delegationAppHtml } from "./delegation/app-html.js";
+import { readRun, sweepDeadRuns } from "./delegation/contract.js";
+import { reclaimQueuedRuns } from "./delegation/dispatch.js";
+import { notifyManagerOfRunEvent } from "./delegation/room-supervisor.js";
 
 export interface DaemonStatus {
   ok: boolean;
@@ -447,6 +456,99 @@ function statusPath(projectDir: string): string {
   return join(daemonDir(projectDir), "status.json");
 }
 
+/**
+ * The daemon's API token. Written 0600 beside the status file so any process running as
+ * this user can read it (the CLI, the TUI, the desktop shell) and nothing else can.
+ * Regenerated on every start: a token that outlives its daemon is a credential nobody
+ * is tracking.
+ */
+function tokenPath(projectDir: string): string {
+  return join(daemonDir(projectDir), "token");
+}
+
+export function provisionDaemonToken(projectDir: string): string {
+  const token = makeToken();
+  mkdirSync(daemonDir(projectDir), { recursive: true });
+  const path = tokenPath(projectDir);
+  writeFileSync(path, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort on filesystems without POSIX modes.
+  }
+  return token;
+}
+
+export function readDaemonToken(projectDir: string): string {
+  try {
+    return readFileSync(tokenPath(projectDir), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The pairing secret LAN mode requires on every request. Distinct from the daemon token
+ * above: that token sits in a 0600 file readable by any local process, which is fine when
+ * only this machine can reach the port — it stops being a fit credential the moment the
+ * port is reachable from the network. This secret is generated once and persisted (unlike
+ * the token, which is regenerated every start) so a phone that has already paired keeps
+ * working across daemon restarts.
+ */
+function pairingSecretPath(projectDir: string): string {
+  return join(daemonDir(projectDir), "lan-secret");
+}
+
+export function provisionPairingSecret(projectDir: string): string {
+  const path = pairingSecretPath(projectDir);
+  try {
+    const existing = readFileSync(path, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // No secret yet — provision one below.
+  }
+  const secret = makeToken();
+  mkdirSync(daemonDir(projectDir), { recursive: true });
+  writeFileSync(path, `${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort on filesystems without POSIX modes.
+  }
+  return secret;
+}
+
+/** This machine's own non-internal IPv4 addresses — the only hosts LAN mode accepts. */
+export function lanAddresses(): string[] {
+  const addresses: string[] = [];
+  const interfaces = networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    if (!entries) continue;
+    for (const entry of entries) {
+      if (entry.family === "IPv4" && !entry.internal) addresses.push(entry.address);
+    }
+  }
+  return addresses;
+}
+
+/** Exactly what a user needs to point a phone at this daemon — no jargon. */
+export function lanPairingMessage(addresses: string[], port: number, secret: string): string {
+  if (!addresses.length) {
+    return "LAN mode is on, but no local network address was found on this machine — only this machine can reach the daemon right now.";
+  }
+  const urls = addresses.map((address) => `http://${address}:${port}`).join(" or ");
+  return [
+    "This opens a port on your local network so a device on the same Wi-Fi/LAN can reach this daemon.",
+    `URL: ${urls}`,
+    `Pairing secret: ${secret}`,
+  ].join("\n");
+}
+
+/** Refuse the request, saying plainly why — a silent 404 would teach nothing. */
+function refuse(res: ServerResponse, verdict: { status: number; reason?: string }): void {
+  json(res, verdict.status, { ok: false, error: "refused", reason: verdict.reason });
+}
+
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(value, null, 2));
@@ -619,13 +721,29 @@ export function stopDaemon(projectDir: string): { ok: boolean; message: string; 
   }
 }
 
-export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number } = {}): Promise<void> {
+export async function startDaemon(projectDir: string, options: { host?: string; restPort?: number; viewerPort?: number; lan?: boolean } = {}): Promise<void> {
   const host = options.host ?? DEFAULT_HOST;
-  const restPort = options.restPort ?? DEFAULT_REST_PORT;
+  const requestedRestPort = options.restPort ?? DEFAULT_REST_PORT;
+  // Reassigned once listen() confirms the real bound port — requesting port 0 asks the
+  // OS for a free one, and everything below (status.json, the guard, the warm-up
+  // fetches, the printed URL) must use what actually got bound, not what was asked for.
+  let restPort = requestedRestPort;
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
+  // Off unless explicitly turned on — never a side effect of any other option. An
+  // explicit `options.lan` (a future CLI flag) wins over the persisted config flag.
+  const lanMode = options.lan ?? lanModeEnabled(projectDir);
+  // Loopback stays the actual bind target unless LAN mode is on; "0.0.0.0" accepts
+  // connections on every IPv4 interface, loopback included, so nothing about the
+  // loopback path changes when LAN mode is off.
+  const bindHost = lanMode ? "0.0.0.0" : host;
+  const lanAddrs = lanMode ? lanAddresses() : [];
+  const lanToken = lanMode ? provisionPairingSecret(projectDir) : "";
   mkdirSync(daemonDir(projectDir), { recursive: true });
-  indexProject(projectDir);
-  let lastIndexedAt = new Date().toISOString();
+  const token = provisionDaemonToken(projectDir);
+  // last_indexed_at is stamped when an index CHILD completes (below) — never at
+  // boot, which would claim an index that has not run yet. A fresh daemon carries
+  // the previous run's timestamp forward until its own first index lands.
+  let lastIndexedAt = readDaemonStatus(projectDir)?.last_indexed_at ?? "";
   const status: DaemonStatus = {
     ok: true,
     project_dir: projectDir,
@@ -641,23 +759,69 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
   writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   let watcher: FSWatcher | null = null;
   let refreshTimer: NodeJS.Timeout | null = null;
-  const refreshIndex = () => {
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      try {
-        indexProject(projectDir);
+  // Indexing runs in a DETACHED CHILD, never in this process. Two reasons, both
+  // measured on this repo:
+  //   1. indexProject blocks the serving thread — the parallel structural build
+  //      parks the main thread in Atomics.wait, so a request landing mid-index
+  //      stalls for seconds. Same law as the viewer reports below.
+  //   2. It used to run in-process on a watcher whose exclusion list only covered
+  //      .agent_memory/indexes|code_graph|graph. indexProject also writes
+  //      .agent_memory/structural/** and this function writes daemon/status.json —
+  //      both re-fired the watcher: index → write → event → index, every ~4
+  //      seconds, forever. Two long-lived daemons burned ~24 CPU-hours each (and
+  //      spawned 8 TypeScript-booting workers per cycle) before last_indexed_at
+  //      was caught advancing on an idle repo.
+  // One child at a time; events during a run coalesce into one follow-up run.
+  let indexChild: ReturnType<typeof spawn> | null = null;
+  let indexAgain = false;
+  const runIndexChild = () => {
+    if (indexChild) {
+      indexAgain = true;
+      return;
+    }
+    try {
+      indexChild = spawn(process.execPath, [__filename.replace(/daemon\.js$/, "cli.js"), "index", "--project", projectDir], {
+        detached: true,
+        stdio: "ignore",
+      });
+    } catch {
+      indexChild = null;
+      return;
+    }
+    indexChild.unref();
+    indexChild.on("exit", (code) => {
+      indexChild = null;
+      if (code === 0) {
         lastIndexedAt = new Date().toISOString();
         status.last_indexed_at = lastIndexedAt;
-        writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
-      } catch {
-        // Keep the daemon alive; doctor/status surfaces stale indexes separately.
+        try {
+          writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
+        } catch {
+          // status file is advisory; the indexes themselves landed
+        }
       }
-    }, 350);
+      if (indexAgain) {
+        indexAgain = false;
+        runIndexChild();
+      }
+    });
+  };
+  const refreshIndex = () => {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    // 3s, not 350ms: source events arrive in bursts (builds, checkouts, saves), and
+    // every fire costs a full child index. The freshness a user can perceive is
+    // "current by the time I look", not sub-second.
+    refreshTimer = setTimeout(runIndexChild, 3000);
+    refreshTimer.unref?.();
   };
   try {
     watcher = watch(projectDir, { recursive: true }, (_event, filename) => {
       const file = String(filename ?? "");
-      if (!file || file.includes("node_modules") || file.includes(".git") || file.includes(".agent_memory/indexes") || file.includes(".agent_memory/code_graph") || file.includes(".agent_memory/graph")) return;
+      // .agent_memory is excluded WHOLESALE: everything under it is Kage's own
+      // output (structural indexes, run ledgers, daemon status, reports). Watching
+      // any of it means the index loop can feed itself — and run ledgers change on
+      // every agent event, which re-indexed the whole repo mid-run.
+      if (!file || file.includes("node_modules") || file.includes(".git") || file.includes(".agent_memory")) return;
       refreshIndex();
     });
     status.index_watch = true;
@@ -666,14 +830,65 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     status.index_watch = false;
     writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
   }
+  // The boot index goes through the same child path — a daemon on a large repo
+  // used to block its own listen() for the whole first index.
+  runIndexChild();
 
+  const guardContext = {
+    allowedOrigins: [...loopbackOrigins(restPort), ...(lanMode ? lanOrigins(lanAddrs, restPort) : [])],
+    token,
+    lanHosts: lanMode ? new Set(lanAddrs) : undefined,
+    lanToken: lanMode ? lanToken : undefined,
+  };
+  const delegationFeed = createDelegationFeed(projectDir);
+  // Every run-changed notification, from every route and the reap timer alike, funnels
+  // through this one method — wrapping it here is the single choke point for waking the
+  // held manager on a goal-owned run's state change, instead of threading the bridge
+  // call through every feed.notify() call site in api.ts.
+  const notifyRunChanged = delegationFeed.notify.bind(delegationFeed);
+  delegationFeed.notify = (runId: string) => {
+    notifyRunChanged(runId);
+    try {
+      const run = readRun(projectDir, runId);
+      const detail = run.waiting_on ? `${run.waiting_on.needs}${run.waiting_on.detail ? ` — ${run.waiting_on.detail}` : ""}` : undefined;
+      // Best-effort, never awaited: a slow or dead manager session must not stall the
+      // request that triggered this notification.
+      notifyManagerOfRunEvent(projectDir, runId, { state: run.display_state, detail }).catch(() => {});
+    } catch {
+      // An unknown run id or a read race must never break the caller's request.
+    }
+  };
+  const delegationRoom = createRoomState();
+  const delegationPty = createPtyState();
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}:${restPort}`);
+    // Every request passes the guard before any handler sees it: loopback Host,
+    // same-origin (or no origin), and a token for anything that changes state.
+    const verdict = guardRequest(
+      { method: req.method ?? "GET", headers: req.headers as Record<string, string | string[] | undefined>, pathname: url.pathname },
+      guardContext,
+    );
+    if (!verdict.ok) {
+      refuse(res, verdict);
+      return;
+    }
     try {
       if (req.method === "GET" && url.pathname === "/health") {
         json(res, 200, { ok: true, name: "kage-daemon", project_dir: projectDir, pid: process.pid });
         return;
       }
+      // The delegation app + run API live on THIS origin, behind the same guard —
+      // one origin is what lets the shipped page call the API at all (CSP 'self').
+      if (req.method === "GET" && (url.pathname === APP_ROUTE || url.pathname === `${APP_ROUTE}/`)) {
+        // Injecting the token here is safe under the guard: this page is only served to
+        // a loopback Host with a same-origin (or absent) Origin — a DNS-rebound page
+        // fails the Host check before it can read anything.
+        const html = delegationAppHtml(token);
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(html);
+        return;
+      }
+      if (await handleDelegationRoute({ projectDir, feed: delegationFeed, room: delegationRoom, pty: delegationPty }, req, res, url)) return;
       if (req.method === "GET" && url.pathname === "/kage/status") {
         status.last_indexed_at = lastIndexedAt;
         json(res, 200, status);
@@ -832,63 +1047,184 @@ export async function startDaemon(projectDir: string, options: { host?: string; 
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(restPort, host, resolve));
+  await new Promise<void>((resolve, reject) => {
+    // An explicit nonzero port that is already busy must fail loudly, not silently
+    // move — only a fresh `once` listener here, removed the moment listen settles, so
+    // a LATER runtime error on the server still crashes the process as before.
+    server.once("error", reject);
+    server.listen(requestedRestPort, bindHost, () => {
+      server.removeListener("error", reject);
+      const address = server.address();
+      if (address && typeof address === "object") {
+        restPort = (address as AddressInfo).port;
+      }
+      // The requested port (possibly 0) is not the truth once bound — rewrite the
+      // status file and the guard's allowed origins with the port that is actually
+      // listening, since ensureAppDaemon polls status.json for it.
+      status.rest_port = restPort;
+      guardContext.allowedOrigins = [...loopbackOrigins(restPort), ...(lanMode ? lanOrigins(lanAddrs, restPort) : [])];
+      writeFileSync(status.status_path, JSON.stringify(status, null, 2), "utf8");
+      resolve();
+    });
+  });
   console.log(`Kage daemon listening on http://${host}:${restPort}`);
+  if (lanMode) {
+    console.log(lanPairingMessage(lanAddrs, restPort, lanToken));
+  }
+
+  // Persist death on a heartbeat. reapRun existed with no callers, so dead runs held
+  // their derived "dropped" forever — concurrency slots included. Startup + every
+  // minute; sweepDeadRuns is idempotent and one cheap listRuns pass.
+  //
+  // reclaimQueuedRuns rides the same timer: a run that queued at the concurrency cap
+  // (supervisor.ts's pre-spawn admission gate — never even got a worktree or an agent
+  // child) has nothing else coming back for it, same as a dead run has nothing reaping
+  // it without this timer. Both are maintenance, not a dependency of daemon startup.
+  try {
+    sweepDeadRuns(projectDir);
+    reclaimQueuedRuns(projectDir);
+  } catch {
+    // Never let a sweep failure stop the daemon.
+  }
+  const reapTimer = setInterval(() => {
+    try {
+      const reaped = sweepDeadRuns(projectDir);
+      for (const run of reaped) delegationFeed.notify(run.id);
+      const admitted = reclaimQueuedRuns(projectDir);
+      for (const run of admitted) delegationFeed.notify(run.id);
+    } catch {
+      // Same: sweeping is maintenance, not a dependency.
+    }
+  }, 60_000);
+  reapTimer.unref?.();
+
+  // Warm the request path against ourselves.
+  //
+  // The FIRST request to this server — any route — costs ~0.8-1.2s while V8 compiles
+  // the handler chain and the lazy bits of the guard/route modules initialise;
+  // everything after is ~1ms. Measured on /health (0.76s) and /app (1.17s) alike, so
+  // it is generic warm-up rather than anything /app does. Left alone, the user pays
+  // it on the very first thing they do, every time the daemon starts. Paying it here
+  // instead moves it into the window where they are already waiting for the app.
+  void (async () => {
+    // /preflight is in the list because its first call pays recall's lazy index
+    // load (~1.5s measured); warmed, it answers in ~0.3s — inside the composer's
+    // type-ahead budget.
+    for (const path of ["/health", APP_ROUTE, "/preflight?intent=warm%20the%20recall%20path"]) {
+      try {
+        const res = await fetch(`http://${host}:${restPort}${path}`, {
+          headers: { host: `${host}:${restPort}` },
+          signal: AbortSignal.timeout(15000),
+        });
+        // Drain, or the socket stays half-open and the warm-up is only partial.
+        await res.arrayBuffer();
+      } catch {
+        // Warming is best effort — never let it affect startup.
+      }
+    }
+  })();
   console.log(`Project: ${projectDir}`);
   console.log(`Status: ${status.status_path}`);
 
   process.on("SIGTERM", () => {
     if (watcher) watcher.close();
     if (refreshTimer) clearTimeout(refreshTimer);
+    delegationFeed.close();
     server.close(() => process.exit(0));
   });
+}
+
+/**
+ * Build every viewer report, in place, synchronously.
+ *
+ * Runs in its own process (spawned by startViewer, or by `kage viewer-reports`) so the
+ * viewer's event loop is never blocked by it. Reports already newer than the newest
+ * packet or index are skipped: they derive entirely from those inputs, so a newer
+ * report is still true, and restarting on an unchanged repo then costs nothing.
+ */
+export function generateViewerReports(projectDir: string): void {
+  const projectRoot = resolve(projectDir);
+  const reports = viewerReportPaths(projectRoot);
+  try {
+    mkdirSync(join(projectRoot, ".agent_memory", "reports"), { recursive: true });
+  } catch {
+    return;
+  }
+  let newestInput = 0;
+  for (const dir of [join(projectRoot, ".agent_memory", "packets"), join(projectRoot, ".agent_memory", "indexes")]) {
+    try {
+      for (const name of readdirSync(dir)) {
+        const at = statSync(join(dir, name)).mtimeMs;
+        if (at > newestInput) newestInput = at;
+      }
+    } catch {
+      // Missing directory just means "no inputs seen here".
+    }
+  }
+  const steps: Array<[string, () => unknown]> = [
+    ["metrics", () => kageMetrics(projectDir)],
+    ["inbox", () => memoryInbox(projectDir)],
+    ["quality", () => qualityReport(projectDir)],
+    ["benchmark", () => viewerBenchmarkReport(projectDir)],
+    ["profile", () => kageProjectProfile(projectDir)],
+    ["capabilities", () => kageCapabilityAudit(projectDir)],
+    ["slots", () => kageContextSlots(projectDir)],
+    ["decisions", () => kageDecisionIntelligence(projectDir)],
+    ["graphInsights", () => kageGraphInsights(projectDir)],
+    ["workspace", () => kageWorkspace(projectDir)],
+    ["sessions", () => kageSessionCaptureReport(projectDir)],
+    ["replay", () => kageSessionReplay(projectDir)],
+    ["memoryAccess", () => kageMemoryAccess(projectDir)],
+    ["memoryAudit", () => kageMemoryAudit(projectDir)],
+    ["handoff", () => kageMemoryHandoff(projectDir)],
+    ["lifecycle", () => kageMemoryLifecycle(projectDir)],
+    ["activity", () => kageActivity(projectDir)],
+    ["timeline", () => kageMemoryTimeline(projectDir)],
+    ["lineage", () => kageMemoryLineage(projectDir)],
+    ["setup", () => setupDoctor(projectDir)],
+    ["trust", () => benchmarkTrust(projectDir)],
+    ["suppressed", () => kageSuppressedMemory(projectDir)],
+    // Last on purpose — the four measured expensive ones (30s/39s/58s/80s). Everything
+    // a first glance needs has already been written by the time these start.
+    ["moduleHealth", () => kageModuleHealth(projectDir)],
+    ["risk", () => kageRisk(projectDir)],
+    ["contributors", () => kageContributors(projectDir)],
+    ["xray", () => kageRepoXray(projectDir)],
+  ];
+  for (const [name, compute] of steps) {
+    try {
+      const path = reports[name];
+      if (existsSync(path) && statSync(path).mtimeMs >= newestInput) continue;
+      writeFileSync(path, JSON.stringify(compute(), null, 2));
+    } catch {
+      // One failed report must not stop the rest.
+    }
+  }
 }
 
 export async function startViewer(projectDir: string, options: { host?: string; port?: number } = {}): Promise<ViewerStatus> {
   const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? DEFAULT_VIEWER_PORT;
   const viewerDir = resolve(__dirname, "..", "viewer");
-  const threeDir = resolve(__dirname, "..", "node_modules", "three");
   const projectRoot = resolve(projectDir);
   const reports = viewerReportPaths(projectRoot);
   const reportsDir = join(projectRoot, ".agent_memory", "reports");
 
-  // Pre-generate lightweight JSON reports so the viewer can load them directly.
-  // Note: reports.value (the cumulative value ledger written by recall) is served
-  // as-is and intentionally never regenerated here.
-  try {
-    mkdirSync(reportsDir, { recursive: true });
-    const metrics = kageMetrics(projectDir);
-    writeFileSync(reports.metrics, JSON.stringify(metrics, null, 2));
-    const inbox = memoryInbox(projectDir);
-    writeFileSync(reports.inbox, JSON.stringify(inbox, null, 2));
-    writeFileSync(reports.quality, JSON.stringify(qualityReport(projectDir), null, 2));
-    writeFileSync(reports.benchmark, JSON.stringify(viewerBenchmarkReport(projectDir), null, 2));
-    writeFileSync(reports.contributors, JSON.stringify(kageContributors(projectDir), null, 2));
-    writeFileSync(reports.profile, JSON.stringify(kageProjectProfile(projectDir), null, 2));
-    writeFileSync(reports.xray, JSON.stringify(kageRepoXray(projectDir), null, 2));
-    writeFileSync(reports.capabilities, JSON.stringify(kageCapabilityAudit(projectDir), null, 2));
-    writeFileSync(reports.slots, JSON.stringify(kageContextSlots(projectDir), null, 2));
-    writeFileSync(reports.decisions, JSON.stringify(kageDecisionIntelligence(projectDir), null, 2));
-    writeFileSync(reports.risk, JSON.stringify(kageRisk(projectDir), null, 2));
-    writeFileSync(reports.moduleHealth, JSON.stringify(kageModuleHealth(projectDir), null, 2));
-    writeFileSync(reports.graphInsights, JSON.stringify(kageGraphInsights(projectDir), null, 2));
-    writeFileSync(reports.workspace, JSON.stringify(kageWorkspace(projectDir), null, 2));
-    writeFileSync(reports.sessions, JSON.stringify(kageSessionCaptureReport(projectDir), null, 2));
-    writeFileSync(reports.replay, JSON.stringify(kageSessionReplay(projectDir), null, 2));
-    writeFileSync(reports.memoryAccess, JSON.stringify(kageMemoryAccess(projectDir), null, 2));
-    writeFileSync(reports.memoryAudit, JSON.stringify(kageMemoryAudit(projectDir), null, 2));
-    writeFileSync(reports.handoff, JSON.stringify(kageMemoryHandoff(projectDir), null, 2));
-    writeFileSync(reports.lifecycle, JSON.stringify(kageMemoryLifecycle(projectDir), null, 2));
-    writeFileSync(reports.activity, JSON.stringify(kageActivity(projectDir), null, 2));
-    writeFileSync(reports.timeline, JSON.stringify(kageMemoryTimeline(projectDir), null, 2));
-    writeFileSync(reports.lineage, JSON.stringify(kageMemoryLineage(projectDir), null, 2));
-    writeFileSync(reports.setup, JSON.stringify(setupDoctor(projectDir), null, 2));
-    writeFileSync(reports.trust, JSON.stringify(benchmarkTrust(projectDir), null, 2));
-    writeFileSync(reports.suppressed, JSON.stringify(kageSuppressedMemory(projectDir), null, 2));
-  } catch {
-    // non-fatal: viewer will show 404 for reports if generation fails
-  }
+  // Report generation runs in a CHILD PROCESS, and that detail is the whole fix.
+  //
+  // These calls are synchronous and genuinely expensive on this repo — measured:
+  // kageRepoXray 80s, kageContributors 58s, kageRisk 39s, kageModuleHealth 30s, 227s
+  // total. Generating them before listen() made `kage viewer` look hung for four
+  // minutes. But simply moving them after listen() is not enough: Node is
+  // single-threaded, so an 80s synchronous call blocks the server that is already
+  // listening. Yielding between reports only opens gaps BETWEEN them — a request
+  // landing inside kageContributors still measured 58s. Off-thread is the only honest
+  // answer, so the work goes to a detached child and the server stays responsive.
+  const child = spawn(process.execPath, [__filename.replace(/daemon\.js$/, "cli.js"), "viewer-reports", "--project", projectRoot], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 
   const url = viewerUrl(host, port, projectRoot);
   const liveFeed = startLiveFeed(projectRoot);
@@ -907,15 +1243,13 @@ export async function startViewer(projectDir: string, options: { host?: string; 
       return;
     } else if (requestUrl.pathname.startsWith("/viewer/")) {
       filePath = join(viewerDir, normalize(requestUrl.pathname.replace(/^\/viewer\//, "")));
-    } else if (requestUrl.pathname.startsWith("/vendor/three/")) {
-      filePath = join(threeDir, normalize(requestUrl.pathname.replace(/^\/vendor\/three\//, "")));
     } else {
       const decoded = decodeURIComponent(requestUrl.pathname);
       filePath = resolve(decoded);
       if (!isInside(projectRoot, filePath)) filePath = null;
     }
 
-    if (!filePath || (!isInside(viewerDir, filePath) && !isInside(projectRoot, filePath) && !isInside(threeDir, filePath)) || !existsSync(filePath)) {
+    if (!filePath || (!isInside(viewerDir, filePath) && !isInside(projectRoot, filePath)) || !existsSync(filePath)) {
       json(res, 404, { ok: false, error: "not_found" });
       return;
     }
@@ -932,8 +1266,14 @@ export async function startViewer(projectDir: string, options: { host?: string; 
     res.end(readFileSync(filePath));
   });
 
+  try {
+    mkdirSync(reportsDir, { recursive: true });
+  } catch {
+    // Reports simply will not be written; the viewer still serves.
+  }
   await new Promise<void>((resolveListen) => server.listen(port, host, resolveListen));
   console.log(`Kage viewer → http://${host}:${port}/`);
+  console.log("Reports build in a separate process — sections fill in as they finish.");
   process.on("SIGTERM", () => {
     liveFeed.close();
     server.close(() => process.exit(0));

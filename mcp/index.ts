@@ -84,6 +84,28 @@ import {
   type SetupAgent,
 } from "./kernel.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
+import { capCollection, capFields, responseCapLimit } from "./response-cap.js";
+import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
+import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "./delegation/dispatch.js";
+import { steerRun } from "./delegation/steer.js";
+import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
+import { compileBrief, renderBriefCard } from "./delegation/brief.js";
+import { renderClaimCard } from "./delegation/verify.js";
+import { mergeRun, rejectRun } from "./delegation/ratify.js";
+import { buildReport, eventsSincePage, markReportRead, renderReport, roomState } from "./delegation/report.js";
+import { diffBudget } from "./delegation/config.js";
+import { readJudgment, renderJudgment, readReview, renderReview, writeReview, type ReviewVerdict } from "./delegation/manager.js";
+import { DEFAULT_SESSION, readActiveGoal, setActiveGoal } from "./delegation/room-sessions.js";
+import { notifyManagerOfRunEvent, REVIEWED_EVENT_STATE } from "./delegation/room-supervisor.js";
+import {
+  abandonGoal,
+  createGoal,
+  goalSpend,
+  readGoal,
+  type GoalAutonomy,
+  type GoalRunSpec,
+  type GoalWave,
+} from "./delegation/goal.js";
 
 const BASE_URL = "https://raw.githubusercontent.com/kage-core/kage-graph/master";
 
@@ -166,6 +188,16 @@ function filePathHints(query: string): string[] {
 
 function wantsDependencyPath(query: string): boolean {
   return /\b(connect|connected|dependency|depend|depends|path|impact|flow|trace)\b/i.test(query);
+}
+
+// Urgency order for StaleMemoryFinding.suggested_action, most actionable first: a
+// status conflict (mark_stale) means the packet actively contradicts reality; a reported-wrong
+// packet (supersede) is next; a drifted citation (update) is milder; a plain re-verify
+// (verify) is the least urgent. When kage_refresh caps stale_packets, this decides which
+// entries survive the cut instead of an arbitrary (e.g. insertion-order) slice.
+const STALE_URGENCY_ORDER: Record<string, number> = { mark_stale: 0, supersede: 1, update: 2, verify: 3 };
+function rankStalePacketsByUrgency<T extends { suggested_action: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => (STALE_URGENCY_ORDER[a.suggested_action] ?? 4) - (STALE_URGENCY_ORDER[b.suggested_action] ?? 4));
 }
 
 function riskContextBlock(result: ReturnType<typeof kageRisk>): string {
@@ -550,11 +582,13 @@ export function listTools() {
     {
       name: "kage_memory_access",
       description:
-        "Report which repo-local memory packets have actually been recalled recently. This uses local ignored access telemetry and does not mutate shareable packet files.",
+        "Report which repo-local memory packets have actually been recalled recently. This uses local ignored access telemetry and does not mutate shareable packet files. On a repo with many packets, `entries` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max entries to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every entry, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -624,11 +658,13 @@ export function listTools() {
     {
       name: "kage_inbox",
       description:
-        "Return an actionable memory review inbox: pending packets, stale packets, duplicates, missing structured context, validation issues, and recommended actions.",
+        "Return an actionable memory review inbox: pending packets, stale packets, duplicates, missing structured context, validation issues, and recommended actions. On a repo with many packets, `items` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max items to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every item, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -636,13 +672,15 @@ export function listTools() {
     {
       name: "kage_refresh",
       description:
-        "Rebuild repo indexes, code graph, memory graph, metrics, and stale-memory metadata. Agents should run this after meaningful file/content changes before PR checks; push-only or same-tree commits do not need another refresh. On non-default git branches metadata-only packet rewrites are skipped (quiet refresh) to avoid merge conflicts; pass force to persist them anyway.",
+        "Rebuild repo indexes, code graph, memory graph, metrics, and stale-memory metadata. Agents should run this after meaningful file/content changes before PR checks; push-only or same-tree commits do not need another refresh. On non-default git branches metadata-only packet rewrites are skipped (quiet refresh) to avoid merge conflicts; pass force to persist them anyway. On a repo with many stale packets or validation warnings, stale_packets and validation.warnings are capped to the 10 most actionable entries by default (ranked by urgency), with the true total and a truncation note; pass limit or verbose for more.",
       annotations: { title: "Rebuild Kage indexes and graphs", readOnlyHint: false, idempotentHint: true },
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string", description: "Absolute path to the repository root." },
           force: { type: "boolean", description: "Persist packet metadata rewrites even on a non-default branch" },
+          limit: { type: "number", description: "Max stale_packets / validation.warnings entries to return (default 10 each)." },
+          verbose: { type: "boolean", description: "Return every stale packet and validation warning, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -671,12 +709,14 @@ export function listTools() {
     {
       name: "kage_pr_check",
       description:
-        "Check whether repo memory, code graph, memory graph, and stale-memory state are ready for merge. Leads with a human summary of team memories invalidated by the current change — relay it to the developer.",
+        "Check whether repo memory, code graph, memory graph, and stale-memory state are ready for merge. Leads with a human summary of team memories invalidated by the current change — relay it to the developer. On a repo with many stale packets, validation findings, or reconciliation items, those lists are each capped to the 10 most actionable entries by default (stale packets ranked by urgency), with true totals and truncation notes; pass limit or verbose for more.",
       annotations: { title: "Check memory readiness for merge", readOnlyHint: true },
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string", description: "Absolute path to the repository root." },
+          limit: { type: "number", description: "Max entries per capped list to return (default 10 each)." },
+          verbose: { type: "boolean", description: "Return every entry in every list, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -698,11 +738,13 @@ export function listTools() {
     {
       name: "kage_quality",
       description:
-        "Return memory quality metrics: useful memory ratio, duplicate burden, stale/wrong feedback, evidence coverage, path grounding, and review queue size.",
+        "Return memory quality metrics: useful memory ratio, duplicate burden, stale/wrong feedback, evidence coverage, path grounding, and review queue size. On a repo with many packets, `packets` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max scored packets to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every scored packet, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -710,11 +752,13 @@ export function listTools() {
     {
       name: "kage_memory_lifecycle",
       description:
-        "Return a repo-local memory lifecycle report: healthy, hot, cold, stale, disputed, ungrounded, pending, generated, and concrete review actions.",
+        "Return a repo-local memory lifecycle report: healthy, hot, cold, stale, disputed, ungrounded, pending, generated, and concrete review actions. `items` never includes packet body/summary text (open the packet file or recall it for that) and is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max items to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every item, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -722,12 +766,14 @@ export function listTools() {
     {
       name: "kage_memory_timeline",
       description:
-        "Return recent repo-memory activity for teammate handoff: added, updated, pending, and deprecated packets with review actions.",
+        "Return recent repo-memory activity for teammate handoff: added, updated, pending, and deprecated packets with review actions. On a repo with heavy recent memory churn, `entries` is capped to the 10 most recent by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
           days: { type: "number" },
+          limit: { type: "number", description: "Max entries to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every entry, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -772,7 +818,7 @@ export function listTools() {
     {
       name: "kage_supersede",
       description:
-        "Replace one repo-local memory packet with a newer one that corrects or obsoletes it. Marks the old packet superseded, links it to the replacement, and writes bidirectional lineage edges so the history stays traceable. Use this instead of deleting when new knowledge updates an old fact, or to resolve a contradiction surfaced by kage_conflicts. Mutates both packets on disk: the superseded packet is withheld from recall but kept for lineage.",
+        "Replace one repo-local memory packet with a newer one that corrects or obsoletes it. Marks the old packet superseded, links it to the replacement, and writes bidirectional lineage edges so the history stays traceable. Use this instead of deleting when new knowledge updates an old fact, or to resolve a contradiction surfaced by kage_conflicts. Mutates both packets on disk: the superseded packet is withheld from recall but kept for lineage. Returns ids, paths, and titles for confirmation, not the full packet bodies.",
       annotations: { title: "Supersede a memory packet with a newer one", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         type: "object",
@@ -788,11 +834,13 @@ export function listTools() {
     {
       name: "kage_conflicts",
       description:
-        "List repo-local memory packet pairs that contradict each other (same cited path, same subject, opposing claim). Resolve each with kage_supersede, or keep both intentionally.",
+        "List repo-local memory packet pairs that contradict each other (same cited path, same subject, opposing claim). Resolve each with kage_supersede, or keep both intentionally. On a repo with many contradictions, `pairs` is capped to the 10 most actionable by default, with the true total and a truncation note; pass limit or verbose for more.",
       inputSchema: {
         type: "object",
         properties: {
           project_dir: { type: "string" },
+          limit: { type: "number", description: "Max pairs to return (default 10)." },
+          verbose: { type: "boolean", description: "Return every pair, uncapped." },
         },
         required: ["project_dir"],
       },
@@ -1127,8 +1175,513 @@ export function listTools() {
       },
     },
   ];
+  // Delegation tools: the manager's hands. Exposed inside the room (KAGE_ROOM=1) so a
+  // normal coding session is not handed orchestration verbs it has no business calling.
+  if (process.env.KAGE_ROOM === "1" || process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") {
+    all.push(...(DELEGATION_TOOLS as unknown as typeof all));
+  }
   if (process.env.KAGE_TOOLS === "full" || process.env.KAGE_ALL_TOOLS === "1") return all;
+  if (process.env.KAGE_ROOM === "1") return all.filter((tool) => CORE_TOOLS.has(tool.name) || DELEGATION_TOOL_NAMES.has(tool.name));
   return all.filter((tool) => CORE_TOOLS.has(tool.name));
+}
+
+const DELEGATION_TOOLS = [
+  {
+    name: "kage_room_state",
+    description:
+      "Clock in: the compact state of every run, what needs the user, and the trust line. Call this FIRST in any session — the manager holds no memory of its own.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] },
+  },
+  {
+    name: "kage_events_since",
+    description:
+      "Run events since a cursor. Call at the start of each turn to catch up on work that finished while you were talking. Pass back next_cursor from the previous reply; it reports how many events it could not fit rather than truncating silently.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        cursor: { type: "number", description: "next_cursor from your last call; omit for everything" },
+      },
+      required: ["project_dir"],
+    },
+  },
+  {
+    name: "kage_compile_brief",
+    description:
+      "Compile a brief for an intent from repo memory and the code graph, without dispatching. Returns memories (with author and date), predicted touch set, derived checks, and a confidence band with its basis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        type: { type: "string", enum: [...RUN_TYPES] },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_dispatch",
+    description:
+      "Hire a coding agent to deliver an intent in an isolated worktree, then verify its claim by executing the checks. Pass your judgment (drop_memories, confidence, clarification) so it is recorded with the run — the kernel validates it: drops need a reason and confidence may only be lowered.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        type: { type: "string", enum: [...RUN_TYPES] },
+        agent: { type: "string", enum: ["claude", "codex", "stub"] },
+        display_name: {
+          type: "string",
+          description:
+            "A short name for this run — shown in the sidebar, cards, and list rows. Pick one the way you'd name a hired worker (e.g. \"haiku-notes\"). Omit to derive one from the intent.",
+        },
+        drop_memories: {
+          type: "array",
+          description: "Recalled memories you judged irrelevant to this task. Each needs a reason.",
+          items: {
+            type: "object",
+            properties: { id: { type: "string" }, reason: { type: "string" } },
+            required: ["id", "reason"],
+          },
+        },
+        confidence: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description: "Your band. You may lower the kernel's band, never raise it.",
+        },
+        confidence_reason: { type: "string" },
+        clarification_question: { type: "string", description: "The question you asked before spending tokens." },
+        clarification_answer: { type: "string", description: "What the user answered." },
+        judgment_note: { type: "string", description: "Anything else about how you shaped this brief." },
+        goal_id: {
+          type: "string",
+          description:
+            "Attach this run to a DIFFERENT goal than the room thread's active one. Runs dispatched from a room thread with an active goal attach to it automatically — you only need this to override that.",
+        },
+        budget_usd: {
+          type: "number",
+          description:
+            "Raise this run's usd budget above the repo default — for a task you judge worth more (e.g. a large synthesis job), not for every run. Always wins over the repo's configured budgets.usd.",
+        },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_judgment",
+    description:
+      "The recorded judgment for a run: which memories you kept or dropped and why, the confidence you set, the question you asked, and any moves the kernel refused.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_task",
+    description: "The full card for one run: state, claim, checks with verdicts, unsure notes, learnings.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_tell",
+    description:
+      "Answer or steer a run. A blocked or dropped agent is RESUMED in place with its context intact; a live one gets the message queued for its next boundary. The reply states which happened — never assume delivery.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" }, message: { type: "string" } },
+      required: ["project_dir", "run_id", "message"],
+    },
+  },
+  {
+    name: "kage_stop",
+    description: "Halt a run now. State is preserved and the run is resumable.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_review_run",
+    description:
+      "Record your review verdict on a run's ready claim — the review gate between kernel verification and a merge. Only a run in state 'ready' can be reviewed. approve says the receipt and diff look sound to merge as-is; request_changes says otherwise and needs notes explaining what.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        run_id: { type: "string" },
+        verdict: { type: "string", enum: ["approve", "request_changes"] },
+        notes: { type: "string", description: "Why — required for request_changes, optional for approve." },
+      },
+      required: ["project_dir", "run_id", "verdict"],
+    },
+  },
+  {
+    name: "kage_merge_run",
+    description:
+      "Accept a verified claim: merge its branch and ratify the learnings that rode with it into team memory. Only a run in state 'ready' can be merged.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
+      required: ["project_dir", "run_id"],
+    },
+  },
+  {
+    name: "kage_reject_run",
+    description: "Refuse a claim with a reason. The reason is captured as a negative_result memory so future briefs carry it.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, run_id: { type: "string" }, reason: { type: "string" } },
+      required: ["project_dir", "run_id", "reason"],
+    },
+  },
+  {
+    name: "kage_report",
+    description: "The while-you-were-away digest: ready, blocked, halted, and the trust line. Observed numbers only.",
+    inputSchema: {
+      type: "object",
+      properties: { project_dir: { type: "string" }, all: { type: "boolean" } },
+      required: ["project_dir"],
+    },
+  },
+  {
+    name: "kage_goal_create",
+    description:
+      "Open a goal: the room's own bookkeeping for a multi-run intent — a plan of waves, autonomy, and budgets. From a room thread this also makes the new goal that thread's active goal, so kage_dispatch calls after it attach automatically without you passing goal_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        intent: { type: "string" },
+        plan: {
+          type: "array",
+          description:
+            "Waves of run specs, in dispatch order — each wave is an array of {intent, type, files_scope}. A wave's files_scope must stay disjoint within the wave; the kernel refuses to dispatch into a colliding one.",
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                intent: { type: "string" },
+                type: { type: "string", enum: [...RUN_TYPES] },
+                files_scope: { type: "array", items: { type: "string" } },
+              },
+              required: ["intent", "type", "files_scope"],
+            },
+          },
+        },
+        autonomy: {
+          type: "string",
+          enum: ["recommend", "merge"],
+          description: "recommend (default): you present ready runs for the user to merge. merge: you may merge them yourself.",
+        },
+        budgets: {
+          type: "object",
+          properties: { usd: { type: "number" }, runs: { type: "number" } },
+          description: "Defaults to $20 / 10 runs.",
+        },
+      },
+      required: ["project_dir", "intent"],
+    },
+  },
+  {
+    name: "kage_goal_status",
+    description:
+      "Where a goal stands: its state, each wave's runs with their CURRENT state, spend against budget, and which wave is next to dispatch. Defaults to the room thread's active goal when goal_id is omitted. Reads through the reconciling path, so a goal whose runs already settled reports 'done' even if the stored record lagged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        goal_id: { type: "string", description: "Omit to use the room thread's active goal." },
+      },
+      required: ["project_dir"],
+    },
+  },
+  {
+    name: "kage_goal_finish",
+    description:
+      "Abandon a goal before its runs finish, with a reason that is kept as part of its history. There is no tool to force a goal to 'done' — that state is only ever derived from its runs settling. Defaults to the room thread's active goal when goal_id is omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        goal_id: { type: "string", description: "Omit to use the room thread's active goal." },
+        reason: { type: "string" },
+      },
+      required: ["project_dir", "reason"],
+    },
+  },
+];
+
+const DELEGATION_TOOL_NAMES = new Set(DELEGATION_TOOLS.map((tool) => tool.name));
+
+/** Same implicit-attach rule kage_dispatch already applies: an explicit id always wins;
+ * absent one, a room thread (KAGE_ROOM=1) resolves its own active goal instead of making
+ * the manager remember to pass goal_id on every call. */
+function resolveGoalId(projectDir: string, explicit: string): string {
+  if (explicit) return explicit;
+  if (process.env.KAGE_ROOM === "1") {
+    return readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
+  }
+  return "";
+}
+
+/** The first wave still owed a run for one of its planned specs — null once every wave is
+ * full, which is what "next wave to dispatch" means from a status report's point of view. */
+function nextOpenWaveIndex(waves: readonly GoalWave[]): number | null {
+  const index = waves.findIndex((wave) => wave.run_ids.length < wave.runs.length);
+  return index === -1 ? null : index;
+}
+
+// The manager's hands. Every one of these is a request to the kernel — the kernel
+// decides what is legal, executes the checks, and owns the record. Nothing here lets a
+// model assert a verdict.
+async function callDelegationTool(name: string, args: Record<string, unknown> | undefined) {
+  const text = (body: string) => ({ content: [{ type: "text" as const, text: body }] });
+  try {
+    return await runDelegationTool(name, args, text);
+  } catch (error) {
+    // A tool never throws at the manager: a bad request comes back as a sentence it can
+    // act on, which is also what keeps the room conversational instead of brittle.
+    return text(`Could not do that: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function runDelegationTool(
+  name: string,
+  args: Record<string, unknown> | undefined,
+  text: (body: string) => { content: Array<{ type: "text"; text: string }> },
+) {
+  const projectDir = String(args?.project_dir ?? "");
+  const runId = String(args?.run_id ?? "");
+  const needsRun = ["kage_task", "kage_tell", "kage_stop", "kage_review_run", "kage_merge_run", "kage_reject_run"];
+  if (needsRun.includes(name) && !runId) return text(`${name} needs a run_id. Call kage_room_state to see the runs that exist.`);
+
+  if (name === "kage_room_state") return text(JSON.stringify(roomState(projectDir), null, 2));
+  if (name === "kage_events_since") {
+    // Sequence cursor, not a timestamp: same-millisecond events used to vanish.
+    const cursor = Number(args?.cursor ?? args?.since ?? 0);
+    const page = eventsSincePage(projectDir, Number.isFinite(cursor) ? cursor : 0);
+    return text(
+      JSON.stringify(
+        {
+          events: page.events,
+          next_cursor: page.cursor,
+          ...(page.dropped ? { dropped: page.dropped, note: `${page.dropped} older event(s) not shown — pass next_cursor to keep up` } : {}),
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (name === "kage_compile_brief") {
+    const intent = String(args?.intent ?? "").trim();
+    if (!intent) return text("kage_compile_brief needs an intent — the sentence describing the work.");
+    const type = (typeof args?.type === "string" ? args.type : "chore") as RunType;
+    return text(JSON.stringify(compileBrief(projectDir, intent, type), null, 2));
+  }
+  if (name === "kage_dispatch") {
+    if (!String(args?.intent ?? "").trim()) return text("kage_dispatch needs an intent — the sentence describing the work.");
+    const type = (typeof args?.type === "string" ? args.type : "chore") as RunType;
+    const agent = (typeof args?.agent === "string" ? args.agent : detectAgent()) ?? "stub";
+    const drops = Array.isArray(args?.drop_memories)
+      ? (args.drop_memories as Array<{ id?: unknown; reason?: unknown }>).map((entry) => ({
+          id: String(entry?.id ?? ""),
+          reason: String(entry?.reason ?? ""),
+        }))
+      : undefined;
+    const question = typeof args?.clarification_question === "string" ? args.clarification_question : undefined;
+    // Any judgment field present means a manager shaped this brief; absent means kernel
+    // defaults, and the record says which so the two can be compared later.
+    const judged =
+      drops?.length || args?.confidence || question || args?.judgment_note
+        ? {
+            dropMemoryIds: drops,
+            managerConfidence: typeof args?.confidence === "string" ? args.confidence : undefined,
+            confidenceReason: typeof args?.confidence_reason === "string" ? args.confidence_reason : undefined,
+            ...(question
+              ? {
+                  clarification: {
+                    question,
+                    answer: typeof args?.clarification_answer === "string" ? args.clarification_answer : undefined,
+                  },
+                }
+              : {}),
+            notes: typeof args?.judgment_note === "string" ? args.judgment_note : undefined,
+          }
+        : undefined;
+    let goalId = typeof args?.goal_id === "string" ? args.goal_id.trim() : "";
+    // No explicit goal_id: inside a room thread (KAGE_ROOM=1), attach to whatever goal
+    // that thread has active instead of trusting the manager to remember goal_id every
+    // time — that "remember to pass it" instruction is exactly what failed live. Resolved
+    // BEFORE dispatch so the goal is attached at run creation, not after the run (agent
+    // work plus verification) has already finished — the orchestrator wake-loop's event
+    // bridge needs goalForRun(runId) to resolve for the run's entire life, not just its end.
+    if (!goalId && process.env.KAGE_ROOM === "1") {
+      goalId = readActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION) ?? "";
+    }
+    const adapter = adapterByName(agent);
+    // Compile and hold the brief first (mirrors `kage dispatch` in mcp/cli.ts), then hand
+    // the run to a detached supervisor rather than run the agent inline: this tool is the
+    // Room manager's dispatch path, and a run this MCP server owned inline died with the
+    // server process — the exact defect dispatchDetached fixed for the CLI on 2026-08-18.
+    // Unlike the CLI, this tool cannot block on followRun to wait for a verdict — it must
+    // return promptly with the run id so the caller can poll kage_task / kage_room_state.
+    const budgetUsd = typeof args?.budget_usd === "number" ? args.budget_usd : undefined;
+    const displayName = typeof args?.display_name === "string" ? args.display_name.trim() || undefined : undefined;
+    const held = await dispatchRun(
+      projectDir,
+      {
+        intent: String(args?.intent ?? ""),
+        type,
+        judgment: judged,
+        briefOnly: true,
+        ...(goalId ? { goalId } : {}),
+        ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+        ...(displayName ? { displayName } : {}),
+      },
+      adapter,
+    );
+    const goalWarning = held.goalWarning ? `\n\n${held.goalWarning}` : "";
+    const judgment = readJudgment(projectDir, held.task.id);
+    const judgmentBlock = judgment ? `\n\n${renderJudgment(judgment).join("\n")}` : "";
+    const briefCard = renderBriefCard(held.task, held.plan);
+
+    const spawned = dispatchDetached(projectDir, held.task);
+    if (spawned.pid) {
+      const pending =
+        `Dispatched to a detached supervisor (pid ${spawned.pid}) — run_id ${held.task.id}. ` +
+        "No claim yet: this run keeps working after this tool returns; poll kage_task or kage_room_state with that run_id for the verdict.";
+      return text(`${briefCard}${judgmentBlock}\n\n${pending}${goalWarning}`);
+    }
+    // Detaching failed outright (spawn errored before returning a pid) — fall back to the
+    // old inline path rather than claim a detached run that never actually started, and say
+    // plainly that this run is now tied to this process.
+    const result = await executeRun(projectDir, held.task.id, held.plan, adapter);
+    const claimCard = result.claim
+      ? renderClaimCard(result.claim, { budget: diffBudget(projectDir), task: result.task })
+      : renderRunCard(result.task);
+    return text(`${briefCard}${judgmentBlock}\n\n${INLINE_RUN_WARNING}\n\n${claimCard}${goalWarning}`);
+  }
+  if (name === "kage_goal_create") {
+    const intent = String(args?.intent ?? "").trim();
+    if (!intent) return text("kage_goal_create needs an intent — the sentence describing what this goal is for.");
+    const autonomy = typeof args?.autonomy === "string" ? (args.autonomy as GoalAutonomy) : undefined;
+    const plan = Array.isArray(args?.plan)
+      ? (args.plan as unknown[]).map((wave) => (Array.isArray(wave) ? (wave as Array<Partial<GoalRunSpec>>) : []))
+      : undefined;
+    const budgets = args?.budgets && typeof args.budgets === "object" ? (args.budgets as Record<string, unknown>) : undefined;
+    const goal = createGoal(projectDir, { intent, plan, autonomy, budgets: budgets as never });
+    let activated = "";
+    if (process.env.KAGE_ROOM === "1") {
+      setActiveGoal(projectDir, process.env.KAGE_ROOM_SESSION || DEFAULT_SESSION, goal.id);
+      activated = " Set as this thread's active goal — kage_dispatch calls now attach to it without goal_id.";
+    }
+    const waveCount = goal.plan.waves.length;
+    return text(
+      `Goal ${goal.id} created ("${goal.intent}") — ${waveCount} wave${waveCount === 1 ? "" : "s"} planned, ` +
+        `autonomy: ${goal.autonomy}, budget $${goal.budgets.usd}/${goal.budgets.runs} runs.${activated}`,
+    );
+  }
+  if (name === "kage_goal_status") {
+    const goalId = resolveGoalId(projectDir, String(args?.goal_id ?? "").trim());
+    if (!goalId) return text("kage_goal_status needs a goal_id, or call it from a room thread with an active goal.");
+    const goal = readGoal(projectDir, goalId);
+    const spend = goalSpend(projectDir, goal);
+    const waves = goal.plan.waves.map((wave, index) => ({
+      index,
+      runs: wave.runs,
+      run_ids: wave.run_ids,
+      run_states: wave.run_ids.map((id) => {
+        try {
+          return { run_id: id, state: readRun(projectDir, id).state };
+        } catch {
+          return { run_id: id, state: "unknown" };
+        }
+      }),
+    }));
+    const nextWave = goal.state === "done" || goal.state === "abandoned" ? null : nextOpenWaveIndex(goal.plan.waves);
+    return text(
+      JSON.stringify(
+        {
+          goal_id: goal.id,
+          intent: goal.intent,
+          state: goal.state,
+          autonomy: goal.autonomy,
+          budgets: goal.budgets,
+          spend,
+          waves,
+          next_wave: nextWave,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (name === "kage_goal_finish") {
+    const goalId = resolveGoalId(projectDir, String(args?.goal_id ?? "").trim());
+    if (!goalId) return text("kage_goal_finish needs a goal_id, or call it from a room thread with an active goal.");
+    const reason = String(args?.reason ?? "").trim();
+    if (!reason) return text("kage_goal_finish needs a reason — it is kept as part of the goal's history.");
+    const goal = abandonGoal(projectDir, goalId, reason);
+    return text(`Goal ${goal.id} abandoned: ${reason}`);
+  }
+  if (name === "kage_judgment") {
+    return text(renderJudgment(readJudgment(projectDir, runId)).join("\n"));
+  }
+  if (name === "kage_task") {
+    return text(renderRunCard(readRun(projectDir, runId), readClaim(projectDir, runId)));
+  }
+  if (name === "kage_tell") {
+    const result = await steerRun(projectDir, runId, String(args?.message ?? ""), adapterByName);
+    return text(`${result.message}\n(delivery: ${result.delivery})`);
+  }
+  if (name === "kage_stop") {
+    return text(renderRunLine(transitionRun(projectDir, runId, "stopped", "manager", "stopped from the room")));
+  }
+  if (name === "kage_review_run") {
+    const verdict = String(args?.verdict ?? "").trim();
+    if (verdict !== "approve" && verdict !== "request_changes") {
+      return text(`kage_review_run needs verdict "approve" or "request_changes", got "${verdict || "(none)"}".`);
+    }
+    const notes = String(args?.notes ?? "").trim();
+    if (verdict === "request_changes" && !notes) {
+      return text("kage_review_run needs notes for a request_changes verdict — what needs another pass.");
+    }
+    let task;
+    try {
+      task = readRun(projectDir, runId);
+    } catch (error) {
+      return text(error instanceof Error ? error.message : String(error));
+    }
+    if (task.state !== "ready") {
+      return text(`Run ${runId} is ${task.state}, not ready. Only a run awaiting merge can be reviewed.`);
+    }
+    if (!readClaim(projectDir, runId)) return text(`Run ${runId} has no claim to review.`);
+    const review = {
+      schema_version: 1 as const,
+      run_id: runId,
+      at: new Date().toISOString(),
+      verdict: verdict as ReviewVerdict,
+      ...(notes ? { notes } : {}),
+    };
+    writeReview(projectDir, review);
+    notifyManagerOfRunEvent(projectDir, runId, { state: REVIEWED_EVENT_STATE, detail: `${verdict}${notes ? `: ${notes}` : ""}` }).catch(() => {});
+    return text(renderReview(review).join("\n"));
+  }
+  if (name === "kage_merge_run") return text(mergeRun(projectDir, runId).message);
+  if (name === "kage_reject_run") return text(rejectRun(projectDir, runId, String(args?.reason ?? "")).message);
+  if (name === "kage_report") {
+    const report = buildReport(projectDir, { all: Boolean(args?.all) });
+    const rendered = renderReport(projectDir, report);
+    markReportRead(projectDir);
+    return text(rendered);
+  }
+  return text(`Unknown delegation tool: ${name}`);
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -1137,6 +1690,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 export async function callTool(name: string, args: Record<string, unknown> | undefined) {
   await ensureTreeSitterLanguages();
+
+  if (DELEGATION_TOOL_NAMES.has(name)) return await callDelegationTool(name, args);
+
   if (name === "kage_list_domains") {
     const catalog = await fetchJSON<Catalog>(`${BASE_URL}/catalog.json`);
     const lines = Object.entries(catalog.domains)
@@ -1298,7 +1854,8 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // Visible receipt: surface what the harness saved today so agents relay it. Kept
     // outside the size cap so it always survives.
     const gains = valueSummary(projectDir).today;
-    const gainsLine = `\n\nGains: ~${formatTokenCount(gains.tokens_saved)} tokens saved this session · stale memories withheld: ${gains.stale_withheld}`;
+    // Observed counts lead; token savings are an estimate and say so (honest receipt v1).
+    const gainsLine = `\n\nGains today: ${gains.recalls} recall${gains.recalls === 1 ? "" : "s"} served · ${gains.stale_withheld} stale withheld${gains.tokens_saved > 0 ? ` · est. ~${formatTokenCount(gains.tokens_saved)} tokens saved` : ""}`;
     // Backstop: per-field clamping + graph dedup keep this compact in practice, but never
     // let a pathological repo overflow the MCP response again. ~24k chars ≈ 6k tokens.
     const MAX_CONTEXT_CHARS = 24000;
@@ -1323,9 +1880,13 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // Visible receipt: in text mode, surface what this recall saved so the agent
     // can relay it. Value is otherwise invisible; an unseen win is a churned user.
     const receipt = result.value_receipt;
-    const gainsLine = receipt && (receipt.tokens_saved > 0 || receipt.stale_withheld > 0)
-      ? `\n\nGains: ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall${receipt.stale_withheld ? ` · stale memories withheld: ${receipt.stale_withheld}` : ""}`
-      : "";
+    const receiptParts = receipt
+      ? [
+          ...(receipt.stale_withheld > 0 ? [`stale memories withheld: ${receipt.stale_withheld}`] : []),
+          ...(receipt.tokens_saved > 0 ? [`est. ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall`] : []),
+        ]
+      : [];
+    const gainsLine = receiptParts.length ? `\n\nGains: ${receiptParts.join(" · ")}` : "";
     return {
       content: [{ type: "text", text: args?.json || args?.explain ? JSON.stringify(result, null, 2) : `${result.context_block}${gainsLine}` }],
     };
@@ -1481,22 +2042,38 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_memory_access") {
     const result = kageMemoryAccess(String(args?.project_dir ?? ""));
+    // Measured 416,841 chars on this repo: `entries` is one row per approved packet
+    // (every packet gets a recall-telemetry row even at zero uses), uncapped. `totals`
+    // already summarizes hot/cold/tracked counts; cap the row list itself.
+    const payload = capFields(result, args, [{ key: "entries", label: "access entries" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_memory_lifecycle") {
     const result = kageMemoryLifecycle(String(args?.project_dir ?? ""));
+    // Measured 1,859,953 chars on this repo (433 packets) - the single worst tool on the
+    // MCP surface. `items` carries every approved/pending packet's full `body` (1,050,730
+    // of those chars alone) plus `summary`, even though the CLI's non-JSON `lifecycle`
+    // command never prints either - only totals and the top-8 `recommendations` (already
+    // capped in kernel.ts). Drop body/summary (the caller can read the packet file, or
+    // recall it, if it needs the prose) and cap the array like every other per-packet list.
+    const leanItems = result.items.map(({ body: _body, summary: _summary, ...rest }) => rest);
+    const payload = capFields({ ...result, items: leanItems }, args, [{ key: "items", label: "lifecycle items" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_memory_timeline") {
     const result = kageMemoryTimeline(String(args?.project_dir ?? ""), Number(args?.days ?? 14));
+    // Measured 397,437 chars on this repo's default 14-day window: `entries` is one lean
+    // row per packet added/updated/deprecated in range, uncapped, on a repo with heavy
+    // recent memory churn. `totals` already gives the per-kind counts; cap the row list.
+    const payload = capFields(result, args, [{ key: "entries", label: "timeline entries" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
@@ -1528,15 +2105,32 @@ export async function callTool(name: string, args: Record<string, unknown> | und
       String(args?.replacement_packet_id ?? ""),
       typeof args?.reason === "string" ? args.reason : "",
     );
+    // On success, supersedeMemory() echoes BOTH full MemoryPacket objects back - title,
+    // body, and a freshness.path_fingerprints entry (sha256 + size per cited file, plus a
+    // per-symbol sha256) for each. Measured ~10,000 tokens for one call, vs. the two lines
+    // `kage supersede` prints for the identical operation. The caller already knows what
+    // it asked to supersede; it needs confirmation the mutation landed, not the packets
+    // replayed back wholesale. Drop the packet bodies, keep the ids/paths a caller needs
+    // to act (e.g. open the replacement) plus titles for a human-readable confirmation.
+    const { old_packet, replacement_packet, ...lean } = result;
+    const payload = {
+      ...lean,
+      old_packet_title: old_packet?.title,
+      replacement_packet_title: replacement_packet?.title,
+    };
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
   if (name === "kage_conflicts") {
     const result = kageConflicts(String(args?.project_dir ?? ""));
+    // Measured 195,516 chars on this repo: `pairs` is one entry per contradicting packet
+    // pair (title-only references, already lean), uncapped. `count` already gives the
+    // true total; cap the pair list.
+    const payload = capFields(result, args, [{ key: "pairs", label: "conflict pairs" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 
@@ -1592,16 +2186,48 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_inbox") {
     const result = memoryInbox(String(args?.project_dir ?? ""));
+    // Measured 432,613 chars on this repo: `items` is one lean entry per pending/stale/
+    // duplicate/missing-context packet and per validation finding, uncapped across the
+    // whole repo. `counts` and `recommendations` already summarize the same information;
+    // cap the raw list the same way kage_refresh caps stale_packets.
+    const payload = capFields(result, args, [{ key: "items", label: "inbox items" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
       isError: !result.ok,
     };
   }
 
   if (name === "kage_refresh") {
     const result = refreshProject(String(args?.project_dir ?? ""), { full: Boolean(args?.full), force: Boolean(args?.force) });
+    // stale_packets and validation.warnings are one entry per packet/finding across the
+    // whole repo — individually lean, but uncapped they grow past what an MCP client will
+    // even accept (measured: 149,739 chars / 177 stale packets on this repo). Cap both,
+    // rank stale_packets by urgency (status-conflict > reported-wrong > drifted > just-verify),
+    // and say what was withheld rather than silently dropping it. `limit`/`verbose` opt back in.
+    const verbose = Boolean(args?.verbose);
+    const explicitLimit = Number(args?.limit);
+    const hasExplicitLimit = Number.isFinite(explicitLimit) && explicitLimit > 0;
+    const DEFAULT_STALE_LIMIT = 10;
+    const DEFAULT_WARNING_LIMIT = 10;
+    const staleLimit = verbose ? result.stale_packets.length : hasExplicitLimit ? explicitLimit : DEFAULT_STALE_LIMIT;
+    const warningLimit = verbose ? result.validation.warnings.length : hasExplicitLimit ? explicitLimit : DEFAULT_WARNING_LIMIT;
+    const staleCapped = capCollection(rankStalePacketsByUrgency(result.stale_packets), staleLimit, "stale packets");
+    const warningsCapped = capCollection(result.validation.warnings, warningLimit, "validation warnings");
+    const payload = {
+      ...result,
+      stale_packets: staleCapped.items,
+      stale_packets_total: staleCapped.total,
+      stale_packets_truncated: staleCapped.truncated,
+      validation: {
+        ...result.validation,
+        warnings: warningsCapped.items,
+        warnings_total: warningsCapped.total,
+        warnings_truncated: warningsCapped.truncated,
+      },
+      response_notes: [staleCapped.note, warningsCapped.note].filter((note): note is string => Boolean(note)),
+    };
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
       isError: !result.ok,
     };
   }
@@ -1626,8 +2252,65 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // invalidated team memory" to the developer instead of burying it in JSON.
     const guard = formatStaleCatch(staleCatch(projectDir)).join("\n");
     const result = prCheck(projectDir);
+    // Measured 321,873 chars / ~80,000 tokens on this repo before this fix - a third of
+    // a context window for one mandated call. Almost all of it was two things: (1) four
+    // one-entry-per-packet arrays (stale_packets, validation.warnings/errors,
+    // memory_reconciliation.items) each individually lean but uncapped across the whole
+    // repo, same disease kage_refresh already had; and (2) prCheck's top-level `warnings`
+    // is built as `[...validation.warnings, ...ownWarnings]` (kernel.ts), so the same
+    // ~183 strings were being sent TWICE. Cap the arrays (stale_packets ranked by
+    // urgency, same as kage_refresh) and de-duplicate `warnings` down to prCheck's own
+    // summary lines - the capped validation.warnings already carries the rest.
+    const staleCapped = capCollection(
+      rankStalePacketsByUrgency(result.stale_packets),
+      responseCapLimit(args, result.stale_packets.length),
+      "stale packets",
+    );
+    const validationWarningsCapped = capCollection(
+      result.validation.warnings,
+      responseCapLimit(args, result.validation.warnings.length),
+      "validation warnings",
+    );
+    const validationErrorsCapped = capCollection(
+      result.validation.errors,
+      responseCapLimit(args, result.validation.errors.length),
+      "validation errors",
+    );
+    const reconciliationItems = result.memory_reconciliation?.items ?? [];
+    const reconciliationItemsCapped = capCollection(
+      reconciliationItems,
+      responseCapLimit(args, reconciliationItems.length),
+      "reconciliation items",
+    );
+    const validationWarningSet = new Set(result.validation.warnings);
+    const ownWarnings = result.warnings.filter((warning) => !validationWarningSet.has(warning));
+    const payload = {
+      ...result,
+      stale_packets: staleCapped.items,
+      stale_packets_total: staleCapped.total,
+      stale_packets_truncated: staleCapped.truncated,
+      validation: {
+        ...result.validation,
+        warnings: validationWarningsCapped.items,
+        warnings_total: validationWarningsCapped.total,
+        warnings_truncated: validationWarningsCapped.truncated,
+        errors: validationErrorsCapped.items,
+        errors_total: validationErrorsCapped.total,
+        errors_truncated: validationErrorsCapped.truncated,
+      },
+      memory_reconciliation: {
+        ...result.memory_reconciliation,
+        items: reconciliationItemsCapped.items,
+        items_total: reconciliationItemsCapped.total,
+        items_truncated: reconciliationItemsCapped.truncated,
+      },
+      warnings: ownWarnings,
+      warnings_total: result.warnings.length,
+      response_notes: [staleCapped.note, validationWarningsCapped.note, validationErrorsCapped.note, reconciliationItemsCapped.note]
+        .filter((note): note is string => Boolean(note)),
+    };
     return {
-      content: [{ type: "text", text: `${guard}\n\n${JSON.stringify(result, null, 2)}` }],
+      content: [{ type: "text", text: `${guard}\n\n${JSON.stringify(payload, null, 2)}` }],
       isError: !result.ok,
     };
   }
@@ -1645,8 +2328,12 @@ export async function callTool(name: string, args: Record<string, unknown> | und
 
   if (name === "kage_quality") {
     const result = qualityReport(String(args?.project_dir ?? ""));
+    // Measured 292,400 chars on this repo: `packets` is one lean scored row per packet in
+    // the repo, uncapped. The scalar ratios/coverage percentages already summarize this;
+    // cap the row list.
+    const payload = capFields(result, args, [{ key: "packets", label: "scored packets" }]);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     };
   }
 

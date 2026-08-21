@@ -1,11 +1,16 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn as spawnProcess } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { daemonDoctor, readDaemonStatus, startDaemon, startViewer, stopDaemon } from "./daemon.js";
+import { openStore } from "./store/manifest.js";
+import { rebuildStore } from "./store/rebuild.js";
+import { detect as detectSqliteStore, sqliteStorePath, SCHEMA_VERSION as SQLITE_STORE_SCHEMA_VERSION } from "./store/sqlite.js";
+import { SCHEMA_VERSION as JSON_STORE_SCHEMA_VERSION } from "./store/json.js";
+import type { BackendKind } from "./store/types.js";
 import {
   SETUP_AGENTS,
   auditClaudeMemStore,
@@ -25,6 +30,7 @@ import {
   buildStructuralIndex,
   capture,
   changelog,
+  countIndexableFiles,
   createReviewArtifact,
   createPublicCandidate,
   distillSession,
@@ -98,13 +104,17 @@ import {
   refreshProject,
   rejectPending,
   registryRecommendations,
+  scaleGuardMessage,
   setupAgent,
   generatePluginHooks,
   VALUE_DOLLARS_PER_MILLION_TOKENS,
+  RECALL_READ_TOKENS_CAP_PER_FILE,
   setupDoctor,
   setContextSlot,
   staleCatch,
   formatStaleCatch,
+  staleTriage,
+  formatStaleTriage,
   supersedeMemory,
   kageConflicts,
   syncPersonal,
@@ -124,26 +134,69 @@ import {
   type ObservationEvent,
   type SetupAgent,
 } from "./kernel.js";
+import {
+  INLINE_RUN_WARNING,
+  dirtyTreeWarning,
+  dispatchDetached,
+  dispatchRun,
+  executeRun,
+  followRun,
+  runWorkspacePath,
+} from "./delegation/dispatch.js";
+import { ensureAppDaemon } from "./delegation/app-daemon.js";
+import { readKnownProjects, rememberProject } from "./delegation/projects.js";
+import { addProject, installedAgents } from "./delegation/add-project.js";
+import { steerRun } from "./delegation/steer.js";
+import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
+import { ADAPTER_NAMES, adapterByName, detectAgent } from "./delegation/adapters/index.js";
+import { compileBrief, renderBriefCard } from "./delegation/brief.js";
+import { renderClaimCard } from "./delegation/verify.js";
+import { mergeRun, rejectRun, reverifyRun } from "./delegation/ratify.js";
+import { adoptOrphanedRun, killOrphanedAgent, resumeStoppedRun } from "./delegation/recovery.js";
+import { buildReport, markReportRead, renderReport, renderStatusBoard } from "./delegation/report.js";
+import { diffBudget, readDelegationConfig, writeDelegationConfig } from "./delegation/config.js";
+import { openRoom } from "./delegation/room.js";
 import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { lintOkfBundle, loadOkfConcepts, migratePacketsToOkf, okfBundleDir, okfViewerHtml } from "./okf.js";
 
-const CORE_USAGE = `Kage — code-grounded memory for coding agents
+// Ordered by what a person actually does, not by when each command was built. The app
+// used to be missing from this list entirely — the surface the product is sold on was
+// undiscoverable from its own CLI, while `kage viewer` (the legacy dashboard) was
+// advertised in its place.
+const CORE_USAGE = `Kage manages your memory and agents
 
-Core commands:
+Start here:
   kage install [--project <dir>]             one-shot: init + index + auto-wire detected agents
+  kage app [--project <dir>]                 the desktop app — room, runs, board, memory
+  kage projects add <dir> [--agent claude|codex]   register another repo (the app's "+" does this, then opens it)
   kage scan --project <dir>                  60-second truth report on any repo (zero setup)
-  kage init --project <dir>                  create repo memory (.agent_memory only)
-  kage index --project <dir> [--full]        build/refresh code graph + indexes
+
+Delegate work (the orchestrator):
+  kage room [--project <dir>]                talk to Kage; it briefs and hires agents for you
+  kage dispatch "<intent>" [--agent claude]  one delegated run, briefed from repo memory
+  kage runs [--project <dir>]                what every run is doing right now
+  kage review --project <dir>                read a finished run's claim and diff
+  kage reverify <run-id> --project <dir>     re-check a failed/ready run's existing claim against its worktree — no agent re-run
+  kage resume-run <run-id> [--budget-usd <n>] --project <dir>   resume a run stopped on its usd budget (raise it) or one that appeared stalled (resumes as-is, no flags needed)
+  kage adopt <run-id> --project <dir>        verify an orphaned run's worktree when it never got an agent claim
+  kage merge <run-id> --project <dir>        land the code and ratify what it learned
+
+Memory:
   kage recall "<query>" --project <dir>      grounded recall from repo memory
   kage learn --project <dir> ...             capture a learning as a memory packet
   kage gains --project <dir>                 what Kage saved you (tokens, cost, stale blocks)
   kage verify --project <dir>                check memory citations against code
-  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+
+Keep it healthy:
+  kage refresh --project <dir>               rebuild indexes, graphs and metrics
+  kage stale --project <dir>                 triage withheld memory: what moved, worth rescuing, one command to act
   kage doctor --project <dir>                health check
   kage repair --project <dir>                fix what doctor finds (indexes, broken packets, wiring)
-  kage viewer --project <dir>                local dashboard
+  kage setup <agent> --project <dir> --write wire your agent (claude-code, codex, cursor, ...)
+  kage store status --project <dir>          which memory-store backend is active, and its size
+  kage store rebuild --project <dir>         regenerate the store from packets + today's indexes
 
-Run 'kage help --all' for the full command list (lifecycle, CI, benchmarks, daemon, workspace).`;
+Run 'kage help --all' for every command (lifecycle, CI, benchmarks, daemon, workspace).`;
 
 const FULL_USAGE = `Kage — full command reference
 
@@ -169,6 +222,8 @@ Usage:
   kage hook status --project <dir> [--json]
   kage hook uninstall --project <dir> [--json]
   kage refresh --project <dir> [--full] [--force] [--json]
+  kage store status --project <dir> [--json]
+  kage store rebuild --project <dir> [--backend json|sqlite] [--json]
   kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
   kage gc --project <dir> [--dry-run] [--force] [--json]
   kage compact --project <dir> [--dry-run] [--json]
@@ -190,6 +245,7 @@ Usage:
   kage handoff --project <dir> [--json]
   kage layers --project <dir> [--json]
   kage lifecycle --project <dir> [--json]
+  kage stale --project <dir> [--limit <n>] [--json]   triage stale/withheld memory, ranked by rescue value; one packet at a time
   kage reverify --project <dir> --packet <id> [--json]
   kage reconcile --project <dir> [--session <id>] [--json]
   kage timeline --project <dir> [--days <n>] [--json]
@@ -251,6 +307,28 @@ Usage:
   kage changelog --project <dir> [--days <n>] [--json]
   kage review --project <dir>
   kage validate --project <dir>
+  kage app [--project <dir>] [--no-open]     the web app: inbox · runs · board (starts the daemon if needed)
+  kage projects add <dir> [--agent claude|codex] [--json]
+  kage projects list [--json]
+  kage ui [--project <dir>]                  full-screen console: board · review · dispatch · memory
+  kage room [--project <dir>] [--agent claude|codex]
+  kage dispatch "<intent>" [--agent claude|codex|stub] [--type bugfix|feature|refactor|migration|chore|investigation] [--brief-only] [--budget-usd <n>]
+  kage runs [--project <dir>]
+  kage status [--watch] [--project <dir>]
+  kage task <run-id> [--project <dir>]
+  kage review <run-id> [--project <dir>]
+  kage merge <run-id> [--project <dir>]
+  kage reject <run-id> "<reason>" [--project <dir>]
+  kage reverify <run-id> [--project <dir>]      re-check a failed/ready run's EXISTING claim against its worktree, no agent re-run — refuses if there is no claim yet (see 'kage adopt')
+  kage resume-run <run-id> [--budget-usd <n>] [--budget-minutes <n>] [--project <dir>]   resume a stopped run with the SAME run id, worktree, branch and agent session — a usd-stopped run requires --budget-usd to raise the cap; a stalled run (kernel-detected loop, no forward progress) resumes as-is with no flags required; --budget-minutes is always accepted as a harmless extra raise, never required
+  kage adopt <run-id> [--project <dir>]         verify an orphaned run's worktree (supervisor died before an agent claim was written) — refuses while its agent is still alive
+  kage orphan-kill <run-id> [--project <dir>]   deliberately kill a live orphaned agent (supervisor dead, agent still working) and show its last recorded spend — never automatic
+  kage open <run-id> [--project <dir>]
+  kage tell <run-id> "<message>" [--project <dir>]
+  kage stop <run-id> [--project <dir>]
+  kage retry <run-id> [--project <dir>]
+  kage report [--all] [--project <dir>]
+  kage config [--test <cmd>] [--setup <cmd>] [--diff-budget <n>] [--budget-usd <n>] [--budget-minutes <n>] [--no-strict] [--no-static-checks] [--project <dir>]
 
 Types:
   ${MEMORY_TYPES.join(", ")}`;
@@ -284,8 +362,54 @@ function listArg(value: string | undefined): string[] {
   return value ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
 }
 
+function formatStoreBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// The on-disk artifacts each backend owns -- the sqlite backend is one file;
+// the JSON backend is every derived-cache file mcp/store/json.ts reads and
+// writes (docs/design/MEMORY_STORE.md's Problem-section table, minus the
+// structural/knowledge-graph files M3 still owns directly).
+const JSON_STORE_FILES = [
+  "structural/files.json",
+  "structural/symbols.json",
+  "structural/imports.json",
+  "structural/call-edges.json",
+  "indexes/catalog.json",
+  "indexes/packet-paths.json",
+  "indexes/packet-symbols.json",
+  "indexes/docs-index.json",
+  "indexes/vector-local.json",
+  "graph/entities.json",
+  "graph/edges.json",
+  "graph/episodes.json",
+];
+
+function storeOnDiskBytes(projectDir: string, kind: BackendKind): { files: number; bytes: number } {
+  if (kind === "sqlite") {
+    const path = sqliteStorePath(projectDir);
+    if (!existsSync(path)) return { files: 0, bytes: 0 };
+    return { files: 1, bytes: statSync(path).size };
+  }
+  let files = 0;
+  let bytes = 0;
+  for (const relative of JSON_STORE_FILES) {
+    const path = join(projectDir, ".agent_memory", relative);
+    if (!existsSync(path)) continue;
+    files += 1;
+    bytes += statSync(path).size;
+  }
+  return { files, bytes };
+}
+
 function projectArg(args: string[]): string {
-  return takeArg(args, "--project") ?? process.cwd();
+  // ALWAYS absolute. `kage app --project .` used to hand "." straight through to the
+  // daemon, which then stored it, served it back through /settings, and built every
+  // memory/worktree path from it — so anything that changed directory, or any client
+  // resolving it later, was working from a different repo than the user meant.
+  return resolve(takeArg(args, "--project") ?? process.cwd());
 }
 
 function numberArg(args: string[], name: string, fallback: number): number {
@@ -467,6 +591,8 @@ async function main(): Promise<void> {
     }
     console.log(`Kage Truth Report — ${result.project_dir}`);
     console.log(`Scanned ${result.totals.files_scanned} files, ${result.totals.symbols_scanned} symbols${result.totals.docs_scanned ? `, ${result.totals.docs_scanned} doc file(s)` : ""}\n`);
+    const scanScaleWarning = scaleGuardMessage(result.totals.files_scanned);
+    if (scanScaleWarning) console.log(`${scanScaleWarning}\n`);
     console.log(result.headline ? `  ${result.headline}\n` : "");
     const sections: Array<{ kind: string; heading: string; clean: string; count: number }> = [
       { kind: "knowledge_void", heading: "KNOWLEDGE VOID — high churn, zero memory", clean: "no undocumented hot files", count: result.totals.knowledge_voids },
@@ -700,6 +826,8 @@ async function main(): Promise<void> {
     console.log("  Memory      .agent_memory/ created — packets are plain files, reviewable in git");
     console.log(`  Indexes     ${init.index.indexes.length} built (code graph, recall, structure)`);
     console.log(`  Policy      AGENTS.md + CLAUDE.md ${policy.created ? "written" : policy.updated ? "updated" : "current"} — commit these so every teammate's agent uses Kage`);
+    const installScaleWarning = scaleGuardMessage(countIndexableFiles(project));
+    if (installScaleWarning) console.log(`  Scale       ${installScaleWarning}`);
     if (skipAgents) {
       console.log("  Agents      skipped (--no-agents)");
     } else if (!wired.length) {
@@ -914,6 +1042,87 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Internal: build the viewer's JSON reports. Never typed by a human — startViewer
+  // spawns it so the expensive, synchronous report functions run off the server's
+  // thread. See generateViewerReports for the measurements that forced this.
+  if (command === "viewer-reports") {
+    const { generateViewerReports } = await import("./daemon.js");
+    generateViewerReports(projectArg(args));
+    return;
+  }
+
+  if (command === "app") {
+    if (args.includes("--help") || args.includes("-h")) usage();
+    const projectDir = projectArg(args);
+    const port = numberArg(args, "--port", 3111);
+    // Ensuring a live daemon lives in delegation/app-daemon.ts — the projects sidebar
+    // needs the identical logic to switch projects, and two copies would drift.
+    let url: string;
+    try {
+      ({ url } = await ensureAppDaemon(projectDir, port));
+    } catch (error) {
+      console.error((error as Error).message);
+      process.exit(2);
+      return;
+    }
+    // Opening the app is what marks a project "known" to the sidebar; no separate step.
+    rememberProject(projectDir);
+    console.log(`Kage app → ${url}`);
+    if (!args.includes("--no-open") && process.platform === "darwin") {
+      spawnProcess("open", [url], { detached: true, stdio: "ignore" }).unref();
+    }
+    return;
+  }
+
+  // Everything the app's add-project dialog does is reachable here too: validate a
+  // path the same way (addProject → resolveWorkspaceKind, refusing plainly rather than
+  // silently sandboxing or leaking raw git output), register it, and record a default
+  // worker agent. The app additionally starts that project's daemon and opens its Room
+  // in a browser tab — `kage app --project <dir>` is that other half from a terminal.
+  if (command === "projects") {
+    const action = args[1];
+    if (action === "add") {
+      const dir = args[2];
+      if (!dir) usage();
+      const agentArg = takeArg(args, "--agent");
+      if (agentArg && !ADAPTER_NAMES.includes(agentArg as (typeof ADAPTER_NAMES)[number])) {
+        console.error(`Unknown --agent ${agentArg}. One of: ${ADAPTER_NAMES.filter((name) => name !== "stub").join(", ")}`);
+        process.exit(2);
+      }
+      const result = addProject(dir, agentArg ? { worker_agent: agentArg as "claude" | "codex" } : {});
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.ok) process.exit(2);
+        return;
+      }
+      if (!result.ok) {
+        console.error(result.message);
+        if (result.reason === "ambiguous" && result.candidates) {
+          console.error("");
+          for (const candidate of result.candidates) console.error(`  ${candidate}`);
+        }
+        process.exit(2);
+      }
+      console.log(`Added ${result.name} (${result.dir})${result.kind === "sandbox" ? " — no commits yet, runs will use a sandbox, not a worktree" : ""}`);
+      console.log(`Start it: kage app --project ${result.dir}`);
+      return;
+    }
+    if (action === "list" || !action) {
+      const known = readKnownProjects();
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({ ok: true, projects: known, agents_installed: installedAgents() }, null, 2));
+        return;
+      }
+      if (!known.length) {
+        console.log("No projects known yet. Add one: kage projects add <dir>");
+        return;
+      }
+      for (const project of known) console.log(`${project.name}  ${project.dir}`);
+      return;
+    }
+    usage();
+  }
+
   if (command === "hook") {
     const action = args[1];
     const projectDir = projectArg(args);
@@ -1058,6 +1267,57 @@ async function main(): Promise<void> {
     console.log(`Next actions:\n${result.next_actions.map((action) => `  - ${action}`).join("\n")}`);
     if (!result.ok) process.exit(2);
     return;
+  }
+
+  if (command === "store") {
+    const action = args[1];
+    const projectDir = projectArg(args);
+
+    if (action === "status") {
+      const { backend, manifest } = openStore(projectDir);
+      const counts = backend.counts();
+      backend.close();
+      const disk = storeOnDiskBytes(projectDir, manifest.active_backend);
+      const schemaVersion = manifest.active_backend === "sqlite" ? SQLITE_STORE_SCHEMA_VERSION : JSON_STORE_SCHEMA_VERSION;
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({ project_dir: projectDir, active_backend: manifest.active_backend, forced_backend: manifest.forced_backend, schema_version: schemaVersion, counts, files: disk.files, bytes: disk.bytes, last_rebuild_at: manifest.last_rebuild_at }, null, 2));
+        return;
+      }
+      console.log(`Store status for ${projectDir}`);
+      console.log(`Active backend: ${manifest.active_backend}${manifest.forced_backend ? ` (forced: ${manifest.forced_backend})` : ""}`);
+      console.log(`Schema version: ${schemaVersion}`);
+      console.log(`On disk: ${disk.files} file(s), ${formatStoreBytes(disk.bytes)}`);
+      console.log(`Last rebuild: ${manifest.last_rebuild_at ?? "never (kage store rebuild has not run)"}`);
+      console.log("Table counts:");
+      for (const [table, count] of Object.entries(counts).sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${table}: ${count}`);
+      return;
+    }
+
+    if (action === "rebuild") {
+      const requestedBackend = takeArg(args, "--backend");
+      if (requestedBackend && requestedBackend !== "json" && requestedBackend !== "sqlite") {
+        console.error(`Unknown --backend "${requestedBackend}" (expected json or sqlite)`);
+        process.exit(1);
+      }
+      // Unlike openStore()'s ambient default (stay on JSON until a prior
+      // rebuild already migrated), `kage store rebuild` IS the migration
+      // step -- it targets the best available backend by default so running
+      // it once is what flips a capable Node over to sqlite going forward
+      // (docs/design/MEMORY_STORE.md's "lazy migration").
+      const forceBackend = (requestedBackend as BackendKind | undefined) ?? (detectSqliteStore().available ? "sqlite" : "json");
+      const result = rebuildStore(projectDir, { forceBackend });
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log(`Rebuilt the ${result.backend} store for ${projectDir}`);
+      console.log(`Regenerated:`);
+      for (const [table, count] of Object.entries(result.counts).sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${table}: ${count}`);
+      console.log(`Rebuilt at: ${result.rebuiltAt}`);
+      return;
+    }
+
+    usage();
   }
 
   if (command === "pr") {
@@ -1493,16 +1753,16 @@ async function main(): Promise<void> {
       return;
     }
     console.log(
-      `This week Kage saved you ~${formatTokenCount(week.tokens_saved)} tokens (~$${week.estimated_dollars.toFixed(2)}), ` +
+      `This week Kage answered ${week.recalls} ${plural(week.recalls, "recall", "recalls")}, ` +
       `blocked ${week.stale_withheld} stale ${plural(week.stale_withheld, "memory", "memories")}, ` +
-      `caught ${week.stale_caught} stale at change-time, ` +
-      `answered ${week.recalls} ${plural(week.recalls, "recall", "recalls")}.`
+      `caught ${week.stale_caught} stale at change-time — ` +
+      `est. ~${formatTokenCount(week.tokens_saved)} tokens (~$${week.estimated_dollars.toFixed(2)}) not re-spent.`
     );
     const windowLine = (label: string, window: typeof week): string =>
-      `  ${label} ~${formatTokenCount(window.tokens_saved)} tokens (~$${window.estimated_dollars.toFixed(2)}) · ` +
+      `  ${label} ${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
       `${window.stale_withheld} stale blocked · ${window.stale_caught} stale caught at change-time · ` +
-      `${window.recalls} ${plural(window.recalls, "recall", "recalls")} · ` +
-      `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")}`;
+      `${window.caller_answers} caller ${plural(window.caller_answers, "answer", "answers")} · ` +
+      `est. ~${formatTokenCount(window.tokens_saved)} tokens (~$${window.estimated_dollars.toFixed(2)})`;
     console.log(windowLine("Today:   ", summary.today));
     console.log(windowLine("All time:", summary.all_time));
     if (summary.all_time.replay_tokens > 0) {
@@ -1514,7 +1774,9 @@ async function main(): Promise<void> {
     }
     const usdOverridden = Number.isFinite(Number(process.env.KAGE_USD_PER_MTOK)) && Number(process.env.KAGE_USD_PER_MTOK) > 0;
     console.log(
-      `\nDollars estimated at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
+      `\nCounts are observed events; token/$ figures are estimates — per recall, the larger of a ` +
+      `capped re-read cost (≤${RECALL_READ_TOKENS_CAP_PER_FILE} tokens per cited file) and the served ` +
+      `memories' discovery cost. Dollars at $${VALUE_DOLLARS_PER_MILLION_TOKENS}/1M input tokens ` +
       `(${usdOverridden ? "via KAGE_USD_PER_MTOK" : "Sonnet-class default — set KAGE_USD_PER_MTOK for your model"}). ` +
       `Ledger: .agent_memory/reports/value.json`
     );
@@ -1621,18 +1883,39 @@ async function main(): Promise<void> {
 
   if (command === "reverify") {
     const packetId = takeArg(args, "--packet");
-    if (!packetId) usage();
-    const result = reverifyMemory(projectArg(args), packetId!);
+    // `--packet <id>` reverifies a MEMORY packet's grounding (kernel.ts); a bare run id
+    // reverifies a delegated RUN's check verdicts (mcp/delegation/ratify.ts) — same verb,
+    // two different things it can re-check, disambiguated by which argument is present.
+    if (packetId) {
+      const result = reverifyMemory(projectArg(args), packetId);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.ok) {
+        console.log(`Reverified ${result.packet_id}`);
+        console.log(`  grounding refreshed for ${result.refreshed_paths.length} path(s)${result.was_stale ? " · stale flag cleared" : ""}`);
+        if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
+      } else {
+        console.log(`Reverify failed: ${result.errors.join("; ")}`);
+      }
+      if (!result.ok) process.exit(2);
+      return;
+    }
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = reverifyRun(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "stale") {
+    const limit = numberArg(args, "--limit", 20);
+    const result = staleTriage(projectArg(args), { limit });
     if (args.includes("--json")) {
       console.log(JSON.stringify(result, null, 2));
-    } else if (result.ok) {
-      console.log(`Reverified ${result.packet_id}`);
-      console.log(`  grounding refreshed for ${result.refreshed_paths.length} path(s)${result.was_stale ? " · stale flag cleared" : ""}`);
-      if (result.missing_paths.length) console.log(`  dropped missing path(s): ${result.missing_paths.join(", ")}`);
-    } else {
-      console.log(`Reverify failed: ${result.errors.join("; ")}`);
+      return;
     }
-    if (!result.ok) process.exit(2);
+    console.log(formatStaleTriage(result, limit).join("\n"));
     return;
   }
 
@@ -2494,8 +2777,351 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "ui" || command === "console") {
+    const { runTui } = await import("./delegation/tui/app.js");
+    process.exit(await runTui(projectArg(args)));
+  }
+
+  if (command === "room") {
+    process.exit(openRoom(projectArg(args), takeArg(args, "--agent") ?? undefined));
+  }
+
+  if (command === "dispatch") {
+    const project = projectArg(args);
+    const intent = takeArg(args, "--intent") ?? firstPositional(args);
+    if (!intent) usage();
+    const typeArg = takeArg(args, "--type") ?? "chore";
+    if (!(RUN_TYPES as readonly string[]).includes(typeArg)) {
+      console.error(`Unknown --type ${typeArg}. One of: ${RUN_TYPES.join(", ")}`);
+      process.exit(2);
+    }
+    const agentName = takeArg(args, "--agent") ?? (args.includes("--stub") ? "stub" : detectAgent());
+    if (!agentName) {
+      console.error("No coding agent found on PATH. Install Claude Code or Codex, or dispatch with --agent stub to exercise the loop.");
+      process.exit(2);
+    }
+    const budgetUsdArg = takeArg(args, "--budget-usd");
+    let budgetUsd: number | undefined;
+    if (budgetUsdArg !== undefined) {
+      budgetUsd = Number(budgetUsdArg);
+      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) {
+        console.error(`--budget-usd must be a positive number, got "${budgetUsdArg}".`);
+        process.exit(2);
+      }
+    }
+    const briefOnly = args.includes("--brief-only");
+    const dirty = dirtyTreeWarning(project);
+    if (dirty) console.log(`  heads up: ${dirty}\n`);
+    const adapter = adapterByName(agentName);
+    // Compile and SHOW the brief before any work starts — you should be able to read
+    // what was dispatched while the agent is still working on it. renderBriefCard's
+    // own Budget line is the "surface it at dispatch" half of the contract; the halt
+    // message (checkRunBudget's reason) is the other half, for when it is exceeded.
+    const held = await dispatchRun(project, { intent, type: typeArg as RunType, briefOnly: true, budgetUsd }, adapter);
+    console.log(renderBriefCard(held.task, held.plan));
+    if (briefOnly) {
+      console.log(`\nHeld. Release it with: kage retry ${held.task.id} --project ${project}`);
+      return;
+    }
+    console.log("");
+    // Detached, not inline: a SIGTERM to THIS process (a closed terminal, Ctrl-C, a
+    // command timeout) must not kill the agent mid-work — that is exactly what was
+    // reproduced live on 2026-08-18. dispatchDetached hands the run to its own
+    // supervisor process (the same one the app and daemon already use); this CLI only
+    // follows along, so losing it changes nothing about whether the run finishes.
+    const spawned = dispatchDetached(project, held.task);
+    let task = held.task;
+    if (spawned.pid) {
+      task = await followRun(project, held.task.id, { progress: !args.includes("--quiet") });
+    } else {
+      // Detaching failed outright (spawn errored before returning a pid) — fall back to
+      // the old inline path rather than hang forever waiting on a supervisor that was
+      // never spawned, and say plainly that this run is now tied to this shell.
+      console.log(`  ${INLINE_RUN_WARNING}\n`);
+      const result = await executeRun(project, held.task.id, held.plan, adapter, { progress: !args.includes("--quiet") });
+      task = result.task;
+    }
+    console.log("");
+    const claim = readClaim(project, task.id);
+    if (claim) console.log(renderClaimCard(claim, { budget: diffBudget(project), task }));
+    else console.log(renderRunCard(task));
+    return;
+  }
+
+  // Internal: the body of a supervised run. Spawned detached by `kage dispatch --live`,
+  // never typed by a human — it holds one agent's stdin for the run's whole life.
+  if (command === "supervise") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const { superviseRun } = await import("./delegation/supervisor.js");
+    await superviseRun(projectArg(args), runId);
+    return;
+  }
+
+  // Internal: the body of an automatic reviewer-agent pass over a "ready" run
+  // (review.ts's reviewRun, resolved through dispatch.ts's dispatchReviewer). Spawned
+  // detached by dispatch.ts's dispatchReviewerDetached the moment a review_required run
+  // reaches "ready" — never typed by a human.
+  if (command === "review-run") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const { dispatchReviewer } = await import("./delegation/dispatch.js");
+    await dispatchReviewer(projectArg(args), runId);
+    return;
+  }
+
+  // Internal: the body of a supervised ROOM — one held claude session for the whole
+  // conversation, spawned detached by the daemon on the first message. Never typed by
+  // a human directly (use `kage room` for an interactive terminal session instead).
+  if (command === "supervise-room") {
+    const { superviseRoom } = await import("./delegation/room-supervisor.js");
+    // --session names which conversation thread this supervisor holds; absent means
+    // the default thread, which is where every pre-threads install already is.
+    await superviseRoom(projectArg(args), takeArg(args, "--session") ?? undefined);
+    return;
+  }
+
+  // Internal: a REAL pty running interactive claude (no -p) — the room's Terminal
+  // mode. Also never typed by a human; the daemon spawns it on first attach.
+  if (command === "supervise-room-pty") {
+    const { superviseRoomPty } = await import("./delegation/room-pty.js");
+    await superviseRoomPty(projectArg(args), takeArg(args, "--session") ?? undefined);
+    return;
+  }
+
+  if (command === "runs") {
+    const runs = listRuns(projectArg(args));
+    if (!runs.length) {
+      console.log('No runs yet. Dispatch one: kage dispatch "<intent>"');
+      return;
+    }
+    for (const task of runs) console.log(renderRunLine(task));
+    return;
+  }
+
+  if (command === "status") {
+    const project = projectArg(args);
+    if (!args.includes("--watch")) {
+      console.log(renderStatusBoard(project));
+      return;
+    }
+    // Live board: repaint in place until interrupted. Deliberately a poll, not a log
+    // stream — you want to know what is happening, not read everything that happened.
+    const paint = (): void => {
+      process.stdout.write(`3[2J3[H${renderStatusBoard(project)}\n\nwatching — ctrl-c to stop\n`);
+    };
+    paint();
+    const timer = setInterval(paint, 2000);
+    await new Promise<void>((resolve) => {
+      process.on("SIGINT", () => {
+        clearInterval(timer);
+        process.stdout.write("\n");
+        resolve();
+      });
+    });
+    return;
+  }
+
+  if (command === "task") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const task = readRun(project, runId);
+    console.log(renderRunCard(task, readClaim(project, runId)));
+    return;
+  }
+
+  if (command === "retry") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const task = readRun(project, runId);
+    if (task.state === "failed" || task.state === "blocked" || task.state === "stopped") {
+      transitionRun(project, runId, "running", "user", "retry requested");
+    }
+    // Unlike `kage dispatch`, retry still runs the agent inline in this process — say so.
+    console.log(`  ${INLINE_RUN_WARNING}\n`);
+    const plan = compileBrief(project, task.intent, task.type);
+    const result = await executeRun(project, runId, plan, adapterByName(task.agent), { progress: !args.includes("--quiet") });
+    if (result.claim) console.log(renderClaimCard(result.claim, { budget: diffBudget(project), task: result.task }));
+    else console.log(renderRunCard(result.task));
+    return;
+  }
+
+  // Resumes a run the kernel STOPPED for crossing its budget — the same run id,
+  // worktree, branch, and (unlike `kage retry`) agent session, with a raised budget.
+  // `kage retry` starts a fresh agent session from the current brief; this reattaches
+  // to the one already in progress, so the agent keeps its own context.
+  if (command === "resume-run") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    const budgetArg = takeArg(args, "--budget-usd");
+    const budgetUsd = budgetArg !== undefined ? Number(budgetArg) : undefined;
+    const budgetMinutesArg = takeArg(args, "--budget-minutes");
+    const budgetMinutes = budgetMinutesArg !== undefined ? Number(budgetMinutesArg) : undefined;
+    const result = await resumeStoppedRun(project, runId, budgetUsd, budgetMinutes, adapterByName);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  // Verifies an orphaned run's worktree when its supervisor died before an agent claim
+  // was ever written — the gap `kage reverify` cannot cross, since reverify re-checks an
+  // EXISTING claim's declared checks and this run never got one.
+  if (command === "adopt") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = adoptOrphanedRun(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  // A DELIBERATE kill of a live orphaned agent (supervisor dead, agent still working) —
+  // never automatic; sweepDeadRuns only ever reaps once BOTH processes are gone. Shows
+  // spend before doing anything irreversible.
+  if (command === "orphan-kill") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = killOrphanedAgent(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "open") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const project = projectArg(args);
+    console.log(runWorkspacePath(project, readRun(project, runId)));
+    return;
+  }
+
+  if (command === "tell") {
+    const runId = firstPositional(args);
+    const message = firstPositional(args.filter((arg) => arg !== runId));
+    if (!runId || !message) usage();
+    const result = await steerRun(projectArg(args), runId, message, adapterByName);
+    console.log(result.message);
+    if (result.delivery === "resumed") console.log(renderRunLine(result.task));
+    if (result.delivery === "refused") process.exit(2);
+    return;
+  }
+
+  if (command === "stop") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const task = transitionRun(projectArg(args), runId, "stopped", "user", "stopped by user");
+    console.log(`${renderRunLine(task)}\nState is preserved — resume with: kage retry ${runId}`);
+    return;
+  }
+
+  if (command === "merge") {
+    const runId = firstPositional(args);
+    if (!runId) usage();
+    const result = mergeRun(projectArg(args), runId);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "reject") {
+    const runId = firstPositional(args);
+    const reason = firstPositional(args.filter((arg) => arg !== runId));
+    if (!runId || !reason) usage();
+    const result = rejectRun(projectArg(args), runId, reason);
+    console.log(result.message);
+    if (!result.ok) process.exit(2);
+    return;
+  }
+
+  if (command === "report") {
+    const project = projectArg(args);
+    const report = buildReport(project, { all: args.includes("--all") });
+    console.log(renderReport(project, report));
+    markReportRead(project);
+    return;
+  }
+
+  if (command === "config") {
+    const project = projectArg(args);
+    const patch: Record<string, unknown> = {};
+    const test = takeArg(args, "--test");
+    const setup = takeArg(args, "--setup");
+    const budget = takeArg(args, "--diff-budget");
+    const budgetUsd = takeArg(args, "--budget-usd");
+    const budgetMinutes = takeArg(args, "--budget-minutes");
+    if (test) patch.test = test;
+    if (setup) patch.setup = setup;
+    if (budget) patch.diff_budget = Number(budget);
+    if (budgetUsd || budgetMinutes) {
+      // Merge onto whatever budgets are already configured — writeDelegationConfig's
+      // own merge is shallow, so assigning patch.budgets outright would silently drop
+      // a previously-set field this call did not mention.
+      patch.budgets = {
+        ...(readDelegationConfig(project).budgets ?? {}),
+        ...(budgetUsd ? { usd: Number(budgetUsd) } : {}),
+        ...(budgetMinutes ? { minutes: Number(budgetMinutes) } : {}),
+      };
+    }
+    if (args.includes("--no-strict")) patch.strict_verify = false;
+    if (args.includes("--no-static-checks")) patch.static_checks = false;
+    const merged = writeDelegationConfig(project, patch);
+    console.log(JSON.stringify(merged, null, 2));
+    // Budgets specifically are NOT subject to the daemon-restart caveat below: every run
+    // is created through contract.ts's createRun, which reads configuredBudgets(project)
+    // — itself a plain readFileSync with no cache — at the moment the run is stamped, not
+    // at daemon startup. A run created through a daemon that has been up for hours still
+    // gets today's config.json. (What actually stranded a run on the old $2 default was a
+    // DIFFERENT bug — api.ts's createRun call never consulted config at all, restart or
+    // not — now fixed at the source, so there is nothing here left to warn about for a
+    // budgets-only change.)
+    //
+    // Other settings (test, diff-budget, strict/static-checks) have not been re-verified
+    // as part of this change, so the warning still names them honestly, only when a
+    // daemon for this project is actually running (readDaemonStatus + a real liveness
+    // check, never a blanket warning for a project with no daemon at all) and only when
+    // this call actually touched one of them.
+    const touchedNonBudgetSetting = Boolean(test || setup || budget || args.includes("--no-strict") || args.includes("--no-static-checks"));
+    if (touchedNonBudgetSetting) {
+      const daemonStatus = readDaemonStatus(project);
+      if (daemonStatus) {
+        let daemonAlive = false;
+        try {
+          process.kill(daemonStatus.pid, 0);
+          daemonAlive = true;
+        } catch {
+          daemonAlive = false;
+        }
+        if (daemonAlive) {
+          console.log(
+            `\nA kage daemon is running for this project (pid ${daemonStatus.pid}) — it may not pick up this change until it restarts: kage daemon stop --project ${project} && kage daemon start --project ${project}`,
+          );
+        }
+      }
+    }
+    return;
+  }
+
   if (command === "review") {
-    await review(projectArg(args));
+    const runId = firstPositional(args);
+    const project = projectArg(args);
+    // `kage review` with no run id keeps its original meaning: the pending-memory inbox.
+    if (!runId) {
+      await review(project);
+      return;
+    }
+    const task = readRun(project, runId);
+    const claim = readClaim(project, runId);
+    if (!claim) {
+      console.log(`${renderRunCard(task)}\nNo claim yet — this run is ${task.state}.`);
+      return;
+    }
+    console.log(renderClaimCard(claim, { budget: diffBudget(project), task }));
+    console.log(`\nDiff:  git -C ${runWorkspacePath(project, task)} diff --cached`);
+    console.log(`Take over:  kage open ${runId}`);
+    console.log(`Accept:  kage merge ${runId}   ·   Refuse:  kage reject ${runId} "<reason>"`);
     return;
   }
 

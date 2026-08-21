@@ -26,16 +26,16 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/retrieval-0%20deps-41ff8f" alt="zero-dependency retrieval">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/LongMemEval--S%20R@5-96%25-1f6feb" alt="retrieval R@5 96%">
+  <img src="https://img.shields.io/badge/LongMemEval--S%20R@10-98.7%25-1f6feb" alt="retrieval R@10 98.7%">
   <img src="https://img.shields.io/badge/stale%20served-0%25-1f6feb" alt="0% stale served">
   <img src="https://img.shields.io/badge/vs%20grep-18%25%20faster-1f6feb" alt="18% faster than grep">
   <img src="https://img.shields.io/badge/external%20DBs-0-1f6feb" alt="zero external databases">
-  <img src="https://img.shields.io/badge/tests-340%2B%20passing-1f6feb" alt="340+ tests passing">
+  <img src="https://img.shields.io/badge/tests-360%2B%20passing-1f6feb" alt="360+ tests passing">
 </p>
 
 <p>
@@ -171,7 +171,7 @@ code change.
 
 - **18 % plus rapide que grep à exactitude égale** sur de vraies tâches de navigation dans le code
   (suite N=3, même agent/modèle ; reproduisez avec `kage benchmark --project . --compare`).
-- **Récupération LongMemEval-S :** 96,17 % R@5 / 98,72 % R@10, zéro dépendance.
+- **Récupération LongMemEval-S :** 98,72 % R@10 / 99,79 % R@20, zéro dépendance.
 - **Exactitude de la mémoire face au changement :** 0 % de périmées servies (la mémoire dont le code
   a été supprimé ou modifié est retenue), contre 100 % pour les magasins qui capturent tout.
 - **Benchmark de confiance :** 100/100, couvrant le rejet des hallucinations, l'exclusion des

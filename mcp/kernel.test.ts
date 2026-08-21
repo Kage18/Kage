@@ -104,6 +104,7 @@ import {
   docsRecallSection,
   indexesDir,
   recordValueEvent,
+  RECALL_READ_TOKENS_CAP_PER_FILE,
   learnPersonal,
   personalConflictsDir,
   personalMemoryDir,
@@ -4057,6 +4058,96 @@ test("strict capture rejects all-missing citations, honors escape hatch, and sta
   assert.equal(permissive.ok, true);
 });
 
+test("strict capture rejects a partially hallucinated citation list per-path", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "real.ts"), "export const real = 1;\n", "utf8");
+
+  // One real + one hallucinated citation must reject, not pass with a warning:
+  // the write-time guarantee is per citation, not "at least one path exists".
+  const mixed = capture({
+    projectDir: project,
+    title: "Half-grounded note",
+    body: "The retry helper spans src/real.ts and src/ghost.ts.",
+    type: "decision",
+    paths: ["src/real.ts", "src/ghost.ts"],
+    strictCitations: true,
+  });
+  assert.equal(mixed.ok, false);
+  assert.match(mixed.errors[0], /1 of 2 referenced path\(s\) do not exist/);
+  assert.match(mixed.errors[0], /src\/ghost\.ts/);
+
+  const escaped = capture({
+    projectDir: project,
+    title: "Half-grounded note with escape hatch",
+    body: "The retry helper spans src/real.ts and src/ghost.ts (about to be created).",
+    type: "decision",
+    paths: ["src/real.ts", "src/ghost.ts"],
+    strictCitations: true,
+    allowMissingPaths: true,
+  });
+  assert.equal(escaped.ok, true);
+  assert.equal(escaped.warnings?.some((warning) => warning.includes("src/ghost.ts")), true);
+});
+
+test("capture warns when the memory names symbols found in no cited file", () => {
+  const project = tempProject();
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "auth.ts"), "export function rotateToken() { return 1; }\n", "utf8");
+
+  const phantom = capture({
+    projectDir: project,
+    title: "Auth rotation flow",
+    body: "rotateToken calls refreshSessionCache in src/auth.ts on every rotation.",
+    type: "decision",
+    paths: ["src/auth.ts"],
+    strictCitations: true,
+  });
+  assert.equal(phantom.ok, true);
+  assert.equal(phantom.warnings?.some((warning) => warning.includes("Named symbols not found") && warning.includes("refreshSessionCache")), true);
+  assert.equal(phantom.warnings?.some((warning) => warning.includes("rotateToken")), false);
+  assert.deepEqual(phantom.packet?.quality.unresolved_symbols, ["refreshSessionCache"]);
+
+  // Ordinary capitalized prose is not a symbol reference: only an INTERNAL capital
+  // (mergeRun, ClaimRecord) or snake_case counts, so a sentence starting with
+  // "Briefs" or "Verification" never produces a phantom-symbol warning.
+  const prose = capture({
+    projectDir: project,
+    title: "Rotation policy note",
+    body: "Briefs describe rotation. Verification happens hourly in src/auth.ts. IMPORTANT: NEVER skip it. Nothing else changed.",
+    type: "decision",
+    paths: ["src/auth.ts"],
+    strictCitations: true,
+  });
+  assert.equal(prose.ok, true);
+  assert.equal(prose.warnings?.some((warning) => warning.includes("Named symbols not found")), false);
+
+  // Real camelCase in the same file still resolves without a warning, so tightening
+  // the pattern did not blind the check.
+  writeFileSync(join(project, "src", "auth.ts"), "export function rotateToken() { return 1; }\nexport const sessionCache = new Map();\n", "utf8");
+  const real = capture({
+    projectDir: project,
+    title: "Session cache note",
+    body: "sessionCache backs rotateToken in src/auth.ts.",
+    type: "decision",
+    paths: ["src/auth.ts"],
+    strictCitations: true,
+  });
+  assert.equal(real.warnings?.some((warning) => warning.includes("Named symbols not found")), false);
+
+  const grounded = capture({
+    projectDir: project,
+    title: "Auth rotation grounded",
+    body: "rotateToken drives hourly rotation in src/auth.ts.",
+    type: "decision",
+    paths: ["src/auth.ts"],
+    strictCitations: true,
+  });
+  assert.equal(grounded.ok, true);
+  assert.equal(grounded.warnings?.some((warning) => warning.includes("Named symbols not found")), false);
+  assert.equal(grounded.packet?.quality.unresolved_symbols, undefined);
+});
+
 test("appending to a CHANGELOG does not mark a citing memory stale", () => {
   const project = tempProject();
   execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
@@ -4980,8 +5071,10 @@ test("recall receipt uses knowledge replay value when larger, floored at the rea
   assert.equal(summary.all_time.replay_tokens, expectedReplay);
   assert.equal(summary.all_time.tokens_saved, expectedReplay);
 
-  // Floor: a large cited source with a tiny discovery cost never reports less
-  // than the pre-discovery_tokens read-vs-source behavior.
+  // Floor: with a tiny discovery cost, the read-vs-source estimate carries the
+  // receipt — but honestly capped: each cited file contributes at most
+  // RECALL_READ_TOKENS_CAP_PER_FILE (a targeted re-read), so a ~90KB cited module
+  // no longer claims its full byte weight (~23K tokens) as savings.
   const floored = tempProject();
   mkdirSync(join(floored, "src"), { recursive: true });
   writeFileSync(join(floored, "src", "big.ts"), `// big module\n${"export const line = 1;\n".repeat(4000)}`, "utf8");
@@ -4989,9 +5082,10 @@ test("recall receipt uses knowledge replay value when larger, floored at the rea
   const flooredResult = recall(floored, "big module line constants", 5);
   assert.equal(flooredResult.results.some((entry) => entry.packet.title === "Big module invariant"), true);
   assert.ok(flooredResult.value_receipt);
-  // discovery (10) < context cost, so replay is 0 and read-vs-source carries the receipt.
+  // discovery (10) < context cost, so replay is 0 and the capped read-vs-source estimate carries the receipt.
   assert.equal(flooredResult.value_receipt.replay_tokens, undefined);
-  assert.equal(flooredResult.value_receipt.tokens_saved > 10_000, true);
+  assert.equal(flooredResult.value_receipt.tokens_saved > 0, true);
+  assert.equal(flooredResult.value_receipt.tokens_saved <= RECALL_READ_TOKENS_CAP_PER_FILE, true);
 });
 
 test("file-context returns only verified packets citing the file, capped at three, empty otherwise", () => {

@@ -1,0 +1,64 @@
+---
+type: "Negative Result"
+title: "Rejected approach: The manager's replies are unreadable. Replace blind redaction with veri"
+description: "A delegated attempt at \"The manager's replies are unreadable. Replace blind redaction with verification. WHAT A USER SEES TODAY. I asked the manager for a repo status in the Room. Its answer was substantively excellent —"
+tags: ["delegated-run", "rejected", "kage-run:the-manager-s-replies-are-unreadable-rep-260819-a68c"]
+timestamp: "2026-08-19T10:24:47.055Z"
+x-kage-id: "repo:https-github-com-kage-core-kage:negative_result:rejected-approach-the-managers-replies-are-unreadable-replace-blind-redaction-wi"
+x-kage-type: "negative_result"
+x-kage-status: "approved"
+x-kage-scope: "repo"
+x-kage-visibility: "team"
+x-kage-confidence: 0.7
+x-kage-verified: "verified"
+---
+
+# Rejected approach: The manager's replies are unreadable. Replace blind redaction with veri
+
+> A delegated attempt at "The manager's replies are unreadable. Replace blind redaction with verification. WHAT A USER …
+
+A delegated attempt at "The manager's replies are unreadable. Replace blind redaction with verification.
+
+WHAT A USER SEES TODAY. I asked the manager for a repo status in the Room. Its answer was substantively excellent — it knew the state, volunteered work that happened outside its own dispatches, and owned its own weak track record unprompted. It was also barely readable, because guardManagerProse had shot every number in it:
+
+  "a run got correctly halted at [cost on the card] against a hardcoded [cost on the card] cap"
+  "[counts on the card] claims fully [verdict on the card] (bugfix [counts on the card], feature [counts on the card], chore [counts on the card])"
+  "operator hand-[verdict on the card] 742+12 tests"
+
+That last one is the tell: the guard rewrote the word "verified" INSIDE the phrase "hand-verified", producing "hand-[verdict on the card]". This is the product's most human-facing surface and it reads like a broken template.
+
+WHY IT IS LIKE THIS, and what is right about it: guardManagerProse (mcp/delegation/manager-client.ts, around line 188) sweeps CARD_NUMBER_PATTERNS over the manager's text and replaces every match — VERIFIED/UNVERIFIED, n/m, "N checks", "N-line", "N files changed", "$N". The intent is correct and must be preserved: the manager must not be able to invent or misstate a verification figure, because the claim card is the source of truth and a confidently wrong number in prose is exactly the overclaim this product exists to prevent.
+
+THE DESIGN FLAW: the guard has no access to the truth. It is a text censor, not a checker. So it cannot distinguish a number the manager got RIGHT from one it got WRONG — it erases both. Two consequences: correct reporting is punished exactly as hard as fabrication, and the user learns nothing from the redaction because it carries no information about whether the manager was actually wrong. It also fires on numbers that have nothing to do with any card — a budget cap, a test count, a dollar figure from a ledger — where redaction is pure noise.
+
+WHAT TO BUILD — verify instead of redact:
+1. Give the guard the facts it is protecting. At the call sites that have them (parseManagerStream's caller, and the room paths that already know which runs are in play), pass the ground truth available — the run's actual verdict string, its n/n check counts, its diff size, its recorded spend. Read how the card is rendered and reuse the same source; do not invent a second derivation of these numbers.
+2. Then, for each matched figure: if the manager's number MATCHES the truth, LEAVE IT ALONE — accuracy must not be punished. If it MISMATCHES, replace it with the correct value and record the correction (keep the existing `redactions` channel, but it now means "corrections", so rename it and say what was wrong). If there is no fact to check it against, leave the text alone — silently erasing an unrelated number is noise, not safety.
+3. Fix the word-boundary bug regardless: the verdict pattern must not fire inside a larger word. "hand-verified" and "unverified claims" must survive intact. Add a test with those exact strings.
+4. Drop or tighten the patterns that mostly fire on legitimate prose. A "$N" that is a budget or a ledger figure, and "N files changed" in a narrative sentence, are not card restatements. Keep the guard tight around what is genuinely a claim-verdict restatement.
+5. If, for a given call site, ground truth genuinely is not available, fall back to today's redaction for verdicts and n/n counts ONLY — not for dollars and sizes. State in your claim which call sites got facts and which fell back.
+
+ACCEPTANCE, and state each in your claim: the sentence "operator hand-verified 742+12 tests" survives unchanged; a manager sentence quoting a run's true VERIFIED 5/5 survives unchanged; a manager sentence claiming VERIFIED 5/5 when the card says NOT VERIFIED 3/5 is corrected to the true figure and the correction is recorded; a dollar figure that matches the run's recorded spend survives.
+
+TESTS — new file mcp/manager-prose.test.ts (repo rule: new behaviour gets its own file; mcp/delegation.test.ts is off-limits). Cover all four acceptance cases above plus the word-boundary regression. Name in your claim which test fails if the change is reverted.
+
+CONSTRAINTS: CommonJS — no import.meta (TS1470), no top-level await. Do not touch mcp/kernel.ts — another run is editing it.
+VERIFY: npm run test --prefix mcp (754 green before your change — use the "npm run test" form) and npm run build --prefix mcp with no "error TS". Run them for real and fill in the claim fence." was rejected.
+
+Reason: Halted at 6.32 USD against its 6.00 budget. Work complete and correct; operator verified by hand (751+12 green, all nine acceptance cases pass) and merged outside the claim gate since the halt preceded any claim. Not an agent failure.
+
+Claimed: (no claim)
+Branch kept for inspection: kage/the-manager-s-replies-are-unreadable-rep-260819-a68c
+
+# Citations
+
+[1] explicit_capture (2026-08-19T10:24:47.055Z)
+
+## Kage state
+
+Machine state for lossless round-trip; OKF consumers can ignore it.
+
+```json kage-state
+{"schema_version":2,"id":"repo:https-github-com-kage-core-kage:negative_result:rejected-approach-the-managers-replies-are-unreadable-replace-blind-redaction-wi","title":"Rejected approach: The manager's replies are unreadable. Replace blind redaction with veri","summary":"A delegated attempt at \"The manager's replies are unreadable. Replace blind redaction with verification. WHAT A USER SEES TODAY. I asked the manager for a repo status in the Room. Its answer was substantively excellent —","body":"A delegated attempt at \"The manager's replies are unreadable. Replace blind redaction with verification.\n\nWHAT A USER SEES TODAY. I asked the manager for a repo status in the Room. Its answer was substantively excellent — it knew the state, volunteered work that happened outside its own dispatches, and owned its own weak track record unprompted. It was also barely readable, because guardManagerProse had shot every number in it:\n\n  \"a run got correctly halted at [cost on the card] against a hardcoded [cost on the card] cap\"\n  \"[counts on the card] claims fully [verdict on the card] (bugfix [counts on the card], feature [counts on the card], chore [counts on the card])\"\n  \"operator hand-[verdict on the card] 742+12 tests\"\n\nThat last one is the tell: the guard rewrote the word \"verified\" INSIDE the phrase \"hand-verified\", producing \"hand-[verdict on the card]\". This is the product's most human-facing surface and it reads like a broken template.\n\nWHY IT IS LIKE THIS, and what is right about it: guardManagerProse (mcp/delegation/manager-client.ts, around line 188) sweeps CARD_NUMBER_PATTERNS over the manager's text and replaces every match — VERIFIED/UNVERIFIED, n/m, \"N checks\", \"N-line\", \"N files changed\", \"$N\". The intent is correct and must be preserved: the manager must not be able to invent or misstate a verification figure, because the claim card is the source of truth and a confidently wrong number in prose is exactly the overclaim this product exists to prevent.\n\nTHE DESIGN FLAW: the guard has no access to the truth. It is a text censor, not a checker. So it cannot distinguish a number the manager got RIGHT from one it got WRONG — it erases both. Two consequences: correct reporting is punished exactly as hard as fabrication, and the user learns nothing from the redaction because it carries no information about whether the manager was actually wrong. It also fires on numbers that have nothing to do with any card — a budget cap, a test count, a dollar figure from a ledger — where redaction is pure noise.\n\nWHAT TO BUILD — verify instead of redact:\n1. Give the guard the facts it is protecting. At the call sites that have them (parseManagerStream's caller, and the room paths that already know which runs are in play), pass the ground truth available — the run's actual verdict string, its n/n check counts, its diff size, its recorded spend. Read how the card is rendered and reuse the same source; do not invent a second derivation of these numbers.\n2. Then, for each matched figure: if the manager's number MATCHES the truth, LEAVE IT ALONE — accuracy must not be punished. If it MISMATCHES, replace it with the correct value and record the correction (keep the existing `redactions` channel, but it now means \"corrections\", so rename it and say what was wrong). If there is no fact to check it against, leave the text alone — silently erasing an unrelated number is noise, not safety.\n3. Fix the word-boundary bug regardless: the verdict pattern must not fire inside a larger word. \"hand-verified\" and \"unverified claims\" must survive intact. Add a test with those exact strings.\n4. Drop or tighten the patterns that mostly fire on legitimate prose. A \"$N\" that is a budget or a ledger figure, and \"N files changed\" in a narrative sentence, are not card restatements. Keep the guard tight around what is genuinely a claim-verdict restatement.\n5. If, for a given call site, ground truth genuinely is not available, fall back to today's redaction for verdicts and n/n counts ONLY — not for dollars and sizes. State in your claim which call sites got facts and which fell back.\n\nACCEPTANCE, and state each in your claim: the sentence \"operator hand-verified 742+12 tests\" survives unchanged; a manager sentence quoting a run's true VERIFIED 5/5 survives unchanged; a manager sentence claiming VERIFIED 5/5 when the card says NOT VERIFIED 3/5 is corrected to the true figure and the correction is recorded; a dollar figure that matches the run's recorded spend survives.\n\nTESTS — new file mcp/manager-prose.test.ts (repo rule: new behaviour gets its own file; mcp/delegation.test.ts is off-limits). Cover all four acceptance cases above plus the word-boundary regression. Name in your claim which test fails if the change is reverted.\n\nCONSTRAINTS: CommonJS — no import.meta (TS1470), no top-level await. Do not touch mcp/kernel.ts — another run is editing it.\nVERIFY: npm run test --prefix mcp (754 green before your change — use the \"npm run test\" form) and npm run build --prefix mcp with no \"error TS\". Run them for real and fill in the claim fence.\" was rejected.\n\nReason: Halted at 6.32 USD against its 6.00 budget. Work complete and correct; operator verified by hand (751+12 green, all nine acceptance cases pass) and merged outside the claim gate since the halt preceded any claim. Not an agent failure.\n\nClaimed: (no claim)\nBranch kept for inspection: kage/the-manager-s-replies-are-unreadable-rep-260819-a68c","type":"negative_result","scope":"repo","visibility":"team","sensitivity":"internal","status":"approved","confidence":0.7,"tags":["delegated-run","rejected","kage-run:the-manager-s-replies-are-unreadable-rep-260819-a68c"],"paths":[],"stack":[],"source_refs":[{"kind":"explicit_capture","captured_at":"2026-08-19T10:24:47.055Z"}],"context":{"fact":"A delegated attempt at \"The manager's replies are unreadable. Replace blind redaction with verification."},"freshness":{"ttl_days":365,"last_verified_at":"2026-08-19T10:24:47.055Z","path_fingerprints":[],"path_fingerprint_policy":"source_hash_staleness","verification":"repo_local_agent_capture"},"edges":[],"quality":{"reviewer":"repo-local-agent","votes_up":0,"votes_down":0,"uses_30d":0,"reports_stale":0,"review_boundary":"git_or_pr","promotion_requires_review":true,"discovery_tokens":2000,"discovery_tokens_estimated":true,"score":74,"reasons":["high-value memory type","has source evidence","tagged","actionable rationale or verification"],"risks":["not grounded to paths"],"duplicate_candidates":[],"estimated_tokens_saved":1239},"created_at":"2026-08-19T10:24:47.055Z","updated_at":"2026-08-20T20:13:09.754Z","author_branch":"release-prep"}
+```
+

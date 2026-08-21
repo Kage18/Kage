@@ -1,8 +1,8 @@
 # Contributing to Kage
 
 Thanks for your interest in Kage! Kage is git-native, verified memory for coding
-agents — zero dependencies, no account, no cloud, everything stays in your repo.
-We'd love your help making it better.
+agents — a tiny dependency footprint, no account, no cloud, everything stays in
+your repo. We'd love your help making it better.
 
 This guide is short and practical. If anything here is unclear or out of date,
 that itself is a great first contribution — open an issue or PR.
@@ -26,8 +26,11 @@ npm test --prefix mcp
 Requirements:
 
 - **Node.js 18+**
-- That's it. Kage has **zero runtime dependencies** and we intend to keep it
-  that way (see [The zero-dependency rule](#the-zero-dependency-rule)).
+- That's it. Kage has **four runtime dependencies** (the MCP SDK, TypeScript for
+  AST parsing, and web-tree-sitter + its grammar pack) and we intend to keep the
+  list that short (see [The minimal-dependency rule](#the-minimal-dependency-rule)).
+  The retrieval path itself uses none of them — no vector DB, no embeddings, no
+  network.
 
 ## Project structure
 
@@ -43,7 +46,7 @@ Requirements:
 
 Inside `.agent_memory/`:
 
-- `packets/` — durable JSON memory packets (committed to git).
+- `packets/` — durable memory packets as OKF Markdown concept files (committed to git).
 - `graph/`, `code_graph/`, `structural/`, `indexes/` — derived artifacts,
   rebuildable any time with `kage refresh`.
 - `reports/` — generated reports.
@@ -62,11 +65,14 @@ npm run build     # build only
 
 Please make sure `npm test` passes before opening a PR.
 
-## The zero-dependency rule
+## The minimal-dependency rule
 
-Zero runtime dependencies is a core project value, not an accident. It keeps
-Kage fast to install, easy to audit, and safe to run anywhere — no supply chain
-to worry about, no surprise network calls.
+A minimal dependency footprint is a core project value, not an accident. It keeps
+Kage fast to install, easy to audit, and safe to run anywhere — a small supply
+chain, no surprise network calls. Today the runtime list is exactly four: the MCP
+SDK (protocol), TypeScript (TS/JS AST extraction), and web-tree-sitter +
+tree-sitter-wasms (other languages' parsing). Retrieval — BM25 + sparse lexical
+scoring — uses the standard library only.
 
 **PRs that add a runtime dependency will be rejected.** If you think you need
 one, open an issue first and let's talk through it — there's almost always a way

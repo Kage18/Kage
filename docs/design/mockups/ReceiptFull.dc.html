@@ -1,0 +1,56 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;600;700&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.stage{width:760px;height:828px;background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:34px 0;overflow:hidden;border-radius:var(--r-control)}
+.paper{background:var(--code-bg);color:var(--code-text);border-radius:2px;width:560px;padding:26px 30px 22px;box-shadow:var(--shadow-md);-webkit-mask:radial-gradient(circle 5px at 8px 0,transparent 98%,black) top left/16px 51% repeat-x,radial-gradient(circle 5px at 8px 16px,transparent 98%,black) bottom left/16px 50% repeat-x;mask:radial-gradient(circle 5px at 8px 0,transparent 98%,black) top left/16px 51% repeat-x,radial-gradient(circle 5px at 8px 16px,transparent 98%,black) bottom left/16px 50% repeat-x;display:flex;flex-direction:column}
+.stamp{display:inline-flex;align-items:baseline;gap:10px;padding:9px 20px;border:2.5px double var(--green);border-radius:3px;color:var(--green);font-family:var(--serif);font-weight:700;font-size:19px;letter-spacing:.12em;transform:rotate(-1.5deg);text-transform:uppercase;align-self:center}
+.vsub{font-size:10px;font-weight:700;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase;border:1px solid color-mix(in srgb,var(--code-text) 35%,transparent);border-radius:20px;padding:3px 12px;align-self:center;margin:8px 0 14px}
+.claim{font-size:13.5px;line-height:1.6;text-align:center;margin:0 auto 14px;max-width:46ch;border-top:1px dashed color-mix(in srgb,var(--code-text) 25%,transparent);padding-top:14px}
+.ck{display:grid;grid-template-columns:18px 110px 66px 1fr;gap:9px;align-items:baseline;padding:5px 0;font-size:12px;font-family:var(--mono)}
+.ck .m{color:var(--green);font-weight:700;text-align:center}
+.ck .reg{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--green);font-weight:700}
+.ck .reg.insp{color:color-mix(in srgb,var(--code-text) 45%,transparent)}
+.ck .d{color:color-mix(in srgb,var(--code-text) 60%,transparent);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.unsure{border:1px dashed color-mix(in srgb,var(--amber) 45%,transparent);border-radius:3px;padding:9px 12px;margin:10px 0 4px;font-family:var(--mono);font-size:11px;line-height:1.55;color:var(--amber)}
+.rc{display:flex;gap:8px;font-family:var(--mono);font-size:12px;align-items:baseline}
+.rc .k{color:color-mix(in srgb,var(--code-text) 65%,transparent);text-transform:uppercase;letter-spacing:.08em;font-size:10px}
+.rc .dots{flex:1;border-bottom:1px dotted color-mix(in srgb,var(--code-text) 30%,transparent);transform:translateY(-3px)}
+.tot{border-top:1px dashed color-mix(in srgb,var(--code-text) 25%,transparent);margin-top:10px;padding-top:12px;display:flex;flex-direction:column;gap:6px}
+.rev{font-family:var(--mono);font-size:9.5px;color:color-mix(in srgb,var(--code-text) 45%,transparent);text-align:center;margin-top:12px;letter-spacing:.08em}
+</style></helmet>
+<div class="stage">
+  <div class="paper">
+    <div class="stamp">Verified <span style="font-family:var(--mono);font-size:13px;letter-spacing:0">5/5</span></div>
+    <div class="vsub">Independently checked by Kage — not the agent's self-report</div>
+    <div class="claim">mergeRun refuses a zero-commit feature branch, and the citation checker splits slash-joined enumerations — both guard classes closed with regression tests.</div>
+    <div style="border-top:1px dashed color-mix(in srgb,var(--code-text) 25%,transparent);padding-top:10px">
+      <div class="ck"><span class="m">✓</span><span>tests</span><span class="reg">ran</span><span class="d">npm run test --prefix mcp → exit 0 · 1098 pass</span></div>
+      <div class="ck"><span class="m">✓</span><span>static-typecheck</span><span class="reg">ran</span><span class="d">npx tsc --noEmit → exit 0</span></div>
+      <div class="ck"><span class="m">✓</span><span>diff-size</span><span class="reg insp">inspected</span><span class="d">289 lines, budget 1600</span></div>
+      <div class="ck"><span class="m">✓</span><span>citations</span><span class="reg insp">inspected</span><span class="d">every formally cited path exists</span></div>
+      <div class="ck"><span class="m">✓</span><span>reachability</span><span class="reg insp">inspected</span><span class="d">no unreachable exports introduced</span></div>
+    </div>
+    <div class="unsure">⚠ unsure — the agent flagged: the empty-diff refusal message wording for adopted runs deserves an owner read.</div>
+    <div class="tot">
+      <div class="rc"><span class="k">touched</span><span class="dots"></span><span>3 files · 289 lines</span></div>
+      <div class="rc"><span class="k">cost</span><span class="dots"></span><span>$4.20 · 44 min working</span></div>
+      <div class="rc"><span class="k">memory</span><span class="dots"></span><span>5 learnings ratified on merge</span></div>
+    </div>
+    <div class="rev">CHECKS RE-RUN 2026-08-21 09:14 · A STALE PASS IS NEVER SHOWN AS FRESH</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

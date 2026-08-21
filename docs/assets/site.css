@@ -28,6 +28,22 @@
   --warn: #d9a93f;
   --danger: #e07a8c;
 
+  /* Case-file red — a courtroom-stamp crimson for refusal/failure marks.
+     Distinct from --danger (a softer in-UI error tone): this is reserved
+     for the "NOT VERIFIED" stamp and its kin. */
+  --red: #e05548;
+
+  /* A darker inset panel, one step below --bg, for full-bleed section bands
+     (the claim wall, the ledger backdrop). */
+  --inset: #101312;
+
+  /* Physical paper — case-file evidence objects (memo, receipt, packet)
+     stay literally paper-colored in both schemes, like the code blocks
+     stay literally dark. Not a second UI palette: only these objects use it. */
+  --physical-paper: #e8e3d5;
+  --physical-ink: #22261f;
+  --physical-ink-2: #5c6153;
+
   /* Code — terminals stay dark in both schemes, like a printed receipt. */
   --code-bg: #0e1110;
   --code-text: #cfe0d4;
@@ -66,6 +82,9 @@ body {
   color: var(--ink);
   font: 400 14px/1.55 var(--sans);
   letter-spacing: 0;
+  /* Safety net for full-bleed/rotated scene artifacts on narrow viewports:
+     wide content must scroll in its own container, never the page. */
+  overflow-x: hidden;
 }
 
 a { color: inherit; text-decoration: none; }

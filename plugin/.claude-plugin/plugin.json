@@ -1,7 +1,7 @@
 {
   "name": "kage",
-  "version": "2.5.5",
-  "description": "A framework for collaborative agent memory. Recall git-native, team-shared repo knowledge before acting, capture durable learnings as reviewable files in your repo, and get warned when your diff invalidates a memory. Every packet is checked against your code; deleted and stale citations are caught.",
+  "version": "3.2.0",
+  "description": "Kage manages your memory and agents. It briefs and runs agents in isolated git worktrees for a single run or a multi-wave goal, re-runs the checks itself instead of trusting the agent's report, and remembers what it learns so each brief is smarter than the last.",
   "author": {
     "name": "Kage",
     "url": "https://github.com/kage-core/Kage"

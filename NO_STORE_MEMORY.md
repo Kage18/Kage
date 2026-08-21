@@ -1,4 +1,4 @@
-<!-- No-store agent-memory design + red-team. 2026-06-28. Companion to AGENT_MEMORY_RESEARCH.md and PIVOT.md. -->
+<!-- No-store agent-memory design + red-team. 2026-06-28. Companion to docs/design/AGENT_MEMORY_RESEARCH.md and PIVOT.md. -->
 > Status: RESEARCH (exploratory). Verdict: hybrid (re-derivation-first + store-as-enforcement + sub-100 negative-knowledge store).
 
 # Memory Without a Store: Re-Derivation + Stigmergy as the Substrate for Coding Agents

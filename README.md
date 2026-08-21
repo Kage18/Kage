@@ -3,21 +3,33 @@
 <img src="docs/assets/kage-banner.svg" alt="Kage" width="150%">
 
 
-### Verified memory for coding agents — a Google OKF bundle, kept true to your code
+### Kage manages your memory and agents
 
-<img src="docs/assets/kage-viewer-walkthrough.gif" alt="kage viewer: a team's captured decisions, runbooks, and bug fixes mapped to the code they're grounded in, with trust and savings — a live walkthrough" width="760">
+State an intent. Kage's orchestrator briefs a coding agent from your repo's own memory, runs it
+in an isolated git worktree — a single run or a multi-wave goal — and **re-runs the checks
+itself** rather than trusting the agent's report:
 
-<sub>`kage viewer`: your team's decisions, runbooks, and bug fixes (purple), kept in the repo and linked to the code they are about (blue).</sub>
+```
+┌ VERIFIED 3/3 — checks run by Kage, not the agent · build-a-stale-memory-triage-surface-do-n-260818-ec2c
+│ "the stale-memory triage surface is built and wired into the review flow"
+│ ✓ tests       ran       npm test --prefix mcp → exit 0   evidence/tests.log
+│ ✓ diff-size   inspected at most 800 changed lines   evidence/diff-size.log
+│ ✓ citations   inspected every formally cited path exists (directly, or as a unique suffix) in the worktree   evidence/citations.log
+│ · touched     4 file(s), 212 line(s)
+└────────────────────────────────────────────────────────────────
+```
 
-The decisions behind your codebase, the runbook for a tricky deploy, the root cause of a
-gnarly bug: this knowledge lives in people's heads and scrolls past in chat, then gets lost.
-**Kage** captures it as your coding agents work, keeps it as a
+<sub>A real receipt from this repo's own run history. Every row is a command Kage ran or a fact
+it inspected — never a claim the agent made about itself. `kage merge` only lands the code once
+the claim holds, and ratifies what the agent learned, so the next brief, yours or a teammate's,
+starts smarter.</sub>
+
+That memory is the decisions behind your codebase, the runbook for a tricky deploy, the root
+cause of a gnarly bug — captured as your agents work and checked against the actual code, so
+what gets reused stays true. It's kept as plain Markdown files in your repo, conformant to the
 [Google Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-bundle in your repo — plain Markdown concept files any OKF consumer can read — and shares it
-with your whole team through git. The next session, yours or a teammate's, starts already
-knowing it. Every memory is also checked against the actual code, so what gets shared stays
-true. **OKF standardizes the store; Kage is the verification layer Google left out.** No
-account, no database, no API key.
+so there's no lock-in, and shared with your whole team through git. No account, no database,
+no API key.
 
 ```bash
 npx -y @kage-core/kage-graph-mcp install
@@ -27,12 +39,12 @@ npx -y @kage-core/kage-graph-mcp install
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/v/@kage-core/kage-graph-mcp?color=41ff8f&label=npm" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@kage-core/kage-graph-mcp"><img src="https://img.shields.io/npm/dm/@kage-core/kage-graph-mcp?color=41ff8f" alt="downloads"></a>
   <img src="https://img.shields.io/npm/l/@kage-core/kage-graph-mcp?color=41ff8f" alt="license">
-  <img src="https://img.shields.io/badge/deps-0-41ff8f" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/retrieval-0%20deps-41ff8f" alt="zero-dependency retrieval">
   <img src="https://img.shields.io/badge/account-not%20required-41ff8f" alt="no account">
   <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf"><img src="https://img.shields.io/badge/built%20on-Open%20Knowledge%20Format-41ff8f" alt="Built on Google Open Knowledge Format"></a>
 </p>
 
-<img src="docs/kage-stats.svg" alt="Kage in numbers: 96% R@5 recall, 0% stale served, 18% faster than grep, 0 dependencies, 340+ tests passing, 15 agents supported" width="820">
+<img src="docs/kage-stats.svg" alt="Kage in numbers: 98.7% R@10 recall, 0% stale served, 18% faster than grep, zero-dependency retrieval, 360+ tests passing, 15 agents supported" width="820">
 
 <p>
   <a href="https://kage-core.com/">Website</a> ·
@@ -85,9 +97,58 @@ kage setup verify-agent --agent claude-code --project .
 ```
 </details>
 
+## Delegate work (the orchestrator)
+
+```bash
+kage room --project .                      # talk to Kage; it briefs and hires agents for you
+kage dispatch "<intent>" --agent claude    # one delegated run, briefed from repo memory
+kage runs --project .                      # what every run is doing right now
+kage review --project .                    # read a finished run's claim and diff
+kage merge <run-id> --project .            # land the code and ratify what it learned
+```
+
+Every run works in its own git worktree. The checks that decide the verdict on the receipt
+above — tests, diff size, citations — are commands **Kage** runs itself, never the agent's
+self-report.
+
+- **The app.** `kage app --project <dir>` starts (or reuses) the local daemon and opens the
+  same room, runs board, and memory view in a UI. From a checkout, `npm start --prefix shell`
+  runs it as a native window — a thin Electron shell with no HTML of its own, it just loads the
+  daemon's own page — and `npm run dmg --prefix shell` builds a macOS `.dmg` (arm64 only;
+  Windows/Linux packaging isn't built yet).
+- **From your phone.** The daemon can also bind to your machine's LAN address, gated by a
+  pairing secret required on every request, reads included. Today that means setting
+  `"lan": true` in `.agent_memory/config.json` by hand — there's no `--lan` flag or app toggle
+  yet.
+- **Add a project without a terminal.** `kage projects add <dir> --agent claude` registers
+  another repo the same way the app's "+" button does, then `kage app --project <dir>` opens it.
+
+```bash
+kage app --project <dir>
+kage projects add <dir> --agent claude
+```
+
+## Desktop app
+
+A thin native shell (macOS, arm64 only) over the same daemon the CLI runs — dock presence,
+a global hotkey, native notifications. Download the latest `.dmg` from
+[GitHub releases](https://github.com/kage-core/Kage/releases) (look for a
+`Kage-<version>.dmg` asset).
+
+Unsigned builds show macOS's "unidentified developer" prompt on first launch —
+right-click the app in Finder and choose **Open** once. Once installed, it checks for
+updates on launch and every 4 hours and installs on restart; ad-hoc (unsigned) builds
+can't self-install and notify you instead, linking back to the releases page.
+
+Prefer the CLI? The one-line install works everywhere the app doesn't need to:
+
+```bash
+npx -y @kage-core/kage-graph-mcp install
+```
+
 ## What is Kage
 
-Kage is a memory layer for coding agents. As your agent works, it captures what it learns
+Kage is an orchestrator for coding agents, built on a memory layer. As your agent works, it captures what it learns
 (decisions, bug fixes, conventions, how the code fits together) as
 [**Open Knowledge Format (OKF)**](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 concept files committed in your repo under `.agent_memory/`. The next session (yours or a
@@ -140,6 +201,14 @@ Watch it happen in the **local dashboard** (`kage viewer`): packets, the memory�
 trust gates, and live events stream in as the agent works. Wrap anything in
 `<private>…</private>` and it's never stored.
 
+<p align="center">
+<img src="docs/assets/kage-viewer-walkthrough.gif" alt="kage viewer: a team's captured decisions, runbooks, and bug fixes mapped to the code they're grounded in, with trust and savings — a live walkthrough" width="760">
+</p>
+
+<p align="center"><sub>`kage viewer`: the memory engine underneath the orchestrator above — your
+team's decisions, runbooks, and bug fixes (purple), kept in the repo and linked to the code they
+are about (blue).</sub></p>
+
 ## Why Kage
 
 Most memory tools ([claude-mem](https://github.com/thedotmack/claude-mem),
@@ -181,7 +250,10 @@ repo and verifies it, so it stays your team's and stays true as the code changes
 
 - **18% faster than grep at equal correctness** on real code-navigation tasks (N=3 suite,
   same agent/model; reproduce with `kage benchmark --project . --compare`).
-- **LongMemEval-S retrieval:** 96.17% R@5 / 98.72% R@10, zero dependencies.
+- **LongMemEval-S retrieval:** 98.72% R@10 / 99.79% R@20 / 0.909 MRR — ahead of plain BM25
+  at every depth except R@5, where BM25 edges it (96.60% vs 96.17%; full table in
+  [benchmarks/LONGMEMEVAL.md](benchmarks/LONGMEMEVAL.md)). The retrieval path itself is
+  dependency-free: BM25 + sparse lexical scoring, no embeddings, no network.
 - **Memory Correctness Under Change:** 0% stale-served (memory whose code was deleted or
   changed is withheld), vs 100% for capture-everything stores.
 - **Trust benchmark:** 100/100, covering hallucination rejection, stale exclusion, and live
@@ -201,10 +273,11 @@ kage okf migrate --project .   # render memory as a Google OKF bundle
 ```
 
 Full CLI and MCP reference: [docs](https://kage-core.com/guide.html).
+Delegating work to coding agents (dispatch → verified claim → merge): [docs/DELEGATION.md](docs/DELEGATION.md).
 
 ## Storage
 
-Everything lives in `.agent_memory/`: `packets/` is durable repo memory (git-tracked JSON);
+Everything lives in `.agent_memory/`: `packets/` is durable repo memory (git-tracked OKF Markdown);
 `graph/`, `code_graph/`, `structural/`, and `indexes/` are rebuildable with `kage refresh`;
 `reports/` holds the value ledger and health reports. Capture scans for secrets and PII
 before writing.
@@ -228,8 +301,8 @@ npm run build
 
 ## Contributing & community
 
-Kage is built in the open and we'd love your help. Zero runtime dependencies, no
-account, no cloud — it's a friendly codebase to jump into.
+Kage is built in the open and we'd love your help. Four runtime dependencies (the
+retrieval core uses none), no account, no cloud — it's a friendly codebase to jump into.
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup, project layout, conventions.
 - **[ROADMAP.md](ROADMAP.md)** — where Kage is headed, and where to plug in.

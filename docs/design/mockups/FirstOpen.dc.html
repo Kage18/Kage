@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.page{width:1280px;height:828px;background:var(--bg);display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-control)}
+.top{height:46px;background:var(--chrome);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;padding:0 16px}
+.appname{font-family:var(--serif);font-weight:700;font-size:16px}
+.mid{flex:1;display:flex;align-items:center;justify-content:center}
+.card{width:560px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-hero);padding:36px 40px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;gap:18px}
+h1{font-family:var(--serif);font-weight:700;font-size:26px;margin:0;line-height:1.25;text-wrap:balance}
+p{margin:0;font-size:13.5px;color:var(--text2);line-height:1.6}
+.start{font-family:var(--mono);font-size:13px;padding:11px 22px;border-radius:var(--r-panel);background:var(--green);color:#0c130f;font-weight:700;width:fit-content;box-shadow:var(--glow-green)}
+.or{font-family:var(--mono);font-size:10.5px;color:var(--text3)}
+.teach{display:flex;flex-direction:column;gap:8px;border-top:1px dashed var(--line);padding-top:16px}
+.t{display:flex;gap:10px;font-size:12.5px;color:var(--text2);align-items:baseline}
+.t .k{font-family:var(--mono);font-size:10px;color:var(--green);width:22px}
+</style></helmet>
+<div class="page">
+  <div class="top"><svg width="20" height="14" viewBox="0 0 24 16" fill="none" stroke="#43c98a" stroke-width="1.6"><path d="M1 8c3.5-4.5 7-6.8 11-6.8S19.5 3.5 23 8c-3.5 4.5-7 6.8-11 6.8S4.5 12.5 1 8Z"></path><circle cx="12" cy="8" r="3"></circle></svg><div class="appname">Kage</div></div>
+  <div class="mid"><div class="card">
+    <h1>No orchestrator is running for this project.</h1>
+    <p>The orchestrator is a real agent session with Kage's tools — it plans, hires workers into isolated worktrees, and reports with receipts. Start it, then just say what you want done.</p>
+    <div class="start">Start the orchestrator</div>
+    <div class="teach">
+      <div class="t"><span class="k">⏎</span>ask Kage anything about this repo</div>
+      <div class="t"><span class="k">⌘⏎</span>dispatch a single run directly — no orchestrator needed</div>
+      <div class="t"><span class="k">⌥⏎</span>orchestrate a multi-run goal with approval gates</div>
+    </div>
+    <div class="or">First time here? The board fills as runs are hired — nothing is faked meanwhile.</div>
+  </div></div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

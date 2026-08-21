@@ -1,5 +1,165 @@
 # Changelog
 
+## v3.2.0 — Kage runs your agents, watches them work, and remembers what they learned
+
+Kage was a memory tool with a dispatch command. It is now an orchestrator with a live
+app around it: you hand it an intent, it compiles a brief from repo memory, hires an
+agent into its own worktree, and re-checks the agent's own claim itself before you
+ever read a diff. Merging doesn't just land code — it ratifies what the agent learned,
+so the next brief starts smarter. Everything below shipped on top of that loop.
+
+### Goals — hand over work, not tasks
+
+- **A goal now actually runs.** Describe something larger than one change and Kage
+  plans it as waves of parallel runs. The goal moves from planning to executing to
+  done on its own, driven by how its runs actually land — not by anyone asserting it.
+- **`recommend` or `merge`.** A goal set to `recommend` leaves every finished run for
+  you. Set it to `merge` and verified runs land themselves — but only runs where
+  something was genuinely executed, never a run that merely passed inspection.
+- **Auto-merge is gated on track record.** A run type with too few completed runs, or
+  a poor record, falls back to recommending and says why in one line.
+- **Overlapping waves are refused.** Two runs in the same wave that would touch the
+  same files are stopped before dispatch, naming the specs and the paths that collide.
+- **The manager can run the plan.** It can open a goal, ask where the work stands, and
+  close one — and it is told when a wave finishes and what the next one is.
+
+### A room to work in — sessions, the board, and taking over
+
+- **The Room is a live session**, not a form. Send a message and it steers the run now
+  (⏎) or queues it for later without interrupting anything in flight (⌘⏎), and an
+  Interrupt button stops the current turn without killing the underlying agent session.
+- **A blocked-on-a-plan run shows you the actual plan** — styled as a document in the
+  detail view — with an Approve button, instead of a bare "blocked" chip you had to
+  guess at.
+- **Take over any eligible run's terminal directly.** A real interactive session
+  resumes in the run's own worktree, wired through the same terminal Kage already used
+  for the Room; hand it back and Kage re-supervises the run automatically, no manual
+  restart.
+- **⌘K opens a command palette** — jump to Room, Work, or Memory, start a new run, or
+  orchestrate the current intent as a goal, all from the keyboard.
+- **A brand-new project stops looking empty.** With no orchestrator running yet, the
+  Room now teaches the three keystrokes (send, queue, orchestrate as a goal) and says
+  plainly that nothing is simulated until you start one.
+
+### Recovering from anything
+
+- **A stalled run is caught and stopped on its own**, before it burns further budget —
+  Kage watches for the same failing command or no worktree change turn after turn, and
+  the stop note says exactly what repeated, never a generic "stopped."
+- **`kage resume-run <id> --budget-usd <n>`** resumes a run stopped on its dollar
+  budget with the same run id, worktree, branch, and agent session, at the higher cap
+  you name. A run that was stopped for stalling instead resumes as-is, no flags
+  needed — since a stall isn't a spending problem, and raising the budget wouldn't fix it.
+- **`kage adopt <id>`** rebuilds an honest claim for a run whose supervisor died before
+  one was ever written, verified straight against its worktree — the statement is
+  never attributed to an agent that was never actually asked.
+- **`kage orphan-kill <id>`** deliberately ends a still-running orphaned agent and
+  shows its last recorded spend, labeled stale since nothing has counted it since the
+  supervisor died. This is a decision you make, never an automatic timer.
+- **Close as landed.** When a stopped or failed run's own branch turns out to already
+  be an ancestor of your current HEAD — landed by hand, or some other path — one click
+  marks the record honest without merging it again.
+
+### An optional review gate before merge
+
+- **Turn on `review_required` for a run** and it gains two new states between ready
+  and merged: `reviewing`, then `approved` or `changes_requested`. Off by default —
+  every run keeps merging straight from ready unless you opt in.
+- **A reviewer agent reads the claim and the diff**, not free-form prose, and produces
+  a structured verdict; `changes_requested` routes the run back into its own resume
+  machinery rather than dead-ending it. Both the web app and the CLI render the new
+  states, and the manager can request or read a review itself.
+
+### Memory that scales — and says so
+
+- **Kage's memory can now run on `node:sqlite` with FTS5** instead of flat JSON index
+  files, feature-detected with zero new dependencies — it falls back to JSON
+  automatically wherever `node:sqlite` isn't available. Your packets are still plain
+  Markdown either way; this only changes how the derived indexes are stored.
+- **Published, reproducible numbers — including the one we missed.** Measured on a
+  10,000-file/1,000-packet fixture: cold index and on-disk size both improved, and
+  recall under 100ms holds at 1,000 files. At 10,000 files, warm refresh (16–19s) and
+  recall (0.8–1.1s) both drift past their own "seconds"/"under 100ms" targets — stated
+  here rather than rounded away. Run `kage benchmark` or `node mcp/dist/bench/run.js`
+  yourself.
+
+### Trust the receipt more
+
+- **Kage type-checks and parses your code before accepting a claim**, on top of
+  whatever checks the run declared. A run can no longer reach "ready" with code that
+  does not compile.
+- **"Every check passed" no longer means "verified".** In a repo with no test command
+  the only checks that can run are inspections — they all pass while nothing has been
+  executed. The receipt now says `UNVERIFIED — nothing was executed`, auto-merge
+  refuses, and the track record scores it as unproven.
+- **A run that changed nothing is refused, honestly.** Merge now checks whether the
+  branch actually gained commits since it forked; a run that reaches "ready" having
+  changed nothing lands as a labeled `EMPTY DIFF`, never a silent no-op merge.
+- **`kage reverify <run>`** re-runs the checks against a run's current worktree. A run
+  that failed on a fixable technicality, or on a transient API error after the work
+  was already done, can be recovered instead of thrown away.
+- **A run is no longer failed for mentioning a filename in passing.** An identifier
+  like `state.room/state.pty` or a runtime path under `.agent_memory/` no longer reads
+  as a missing citation — only a real, extension-bearing or known-prefix path counts.
+- **A check that times out no longer leaves stragglers running.** The whole process
+  tree it spawned is killed, not just the one command Kage started.
+- **Runs that exceed their budget say so.** A run whose estimated spend crosses its
+  limit is halted with the limit and the actual figure named, and its work is kept.
+
+### Living with it day to day
+
+- **A run survives the terminal that started it.** `kage dispatch` hands work to a
+  detached supervisor, so closing the window or interrupting the command no longer
+  kills a run that is minutes and dollars in.
+- **Long intents no longer break the app.** A detailed intent used to render as a wall
+  of text that pushed a run's own controls off the screen. Runs now show a short title
+  everywhere, with the full intent one click away.
+- **`kage stale`** — after a large refactor, Kage withholds memory whose code moved.
+  This shows you which packets those are, what changed underneath each one, which are
+  worth rescuing, and the single command to act on each. There is deliberately no
+  "reverify everything" button: reverifying refreshes a citation, it does not re-check
+  whether the claim is still true, so doing it in bulk would clear the flags while
+  proving nothing.
+- **`kage_refresh` returns a readable summary** instead of every stale packet and
+  warning it can find — roughly 12KB where it used to be 150KB, with the totals stated
+  and a way to ask for the rest.
+
+### The app and the website got a real design pass
+
+- **Light theme is a real, second theme** — not a placeholder — with its own palette,
+  legible chips, receipts, and terminal, and a toggle in Settings that persists your
+  choice.
+- **The website is rebuilt end to end** around the same honesty the product practices:
+  the case for verification, a worked example, the memory ledger with its numbers
+  labeled as measured or estimated, and the missed warm-refresh target shown rather
+  than hidden — install instructions and the dependency count included.
+
+### Packaging
+
+- **The desktop app can update itself.** It checks for updates on launch and
+  periodically after, downloads in the background, and notifies you without
+  interrupting a working session — never a modal, never silent. On an unsigned
+  (ad-hoc) build, where a real auto-install isn't possible, it degrades honestly to
+  telling you a new version exists and opening the releases page.
+- **The desktop app shipped with the wrong version** (0.1.0 against a 3.1.0 product).
+  Fixed, and the version guard now covers it.
+- **`node-pty` is an optional dependency.** A machine without a C++ toolchain could
+  fail `npm i -g` entirely over a native module only the terminal view needs.
+
+### Behaviour changes worth knowing
+
+- Runs dispatch **detached** rather than inline. `kage dispatch` returns once the run
+  is handed off and follows it; it no longer holds your terminal for the whole run.
+- A goal set to `merge` **will refuse to merge** a run where no command was executed,
+  even though every check passed. This is intentional.
+- The per-run budget is a **circuit breaker on dollars, not a clock.** Minutes are
+  still measured and shown everywhere, but no longer stop a run by themselves — a
+  looping or thrashing agent is now caught by the stall detector instead. The default
+  budget is $50 per run; set `budgets` in `.agent_memory/config.json` for the repo, or
+  pass `--budget-usd` on a single dispatch when one task is worth more than the rest.
+- Reviews are **opt-in per run** (`review_required`). Without it, `ready` still merges
+  straight through exactly as before.
+
 ## v3.1.0 — cleaner viewer + `kage okf view`
 
 - **`kage okf view`** — open your memory as a clean, self-contained OKF bundle

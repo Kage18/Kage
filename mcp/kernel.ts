@@ -1,3 +1,46 @@
+// The Kage memory kernel.
+//
+// ────────────────────────────────────────────────────────────────────────────
+// WHY THIS FILE IS ONE FILE
+//
+// It is ~21,000 lines, and splitting it was investigated properly rather than
+// assumed. The measurements:
+//
+//   · 174 functions call nothing else in here — but they total 1,679 lines, 8%.
+//   · The generic helpers (ensureDir/nowIso/readJson/writeJson/unique) are 3-9
+//     lines each; extracting them moves ~50 lines.
+//   · Lifting out a topically cohesive region (agent setup, 708 lines) required
+//     making SEVEN private internals public to satisfy its imports, and created
+//     a cycle back to this module. Every such extraction widens the public API
+//     instead of narrowing it.
+//
+// So the size is a symptom of SEMANTIC coupling in one domain, not of poor file
+// organization, and moving code between files cannot fix it — it would trade one
+// large file for many files, a wider API surface, and import cycles. A genuine
+// decomposition means redesigning the memory core's internal boundaries, which is
+// a design program with real regression risk and no user-visible gain. Recorded in
+// docs/RELEASE_AUDIT.md so it is not re-litigated from scratch.
+//
+// What DID need fixing was navigation: 21,000 lines with no map. Hence the index
+// below. Search for a marker (e.g. "§ RECALL") to jump to its section. The markers
+// are checked by a test, so this index cannot quietly drift from the code.
+//
+// ────────────────────────────────────────────────────────────────────────────
+// INDEX
+//
+//   § TYPES            packet schema, report shapes, the shared vocabulary
+//   § STORE            paths, JSON/OKF read-write, validation, contradiction checks
+//   § CODEGRAPH        parsing, symbols, calls, structural + LSP indexes
+//   § INDEXES          catalogs, vectors, docs, graph building
+//   § CAPTURE          learn/capture, write gates, distillation, suppression
+//   § RECALL           scoring, ranking, context blocks, value receipts
+//   § REPORTS          metrics, quality, risk, contributors, xray, workspace
+//   § BENCHMARKS       trust, project, memory-quality, scale, comparisons
+//   § REGISTRY         public candidates, org sync, promotion
+//   § AGENTS           setup, plugin hooks, doctor, activation verification
+//   § LIFECYCLE        staleness, reconciliation, supersede, branch overlays
+//
+// ────────────────────────────────────────────────────────────────────────────
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -8,6 +51,25 @@ import { Worker } from "node:worker_threads";
 import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
+import { openStore } from "./store/manifest.js";
+import type {
+  CallEdgeRow,
+  DocsFtsDoc,
+  FileRow,
+  ImportEdgeRow,
+  KgEdgeRow,
+  KgEntityRow,
+  KgEpisodeRow,
+  StoreBackend,
+  SymbolRow,
+  VectorCandidate,
+  VectorChunkRow,
+} from "./store/types.js";
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § TYPES
+// ══════════════════════════════════════════════════════════════════════════
 
 export const PACKET_SCHEMA_VERSION = 2;
 
@@ -267,18 +329,10 @@ export interface KageContextSlotWriteResult {
   errors: string[];
 }
 
-interface SparseVectorDocument {
-  packet_id: string;
-  terms: Array<[string, number]>;
-  norm: number;
-}
-
-interface SparseVectorIndex {
-  schema_version: 1;
-  generated_from_updated_at: string | null;
-  packet_count: number;
-  documents: SparseVectorDocument[];
-}
+// The sparse vector index used to be a whole-file JSON artifact hydrated
+// here (SparseVectorIndex/SparseVectorDocument). It now lives behind the
+// StoreBackend seam (mcp/store/, docs/design/MEMORY_STORE.md M2) --
+// scorePacketsVectorFromStore below reads it through openStore() instead.
 
 interface DenseEmbeddingProvider {
   name: string;
@@ -2145,6 +2199,44 @@ export interface StaleMemoryFinding {
   suggested_action: "verify" | "update" | "supersede" | "mark_stale";
 }
 
+// One packet's triage entry: what moved under it, what already survived, and the
+// exact one-liner to act on it. `kage stale` never reverifies more than one packet
+// per invocation — see staleTriage below for why that boundary matters.
+export interface StaleTriageWhatChanged {
+  path: string;
+  summary: string;
+}
+
+export interface StaleTriageEntry {
+  id: string;
+  type: MemoryType;
+  title: string;
+  status: MemoryStatus;
+  reasons: string[];
+  total_paths: number;
+  moved_paths: string[];
+  missing_paths: string[];
+  present_paths: string[];
+  what_changed: StaleTriageWhatChanged[];
+  rescue_score: number;
+  suggested_action: "reverify" | "supersede";
+  command: string;
+  quality_score: number | null;
+  uses_30d: number;
+  last_verified_at: string | null;
+}
+
+export interface StaleTriageResult {
+  ok: boolean;
+  project_dir: string;
+  generated_at: string;
+  total_stale: number;
+  shown: number;
+  withheld: number;
+  entries: StaleTriageEntry[];
+  note: string;
+}
+
 export interface RefreshResult {
   ok: boolean;
   project_dir: string;
@@ -2428,6 +2520,11 @@ export function pendingDir(projectDir: string): string {
 export function publicCandidatesDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "public-candidates");
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § STORE
+// ══════════════════════════════════════════════════════════════════════════
 
 export function indexesDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "indexes");
@@ -3284,21 +3381,25 @@ export function formatTokenCount(tokens: number): string {
   return String(count);
 }
 
-// Receipt math: tokens an agent would have spent reading the cited source files
-// of the served packets (bytes / 4) minus the tokens the recall context block
-// itself costs (length / 4). Floored at zero — a recall never "costs" savings.
+// Receipt math: estimated tokens an agent would have spent re-reading the cited sources
+// of the served packets, minus what the recall context block itself costs. Honesty cap
+// (receipt v1): an agent re-reads the relevant slice of a cited file, not the whole
+// thing — each file contributes at most RECALL_READ_TOKENS_CAP_PER_FILE (a targeted
+// few-hundred-line read), so a memory citing a 900KB module can no longer claim the
+// full module as savings. Floored at zero — a recall never "costs" savings.
+export const RECALL_READ_TOKENS_CAP_PER_FILE = 1500;
 function recallTokensSaved(projectDir: string, results: RecallResult["results"], contextBlock: string): number {
   const paths = unique(results.flatMap((entry) => entry.packet.paths).filter((path) => meaningfulMemoryPath(path)));
-  let sourceBytes = 0;
+  let sourceTokens = 0;
   for (const path of paths) {
     try {
       const stats = statSync(join(projectDir, path));
-      if (stats.isFile()) sourceBytes += stats.size;
+      if (stats.isFile()) sourceTokens += Math.min(Math.floor(stats.size / 4), RECALL_READ_TOKENS_CAP_PER_FILE);
     } catch {
       // Missing cited files save nothing.
     }
   }
-  return Math.max(0, Math.floor(sourceBytes / 4) - Math.floor(contextBlock.length / 4));
+  return Math.max(0, sourceTokens - Math.floor(contextBlock.length / 4));
 }
 
 // Conservative per-type defaults for discovery_tokens — the approximate exploration +
@@ -3860,6 +3961,49 @@ function identifierTokens(text: string): Set<string> {
   const out = new Set<string>();
   for (const match of text.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) out.add(match[0].toLowerCase());
   return out;
+}
+
+// Strong code-identifier tokens (camelCase/PascalCase, snake_case, SCREAMING_SNAKE) —
+// plain prose words never match, so only deliberate symbol references are considered.
+const STRONG_IDENTIFIER_PATTERNS = [
+  // camelCase / PascalCase: a lowercase run, THEN an internal capital (mergeRun,
+  // ClaimRecord). Both halves matter — requiring the internal capital keeps ordinary
+  // capitalized prose out ("Briefs"), and requiring the lowercase run before it keeps
+  // all-caps emphasis out ("PROPERLY"). Underscored constants are matched below.
+  /^[A-Za-z][a-z0-9]+[A-Z][A-Za-z0-9]{2,}$/,
+  /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/,
+  /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/,
+];
+
+// Write-time named-symbol grounding check: strong identifiers the memory text mentions
+// that appear in NONE of the cited code files. File existence alone cannot catch a
+// memory naming a function the cited code never had — surface it so the writer fixes
+// the name or cites the defining file. Warning-only by design: rejection would
+// false-positive on prose and legitimate cross-file mentions.
+function unresolvedNamedSymbols(projectDir: string, paths: string[], text: string): string[] {
+  const anchorable = unique(paths).filter((path) => pathSupportsSymbolAnchors(path) && pathExistsInRepo(projectDir, path));
+  if (!anchorable.length) return [];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) {
+    const token = match[0];
+    if (seen.has(token)) continue;
+    seen.add(token);
+    if (STRONG_IDENTIFIER_PATTERNS.some((pattern) => pattern.test(token))) candidates.push(token);
+  }
+  if (!candidates.length) return [];
+  const contents: string[] = [];
+  for (const path of anchorable.slice(0, 8)) {
+    try {
+      contents.push(readFileSync(join(projectDir, path), "utf8").toLowerCase());
+    } catch {
+      // Unreadable cited file: cannot clear names against it.
+    }
+  }
+  if (!contents.length) return [];
+  return candidates
+    .filter((token) => !contents.some((content) => content.includes(token.toLowerCase())))
+    .slice(0, 8);
 }
 
 // current-file symbol span hashes, keyed by `${nameLower}\0${kind}` -> [sha256...].
@@ -5786,6 +5930,11 @@ function readCachedCodeGraph(projectDir: string, fingerprint: string, structural
   }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § CODEGRAPH
+// ══════════════════════════════════════════════════════════════════════════
+
 export interface StructuralCachedFile {
   schema_version: 1;
   path: string;
@@ -6074,6 +6223,43 @@ function scanStructuralFiles(projectDir: string): { files: string[]; ignoredSumm
     files: files.sort((a, b) => codeFilePriority(projectDir, a) - codeFilePriority(projectDir, b) || a.localeCompare(b)),
     ignoredSummary: Object.fromEntries(Object.entries(ignoredSummary).sort(([a], [b]) => a.localeCompare(b))),
   };
+}
+
+// ---------------------------------------------------------------------------
+// § SCALE GUARD (docs/design/MEMORY_STORE.md, "(f) A scale guard, now" / M4)
+//
+// 10,000 is NOT the point where cold index gets painful on this machine --
+// measured (docs/BENCHMARKS.md's M4 section), cold index and warm refresh
+// both stay in the single-to-tens-of-seconds range even at 10,000 files, on
+// both backends. It is instead (a) the largest size this doc's benchmarks
+// actually ran, so this is a promise backed by a real measurement, not an
+// extrapolation past it, and (b) the size at which recall latency -- the
+// query a session pays on every single kage_context call, not once per
+// refresh -- has already drifted roughly 10x past a feels-instant budget
+// (measured ~0.8-1.1s at 10,000 files, both backends). See BENCHMARKS.md's
+// M4 section for the full numbers and reasoning this threshold is drawn
+// from. `kage scan` and `kage install` (mcp/cli.ts) are the only two call
+// sites that print scaleGuardMessage()'s result -- neither `kage refresh`
+// nor recall/graph queries are wired to it, which is what keeps the warning
+// from repeating on every command: it only ever fires from the two commands
+// a person runs to first learn what Kage thinks of their repo, once each,
+// never in a loop.
+export const SCALE_GUARD_FILE_THRESHOLD = 10000;
+
+/** Cheap indexable-file count -- the same walk buildStructuralIndex uses to discover files, without any parsing. Safe to call before a full index/refresh. */
+export function countIndexableFiles(projectDir: string): number {
+  return scanStructuralFiles(projectDir).files.length;
+}
+
+/**
+ * Plain-language scale warning, or null when `fileCount` is within the
+ * envelope docs/BENCHMARKS.md's measurements support. Never blocks --
+ * callers (mcp/cli.ts's `scan`/`install` commands) print this alongside
+ * their normal output, they never exit non-zero because of it.
+ */
+export function scaleGuardMessage(fileCount: number, threshold = SCALE_GUARD_FILE_THRESHOLD): string | null {
+  if (fileCount <= threshold) return null;
+  return `This repo is ~${fileCount.toLocaleString("en-US")} files; Kage is tuned for repos under ~${threshold.toLocaleString("en-US")} today (see docs/BENCHMARKS.md). Expect slower \`kage refresh\` and a larger \`.agent_memory/\` until the store benchmarks there are updated past this size.`;
 }
 
 function countBufferLines(buffer: Buffer): number {
@@ -6502,6 +6688,53 @@ function structuralReport(index: StructuralIndex): string {
   ].join("\n");
 }
 
+function fileRowFromStructural(file: StructuralFileFact): FileRow {
+  return { path: file.path, sha: file.hash, mtime: file.mtime_ms, kind: file.kind, language: file.language };
+}
+
+function symbolRowFromStructural(symbol: StructuralSymbolFact): SymbolRow {
+  return { id: symbol.id, file: symbol.path, name: symbol.name, kind: symbol.kind, sha: "" };
+}
+
+function importEdgeRowFromCode(edge: CodeImportEdge): ImportEdgeRow {
+  return { fromFile: edge.from_path, toFile: edge.to_path, kind: edge.kind };
+}
+
+// Pure projection, no I/O: given the full structural facts just computed and
+// the set of file paths this build actually re-extracted (buildStructuralFile's
+// own cache-hit/miss signal, mcp/kernel.ts:6444), returns exactly those files'
+// StoreBackend rows -- never the whole corpus. This is what makes a `kage
+// refresh` touching N cache-miss files push N files' worth of rows through
+// StoreBackend.replaceFileGraphRows (docs/design/MEMORY_STORE.md M3,
+// "(d) Incrementality"), not the whole repo's. Exported so tests can assert
+// the scoping directly, without needing a live store to count rows through.
+export function structuralRowsForFiles(
+  structural: { files: StructuralFileFact[]; symbols: StructuralSymbolFact[]; imports: CodeImportEdge[] },
+  touchedPaths: Set<string>
+): Array<{ file: FileRow; symbols: SymbolRow[]; importEdges: ImportEdgeRow[] }> {
+  const symbolsByPath = new Map<string, StructuralSymbolFact[]>();
+  for (const symbol of structural.symbols) {
+    if (!touchedPaths.has(symbol.path)) continue;
+    const list = symbolsByPath.get(symbol.path) ?? [];
+    list.push(symbol);
+    symbolsByPath.set(symbol.path, list);
+  }
+  const importsByPath = new Map<string, CodeImportEdge[]>();
+  for (const edge of structural.imports) {
+    if (!touchedPaths.has(edge.from_path)) continue;
+    const list = importsByPath.get(edge.from_path) ?? [];
+    list.push(edge);
+    importsByPath.set(edge.from_path, list);
+  }
+  return structural.files
+    .filter((file) => touchedPaths.has(file.path))
+    .map((file) => ({
+      file: fileRowFromStructural(file),
+      symbols: (symbolsByPath.get(file.path) ?? []).map(symbolRowFromStructural),
+      importEdges: (importsByPath.get(file.path) ?? []).map(importEdgeRowFromCode),
+    }));
+}
+
 export function buildStructuralIndex(projectDir: string): StructuralIndex {
   ensureMemoryDirs(projectDir);
   ensureDir(structuralIndexDir(projectDir));
@@ -6593,6 +6826,23 @@ export function buildStructuralIndex(projectDir: string): StructuralIndex {
     cache_misses: misses,
     worker_count: builtFiles.workerCount,
   });
+  // Row-level structural refresh, routed through the StoreBackend seam
+  // (docs/design/MEMORY_STORE.md M3): files.json/symbols.json/imports.json
+  // above stay direct writeJson calls, byte-compatible with today -- FileRow/
+  // SymbolRow/ImportEdgeRow are reduced projections (no size_bytes/signals/
+  // concepts/language/signature/specifier) that cannot reconstruct those
+  // artifacts byte-for-byte, the same reason catalog.json stayed a direct
+  // write in M2. Only cache-miss files' rows (builtFiles.results whose
+  // cacheHit is false) are pushed -- a refresh that re-extracts N files
+  // upserts N files' worth of store rows, not the whole repo's.
+  const touchedPaths = new Set(builtFiles.results.filter((result) => !result.cacheHit).map((result) => result.entry.path));
+  const structuralRows = structuralRowsForFiles({ files, symbols, imports }, touchedPaths);
+  const { backend: structuralBackend } = openStore(projectDir);
+  try {
+    structuralBackend.replaceFileGraphRows(structuralRows);
+  } finally {
+    structuralBackend.close();
+  }
   return index;
 }
 
@@ -8231,6 +8481,18 @@ export function buildCodeGraph(projectDir: string, options: { force?: boolean } 
   removeLegacyCodeGraphSplits(projectDir);
   writeJson(join(codeGraphDir(projectDir), "graph.json"), compactCodeGraphArtifact(projectDir, graph, structural));
   graphMemoryCache.delete(resolve(projectDir));
+  // Call edges have no per-file cache upstream -- they're re-extracted from
+  // source on every non-cached build above, unlike files/symbols/imports
+  // (see buildStructuralIndex's row-level push). So the correct StoreBackend
+  // scope here is "every call edge this build produced," replacing the whole
+  // call_edges table rather than a per-file upsert (docs/design/MEMORY_STORE.md
+  // M3, replaceCallEdgesForRepo's own doc comment in mcp/store/types.ts).
+  const { backend: callEdgeBackend } = openStore(projectDir);
+  try {
+    callEdgeBackend.replaceCallEdgesForRepo(graph.calls.map((call): CallEdgeRow => ({ fromSymbol: call.from_symbol, toSymbol: call.to_symbol, kind: call.resolution })));
+  } finally {
+    callEdgeBackend.close();
+  }
   return graph;
 }
 
@@ -8698,6 +8960,25 @@ export function buildKnowledgeGraph(projectDir: string, codeGraph = buildCodeGra
   writeJson(join(graphDir(projectDir), "edges.json"), graph.edges);
   writeJson(join(graphDir(projectDir), "graph.json"), compactKnowledgeGraphArtifact(projectDir, graph));
   graphMemoryCache.delete(resolve(projectDir));
+  // Knowledge graph, routed through the StoreBackend seam (docs/design/
+  // MEMORY_STORE.md M3): entities.json/edges.json/episodes.json above stay
+  // direct writeJson calls, byte-compatible with today -- KgEntityRow/
+  // KgEdgeRow/KgEpisodeRow are reduced projections (no aliases/summary/
+  // evidence/branch/commit) that cannot reconstruct those artifacts
+  // byte-for-byte, the same reason catalog.json stayed a direct write in M2.
+  // buildKnowledgeGraph recomputes the whole graph every call -- there is no
+  // per-entity cache to scope a smaller push to, so this replaces the whole
+  // kg_entities/kg_edges/kg_episodes table set rather than upserting.
+  const { backend: kgBackend } = openStore(projectDir);
+  try {
+    kgBackend.replaceKnowledgeGraph(
+      graph.entities.map((entity): KgEntityRow => ({ id: entity.id, kind: entity.type, label: entity.name })),
+      graph.edges.map((edge): KgEdgeRow => ({ fromId: edge.from, toId: edge.to, kind: edge.relation, weight: edge.confidence })),
+      graph.episodes.map((episode): KgEpisodeRow => ({ id: episode.id, ts: episode.observed_at, summary: episode.summary })),
+    );
+  } finally {
+    kgBackend.close();
+  }
   return graph;
 }
 
@@ -8860,6 +9141,17 @@ function chunkDoc(docPath: string, text: string): DocsChunk[] {
   return chunks;
 }
 
+// Every chunk's id must be unique even when a long section under one heading
+// splits into several DOCS_CHUNK_MAX_CHARS-sized pieces that all share the
+// same doc_path + anchor -- the running index disambiguates those.
+function docsChunkStoreId(chunk: DocsChunk, index: number): string {
+  return `${chunk.doc_path}#${chunk.anchor}#${index}`;
+}
+
+function docsChunkToFtsDoc(chunk: DocsChunk, index: number): DocsFtsDoc {
+  return { id: docsChunkStoreId(chunk, index), docPath: chunk.doc_path, heading: chunk.heading, body: chunk.text, anchor: chunk.anchor, line: chunk.line };
+}
+
 export function buildDocsIndex(projectDir: string): DocsIndexArtifact {
   const docFiles = discoverDocFiles(projectDir);
   const chunks: DocsChunk[] = [];
@@ -8876,19 +9168,36 @@ export function buildDocsIndex(projectDir: string): DocsIndexArtifact {
     chunk_count: chunks.length,
     chunks,
   };
-  writeJson(join(indexesDir(projectDir), "docs-index.json"), artifact);
+  // Routed through the StoreBackend seam (docs/design/MEMORY_STORE.md M2):
+  // one bulk call, not one upsert per chunk -- the JSON backend's upsert
+  // contract is a whole-file rewrite per call (see mcp/store/json.ts), so a
+  // per-chunk loop here would cost O(chunks) whole-file rewrites on every
+  // `kage refresh`.
+  const { backend } = openStore(projectDir);
+  try {
+    backend.replaceDocsFtsDocs(chunks.map(docsChunkToFtsDoc));
+  } finally {
+    backend.close();
+  }
   return artifact;
 }
 
 function readDocsIndex(projectDir: string): DocsIndexArtifact | null {
-  const path = join(indexesDir(projectDir), "docs-index.json");
-  if (!existsSync(path)) return null;
+  const { backend } = openStore(projectDir);
   try {
-    const artifact = readJson<DocsIndexArtifact>(path);
-    if (!Array.isArray(artifact?.chunks)) return null;
-    return artifact;
-  } catch {
-    return null;
+    const hits = backend.listDocsFtsDocs();
+    if (!hits.length) return null; // never built yet -- caller falls back to buildDocsIndex()
+    const chunks: DocsChunk[] = hits.map((hit) => ({ doc_path: hit.docPath, heading: hit.heading, anchor: hit.anchor, text: hit.body, line: hit.line }));
+    return {
+      schema_version: DOCS_INDEX_SCHEMA_VERSION,
+      generated_at: "",
+      source: "repo-docs",
+      doc_count: new Set(chunks.map((chunk) => chunk.doc_path)).size,
+      chunk_count: chunks.length,
+      chunks,
+    };
+  } finally {
+    backend.close();
   }
 }
 
@@ -9013,11 +9322,42 @@ function buildPacketIndexes(projectDir: string): string[] {
     join(indexesDir(projectDir), "by-tag.json"),
     join(indexesDir(projectDir), "by-type.json"),
   ];
+  // catalog.json/by-path.json/by-tag.json/by-type.json stay direct writeJson
+  // calls: PacketRow (mcp/store/types.ts) carries only id/type/status/score/
+  // updatedAt, not title/summary/tags/paths/source_refs/repo_state, so it
+  // cannot reconstruct catalog.json byte-for-byte without widening M1's row
+  // shape in a way that breaks its own getPacket() deepEqual test
+  // (mcp/store-layer.test.ts:82). by-path/by-tag/by-type are confirmed dead
+  // weight -- grepping this file finds them written and existence-checked,
+  // never content-read back (docs/design/MEMORY_STORE.md, "One correction
+  // worth stating plainly") -- so there is no seam benefit to routing their
+  // bytes through a backend nothing queries. Their packet-id/type/status/
+  // path FACTS still flow into the store just below, for queryPacketsByPath
+  // and the sqlite backend's own future consumers.
   writeJson(written[0], catalog);
   writeJson(written[1], byPath);
   writeJson(written[2], byTag);
   writeJson(written[3], byType);
-  written.push(writeSparseVectorIndex(projectDir, packets));
+
+  // Vector index and packet/path rows, routed through the StoreBackend seam
+  // (docs/design/MEMORY_STORE.md M2). One bulk replaceVectorDocuments call,
+  // not one upsertVectorChunks per packet -- see buildDocsIndex's docstring
+  // for why a per-item loop would be quadratic on the JSON backend.
+  const { backend } = openStore(projectDir);
+  try {
+    backend.upsertPackets(packets.map((packet) => ({ id: packet.id, type: packet.type, status: packet.status, score: null, updatedAt: packet.updated_at })));
+    backend.upsertPacketPaths(packets.flatMap((packet) => packet.paths.map((path) => ({ packetId: packet.id, path, sha256: null }))));
+    backend.replaceVectorDocuments(
+      packets.map((packet) => ({
+        packetId: packet.id,
+        terms: [...packetSparseVector(packet).entries()].map(([term, weight]): VectorChunkRow => ({ packetId: packet.id, term, weight })),
+      })),
+      { generatedFromUpdatedAt: catalog.generated_from_updated_at },
+    );
+  } finally {
+    backend.close();
+  }
+  written.push(join(indexesDir(projectDir), "vector-local.json"));
   // Docs search index over the repo's own committed documentation. Built here so
   // it stays current through both indexProject and refreshProject.
   buildDocsIndex(projectDir);
@@ -9177,6 +9517,11 @@ function buildGraphIndexes(projectDir: string, options: { forceCodeGraph?: boole
   };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § INDEXES
+// ══════════════════════════════════════════════════════════════════════════
+
 export function buildIndexes(projectDir: string): string[] {
   return buildGraphIndexes(projectDir).indexes;
 }
@@ -9302,6 +9647,25 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   }
   const validation = validateProject(projectDir);
   const metrics = kageMetricsShallow(projectDir, { codeGraph, knowledgeGraph, validation });
+  // The app's Memory-tab health strip reads metrics.json, but until now only `kage gc`
+  // and `kage compact` wrote it — maintenance commands a normal user never runs — so it
+  // froze indefinitely. Write it on every refresh, quiet or not: this is a derived
+  // report, not packet metadata, so freezing it on a feature branch would just
+  // reproduce the bug this fixes. `quality.totals.stale` reuses the staleness pass
+  // already paid for above (refreshPacketStaleness), scoped to approved packets to
+  // match `kage stale`'s scope — it can still read slightly lower than a live `kage
+  // stale` run because it checks kageignore-pruned grounding (see "refresh prunes
+  // kageignore'd grounding" above), which is intentional, not a second bug.
+  // kageMetrics, NOT the shallow variant `metrics` above: the health strip also reads
+  // memory_access (used-recently, never-recalled) and memory_graph's approved_packets /
+  // average_quality_score, and kageMetricsShallow omits all of them. Writing the shallow
+  // shape here fixed the stale count and silently zeroed four neighbouring numbers —
+  // caught by opening the app, not by the suite, because no test asserted the strip was
+  // complete. Reuse the graphs refresh already rebuilt so this costs no extra pass.
+  writeJson(join(memoryRoot(projectDir), "metrics.json"), {
+    ...kageMetrics(projectDir),
+    quality: { totals: { stale: stale.findings.filter((finding) => finding.status === "approved").length } },
+  });
   ensureDir(reportsDir(projectDir));
   writeJson(join(reportsDir(projectDir), "context-slots.json"), kageContextSlots(projectDir));
   writeJson(join(reportsDir(projectDir), "handoff.json"), kageMemoryHandoff(projectDir));
@@ -9864,25 +10228,56 @@ function scorePacketsVector(queryTerms: string[], packets: MemoryPacket[]): Map<
   return result;
 }
 
-function scorePacketsVectorFromIndex(queryTerms: string[], index: SparseVectorIndex | null): Map<string, VectorScore> {
+// Replaces scorePacketsVectorFromIndex's old whole-file hydration
+// (SparseVectorIndex) with the StoreBackend seam (docs/design/MEMORY_STORE.md
+// M2): `candidates` already carries only the rows whose term the query asked
+// about, plus each row's packetId-wide norm (VectorCandidate.norm) -- enough
+// for cosine scoring without ever hydrating a document's full term list, the
+// same math scorePacketsVectorFromIndex ran, just sourced from store rows
+// instead of a parsed array.
+function scorePacketsVectorFromCandidates(queryTerms: string[], candidates: VectorCandidate[]): Map<string, VectorScore> {
   const terms = expandQueryTerms(queryTerms);
   const queryVector = termVector(terms);
   const queryNorm = vectorNorm(queryVector);
   const result = new Map<string, VectorScore>();
-  if (!index || !terms.length || queryNorm <= 0 || !index.documents.length) return result;
+  if (!terms.length || queryNorm <= 0 || !candidates.length) return result;
 
-  for (const document of index.documents) {
-    const documentVector = new Map<string, number>(document.terms);
-    const score = cosineScore(queryVector, queryNorm, documentVector, document.norm);
+  const byPacket = new Map<string, { vector: Map<string, number>; norm: number }>();
+  for (const candidate of candidates) {
+    const entry = byPacket.get(candidate.packetId) ?? { vector: new Map<string, number>(), norm: candidate.norm };
+    entry.vector.set(candidate.term, candidate.weight);
+    byPacket.set(candidate.packetId, entry);
+  }
+
+  for (const [packetId, { vector: documentVector, norm }] of byPacket) {
+    const score = cosineScore(queryVector, queryNorm, documentVector, norm);
     if (score <= 0) continue;
     const why = terms
       .filter((term) => queryVector.has(term) && documentVector.has(term))
       .slice(0, 5)
       .map((term) => `vector-local-index:${term}`);
-    result.set(document.packet_id, { score: Number((score * 0.75).toFixed(2)), why });
+    result.set(packetId, { score: Number((score * 0.75).toFixed(2)), why });
   }
 
   return result;
+}
+
+// Freshness-gated store read: if the store's vector rows don't cover exactly
+// today's approved packet set, a stale index would silently misscore, so
+// this falls back to live in-memory scoring (scorePacketsVector) instead --
+// the same guarantee readSparseVectorIndex's packet_count/generated_from
+// checks gave before the store existed, narrowed to an id-set comparison
+// (see mcp/store/types.ts's listVectorPacketIds doc for why: the sqlite
+// backend has no cheap single "generated_from" stamp to compare, only row
+// presence).
+function scorePacketsVectorFromStore(backend: StoreBackend, queryTerms: string[], approvedPackets: MemoryPacket[]): Map<string, VectorScore> {
+  const approvedIds = new Set(approvedPackets.map((packet) => packet.id));
+  const storedIds = new Set(backend.listVectorPacketIds());
+  const isFresh = approvedIds.size === storedIds.size && [...approvedIds].every((id) => storedIds.has(id));
+  if (!isFresh) return scorePacketsVector(queryTerms, approvedPackets);
+  const terms = expandQueryTerms(queryTerms);
+  if (!terms.length) return new Map();
+  return scorePacketsVectorFromCandidates(queryTerms, backend.queryVectorCandidates(terms));
 }
 
 function packetSparseVector(packet: MemoryPacket): Map<string, number> {
@@ -9894,49 +10289,6 @@ function packetSparseVector(packet: MemoryPacket): Map<string, number> {
     ...tokenize(packet.type).flatMap((term) => [term, lexicalStem(term)]),
     ...tokenize(packet.body).flatMap((term) => [term, lexicalStem(term)]),
   ]);
-}
-
-function buildSparseVectorIndex(packets: MemoryPacket[]): SparseVectorIndex {
-  return {
-    schema_version: 1,
-    generated_from_updated_at: packets.map((packet) => packet.updated_at).sort().at(-1) ?? null,
-    packet_count: packets.length,
-    documents: packets.map((packet) => {
-      const vector = packetSparseVector(packet);
-      return {
-        packet_id: packet.id,
-        terms: Array.from(vector.entries()).sort(([a], [b]) => a.localeCompare(b)),
-        norm: Number(vectorNorm(vector).toFixed(6)),
-      };
-    }),
-  };
-}
-
-function writeSparseVectorIndex(projectDir: string, packets: MemoryPacket[]): string {
-  const path = join(indexesDir(projectDir), "vector-local.json");
-  writeJson(path, buildSparseVectorIndex(packets));
-  return path;
-}
-
-function readSparseVectorIndex(projectDir: string, packets: MemoryPacket[]): SparseVectorIndex | null {
-  const path = join(indexesDir(projectDir), "vector-local.json");
-  if (!existsSync(path)) return null;
-  try {
-    const index = readJson<SparseVectorIndex>(path);
-    if (index.schema_version !== 1) return null;
-    if (index.packet_count !== packets.length) return null;
-    const generatedFrom = packets.map((packet) => packet.updated_at).sort().at(-1) ?? null;
-    if (index.generated_from_updated_at !== generatedFrom) return null;
-    const packetIds = new Set(packets.map((packet) => packet.id));
-    if (index.documents.length !== packets.length) return null;
-    for (const document of index.documents) {
-      if (!packetIds.has(document.packet_id)) return null;
-      if (!Array.isArray(document.terms) || !Number.isFinite(document.norm)) return null;
-    }
-    return index;
-  } catch {
-    return null;
-  }
 }
 
 function denseEmbeddingIndexPath(projectDir: string): string {
@@ -10487,6 +10839,11 @@ function looksLikeRawUserUtterance(text: string): boolean {
 // ungrounded decision or convention is declarative (no "why are you.../don't stop") and usually
 // names a symbol, file, command, or rule, so it is never caught. Such packets route to pending
 // (not auto-approved) at capture time and are withheld from recall, like serialized dumps.
+
+// ══════════════════════════════════════════════════════════════════════════
+// § CAPTURE
+// ══════════════════════════════════════════════════════════════════════════
+
 export function isUngroundedConversationalCapture(packet: Pick<MemoryPacket, "title" | "body" | "paths">): boolean {
   if (packet.paths && packet.paths.length > 0) return false;
   const text = `${packet.title ?? ""}\n${packet.body ?? ""}`;
@@ -10551,10 +10908,17 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   const baseScores = scorePacketsBm25(expansion.baseTerms, approvedPackets);
   const temporalScores = scorePacketsBm25(expansion.temporalTerms, approvedPackets);
   const semanticScores = scorePacketsBm25(expansion.semanticTerms, approvedPackets);
-  const sparseVectorIndex = externalVectorScores ? null : readSparseVectorIndex(projectDir, approvedPackets);
-  const vectorScores = externalVectorScores ?? (sparseVectorIndex
-    ? scorePacketsVectorFromIndex(terms, sparseVectorIndex)
-    : scorePacketsVector(terms, approvedPackets));
+  let vectorScores: Map<string, VectorScore>;
+  if (externalVectorScores) {
+    vectorScores = externalVectorScores;
+  } else {
+    const { backend } = openStore(projectDir);
+    try {
+      vectorScores = scorePacketsVectorFromStore(backend, terms, approvedPackets);
+    } finally {
+      backend.close();
+    }
+  }
   const referenceBodyScores = scoreReferenceBodyBm25(terms, approvedPackets);
   const accessEntries = readMemoryAccessEntries(projectDir, approvedPackets);
   const graphLookup = recallGraphLookup(knowledgeGraph);
@@ -10733,6 +11097,11 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   return result;
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § RECALL
+// ══════════════════════════════════════════════════════════════════════════
+
 export function recall(projectDir: string, query: string, limit = 5, explain = false, inputs: GraphInputs = {}): RecallResult {
   return recallWithVectorScores(projectDir, query, limit, explain, inputs);
 }
@@ -10780,6 +11149,78 @@ function boostTermScore(boost: string, term: string): number {
   if (term.length >= 6 && normalized.includes(term)) return 2;
   if (normalized.length >= 6 && term.includes(normalized)) return 2;
   return 0;
+}
+
+export interface StructuralGraphStoreQueryResult {
+  query: string;
+  files: FileRow[];
+  symbols: SymbolRow[];
+}
+
+/**
+ * Lazy walk (docs/design/MEMORY_STORE.md M3, "(c) Query semantics" /
+ * rollout table row "M3"): answers a code-graph search ENTIRELY from
+ * StoreBackend rows -- backend.listFiles()/listSymbols(), never a readJson
+ * of the whole structural/files.json or symbols.json (2.7-3.0MB each,
+ * measured in this doc's own Problem section). On the sqlite backend this
+ * is real indexed row iteration over the files/symbols tables, not one big
+ * JSON.parse; on the json backend today's readJson-the-whole-file behaviour
+ * is unchanged (mcp/store/json.ts). This answers a narrower question than
+ * queryCodeGraph -- Row-shaped facts only (no parser/signature/size_bytes
+ * fidelity), not a replacement for it -- the store-backed counterpart to
+ * queryPacketsByPath, not a replacement for the rich, existing query.
+ */
+export function queryStructuralGraphFromStore(projectDir: string, query: string, limit = 10): StructuralGraphStoreQueryResult {
+  const terms = tokenize(query);
+  const { backend } = openStore(projectDir);
+  try {
+    const files = backend
+      .listFiles()
+      .map((file) => ({ file, score: scoreText(terms, `${file.path} ${file.kind} ${file.language}`, [file.path, file.language]) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path))
+      .slice(0, limit)
+      .map((entry) => entry.file);
+    const symbols = backend
+      .listSymbols()
+      .map((symbol) => ({ symbol, score: scoreText(terms, `${symbol.name} ${symbol.kind} ${symbol.file}`, [symbol.name, symbol.file]) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.symbol.file.localeCompare(b.symbol.file))
+      .slice(0, limit)
+      .map((entry) => entry.symbol);
+    return { query, files, symbols };
+  } finally {
+    backend.close();
+  }
+}
+
+export interface KgNeighbourhoodResult {
+  entity: KgEntityRow | null;
+  neighbours: KgEntityRow[];
+  edges: KgEdgeRow[];
+}
+
+/**
+ * Lazy walk for "kg neighbourhood reads" (docs/design/MEMORY_STORE.md M3):
+ * one indexed queryKgEdgesForEntities call plus a getKgEntity per neighbour
+ * endpoint -- never a readJson of the whole graph/edges.json (8MB+ measured
+ * in this doc's own Problem section) just to find the handful of edges
+ * touching one entity. On the sqlite backend, queryKgEdgesForEntities is a
+ * `WHERE from_id IN (...) OR to_id IN (...)` scan over the kg_edges_from/
+ * kg_edges_to indexes (mcp/store/sqlite.ts); on the json backend it is
+ * today's full-array filter, unchanged.
+ */
+export function kgNeighbourhood(projectDir: string, entityId: string): KgNeighbourhoodResult {
+  const { backend } = openStore(projectDir);
+  try {
+    const entity = backend.getKgEntity(entityId);
+    const edges = backend.queryKgEdgesForEntities([entityId]);
+    const neighbourIds = unique(edges.map((edge) => (edge.fromId === entityId ? edge.toId : edge.fromId)));
+    const neighbours = neighbourIds.map((id) => backend.getKgEntity(id)).filter((row): row is KgEntityRow => Boolean(row));
+    return { entity, neighbours, edges };
+  } finally {
+    backend.close();
+  }
 }
 
 export function queryCodeGraph(projectDir: string, query: string, limit = 10, graph?: CodeGraph): CodeGraphQueryResult {
@@ -13036,6 +13477,11 @@ export function kageReviewerSuggestions(projectDir: string, targets: string[] = 
       : `No reviewer suggestions for ${resolvedTargets.length} target file(s).`,
   };
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § REPORTS
+// ══════════════════════════════════════════════════════════════════════════
 
 export function kageContributors(projectDir: string): KageContributorsReport {
   const graph = readCurrentCodeGraph(projectDir) ?? buildCodeGraph(projectDir);
@@ -15322,6 +15768,11 @@ export interface TrustBenchmarkReport {
 // system can be TRUSTED — does it refuse to store hallucinated citations, does it
 // withhold memory whose evidence was deleted, and is live repo memory actually grounded.
 // Controlled gates run in an isolated sandbox; the grounding gate runs on the real repo.
+
+// ══════════════════════════════════════════════════════════════════════════
+// § BENCHMARKS
+// ══════════════════════════════════════════════════════════════════════════
+
 export function benchmarkTrust(projectDir: string): TrustBenchmarkReport {
   const runDir = mkdtempSync(join(tmpdir(), "kage-trust-"));
   const sandbox = join(runDir, "project");
@@ -16492,13 +16943,15 @@ export function capture(input: CaptureInput): CaptureResult {
     .filter((path) => meaningfulMemoryPath(path) && !shouldSkipRepoMemoryPath(path));
   const missingPaths = meaningfulPaths.filter((path) => !pathExistsInRepo(input.projectDir, path));
   // Citation validation. Strict mode (agent-facing record_memory tools / CLI) rejects a
-  // write whose every cited path is missing — the PRD's "reject if citations don't exist".
+  // write citing ANY nonexistent path — "hallucinated citations rejected at write time"
+  // must hold per citation, not only when every cited path is wrong. allow_missing_paths
+  // stays the escape hatch for a file the caller is about to create.
   // The core library stays permissive (warn-only) for programmatic callers and migrations.
-  if (input.strictCitations && meaningfulPaths.length && missingPaths.length === meaningfulPaths.length && !input.allowMissingPaths) {
+  if (input.strictCitations && missingPaths.length && !input.allowMissingPaths) {
     return {
       ok: false,
       errors: [
-        `Citation validation failed: none of the referenced paths exist in this repo: ${missingPaths.join(", ")}. ` +
+        `Citation validation failed: ${missingPaths.length} of ${meaningfulPaths.length} referenced path(s) do not exist in this repo: ${missingPaths.join(", ")}. ` +
           `Fix the paths, or pass allow_missing_paths to record anyway (e.g. for a file you are about to create).`,
       ],
       warnings: [],
@@ -16506,6 +16959,17 @@ export function capture(input: CaptureInput): CaptureResult {
   }
   if (missingPaths.length) {
     warnings.push(`Some referenced paths do not exist in this repo: ${missingPaths.join(", ")}`);
+  }
+
+  // Named-symbol grounding: strong identifiers in the text that resolve in none of the
+  // cited code files usually mean a misnamed symbol or a missing citation. Warn and
+  // record; such names get no symbol anchors, so staleness falls back to whole-file.
+  const unresolvedSymbols = unresolvedNamedSymbols(input.projectDir, meaningfulPaths, `${input.title}\n${input.body}`);
+  if (unresolvedSymbols.length) {
+    warnings.push(
+      `Named symbols not found in any cited file: ${unresolvedSymbols.join(", ")}. ` +
+        `If the memory is about these, cite the file that defines them.`,
+    );
   }
 
   // Ungrounded conversational chatter — a frustrated/rhetorical user message with no cited repo
@@ -16608,6 +17072,7 @@ export function capture(input: CaptureInput): CaptureResult {
     ...packet.quality,
     ...evaluateMemoryQuality(input.projectDir, packet),
     ...(contradictions.length ? { contradicts: contradictions.map((c) => c.packet_id) } : {}),
+    ...(unresolvedSymbols.length ? { unresolved_symbols: unresolvedSymbols } : {}),
   };
   const path = writePacket(input.projectDir, packet, routeToPending ? "pending" : "packets");
   recordMemoryAudit(input.projectDir, "capture", [packet], {
@@ -16618,6 +17083,11 @@ export function capture(input: CaptureInput): CaptureResult {
   });
   return { ok: true, packet, path, errors: [], warnings, ...(contradictions.length ? { contradictions } : {}) };
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § REGISTRY
+// ══════════════════════════════════════════════════════════════════════════
 
 export function createPublicCandidate(projectDir: string, id: string): PublicCandidateResult {
   ensureMemoryDirs(projectDir);
@@ -16759,6 +17229,11 @@ export function registryRecommendations(projectDir: string): RegistryRecommendat
 
   return recommendations.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// § AGENTS
+// ══════════════════════════════════════════════════════════════════════════
 
 export function setupAgent(agent: SetupAgent, projectDir: string, options: { write?: boolean; serverPath?: string; homeDir?: string } = {}): AgentSetupResult {
   if (!SETUP_AGENTS.includes(agent)) throw new Error(`Unsupported agent: ${agent}`);
@@ -18581,6 +19056,11 @@ export function proposeFromDiff(projectDir: string): DiffProposalResult {
   };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// § LIFECYCLE
+// ══════════════════════════════════════════════════════════════════════════
+
 export function buildBranchOverlay(projectDir: string): BranchOverlay {
   ensureMemoryDirs(projectDir);
   const status = readGit(projectDir, ["status", "--porcelain", "-uall"]) ?? "";
@@ -20269,6 +20749,207 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     errors: [],
     warnings,
   };
+}
+
+// This repo's own commit subjects can run to hundreds of characters (a dispatch
+// brief as the subject line), so printing them verbatim turned the triage surface
+// into the same context-bloat disease kage_refresh had (149,739 -> 11,923 chars) —
+// a ~5KB-per-packet dump is worse than opening the cited files directly. Truncate
+// each subject on a word boundary so the line stays a scan-able one-liner; commit
+// bodies are never read here (--oneline never includes them) or printed.
+const STALE_TRIAGE_COMMIT_SUBJECT_MAX_CHARS = 72;
+// Per moved path, 3 commits is plenty to judge "did this just move or did the
+// claim change" — showing more re-introduces the bloat this fix removes.
+const STALE_TRIAGE_MAX_COMMITS_PER_PATH = 3;
+
+function truncateCommitSubject(subject: string, maxChars = STALE_TRIAGE_COMMIT_SUBJECT_MAX_CHARS): string {
+  if (subject.length <= maxChars) return subject;
+  const cut = subject.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  // Only break on a word boundary if it doesn't throw away most of the budget;
+  // otherwise a single very long first word would collapse to almost nothing.
+  const boundary = lastSpace > maxChars * 0.4 ? cut.slice(0, lastSpace) : cut;
+  return `${boundary.trimEnd()}…`;
+}
+
+// `git log --oneline` lines are "<short-hash> <subject>" — split once so the hash
+// is never truncated along with the (possibly very long) subject.
+function truncateOnelineCommit(line: string): string {
+  const spaceIndex = line.indexOf(" ");
+  if (spaceIndex === -1) return truncateCommitSubject(line);
+  const hash = line.slice(0, spaceIndex);
+  const subject = line.slice(spaceIndex + 1);
+  return `${hash} ${truncateCommitSubject(subject)}`;
+}
+
+function formatOnelineCommits(lines: string[]): string {
+  const shown = lines.slice(0, STALE_TRIAGE_MAX_COMMITS_PER_PATH).map(truncateOnelineCommit);
+  const remainder = lines.length - shown.length;
+  return remainder > 0 ? `${shown.join(" | ")} (+${remainder} more)` : shown.join(" | ");
+}
+
+// Best-effort "what changed under this path" line for triage: prefer commits since
+// the packet was last verified (the window a human actually needs to review); fall
+// back to the most recent commits touching the path when that window is empty
+// (clock skew, or the packet has never been reverified). Outside a git repo, or for
+// a path git has no history for, readGit returns null and we say so plainly instead
+// of pretending there is nothing to review.
+function whatChangedUnderPath(projectDir: string, path: string, sinceIso: string | null): string {
+  const sinceArgs = sinceIso ? [`--since=${sinceIso}`] : [];
+  const scoped = readGit(projectDir, ["log", "--oneline", "-n", "5", ...sinceArgs, "--", path]);
+  const scopedLines = scoped ? scoped.split("\n").filter(Boolean) : [];
+  if (scopedLines.length) return formatOnelineCommits(scopedLines);
+  const fallback = readGit(projectDir, ["log", "--oneline", "-n", "3", "--", path]);
+  const fallbackLines = fallback ? fallback.split("\n").filter(Boolean) : [];
+  if (fallbackLines.length) return formatOnelineCommits(fallbackLines);
+  return "no git history found for this path (not a git repo, or nothing committed against it)";
+}
+
+// Rescue-worthiness heuristic for `kage stale`. Deliberately cheap and additive —
+// no learned weights, just signals already stored on the packet:
+//  - type (0-3): a decision/convention/runbook/reference's claim is about intent or
+//    process, which usually outlives the exact file it cites moving; a bug_fix or
+//    code_explanation's claim is tied to the code as it was, which usually does not
+//    survive a rewrite. workflow/gotcha sit in between.
+//  - quality.score (0-3): higher-quality packets are worth a reviewer's time; an
+//    ungraded packet gets a neutral 1 rather than 0, so it isn't buried under every
+//    scored packet purely for lacking a score.
+//  - uses_30d (0-3, log-scaled): packets agents actually recalled recently pay back
+//    the triage minute; a packet nobody has used in 30 days barely moves this.
+//  - survival ratio (0-2): the fraction of cited paths that DIDN'T move. More intact
+//    grounding means a cheaper, safer reverify — that is worth ranking up too.
+const STALE_RESCUE_TYPE_WEIGHT: Record<string, number> = {
+  decision: 3,
+  convention: 3,
+  runbook: 2,
+  reference: 2,
+  workflow: 1,
+  gotcha: 1,
+  bug_fix: 0,
+  code_explanation: 0,
+};
+
+function staleRescueScore(
+  packet: MemoryPacket,
+  presentCount: number,
+  totalCount: number,
+  accessEntry: MemoryAccessEntry | undefined,
+): number {
+  const typeComponent = STALE_RESCUE_TYPE_WEIGHT[packet.type] ?? 1;
+  const rawQualityScore = qualityScore(packet);
+  const qualityComponent = rawQualityScore === null ? 1 : (Math.max(0, Math.min(100, rawQualityScore)) / 100) * 3;
+  const usesComponent = Math.min(3, Math.log1p(accessEntry?.uses_30d ?? 0) * 1.5);
+  const survivalComponent = totalCount > 0 ? (presentCount / totalCount) * 2 : 0;
+  return Number((typeComponent + qualityComponent + usesComponent + survivalComponent).toFixed(2));
+}
+
+// The triage surface for the ~20% of memory that a large refactor withholds from
+// recall (see the module comment above staleCatch for why withholding is correct
+// behaviour that must stay). This is READ-ONLY: it never mutates a packet or clears
+// a stale flag. It exists so a human can decide, per packet, "does this claim still
+// hold?" — and then paste the ONE command (reverify or supersede) that acts on that
+// one decision. There is deliberately no flag here that touches more than one packet:
+// reverifyMemory only re-checks that cited paths exist and refreshes fingerprints, it
+// does NOT re-check whether the packet's claim is still true, so looping it over every
+// stale packet would clear 93 honest "not sure this still holds" flags while verifying
+// nothing — converting the one property this product sells into a lie. That command
+// must not exist; this surface is the alternative.
+export function staleTriage(projectDir: string, options: { limit?: number } = {}): StaleTriageResult {
+  ensureMemoryDirs(projectDir);
+  const limit = Math.max(1, Math.floor(options.limit ?? 20));
+  const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
+  const approved = loadApprovedPackets(projectDir);
+  const access = readMemoryAccessEntries(projectDir, approved);
+
+  const entries: StaleTriageEntry[] = [];
+  for (const packet of approved) {
+    const reasons = staleMemoryReasons(projectDir, packet, fingerprintCache);
+    if (!reasons.length) continue;
+
+    const citedPaths = unique([
+      ...packet.paths,
+      ...packetStoredPathFingerprints(packet).map((fingerprint) => fingerprint.path),
+    ]).filter(fingerprintableMemoryPath);
+    const missingPaths = citedPaths.filter((path) => !existsSync(join(projectDir, path)));
+    const changedContentPaths = changedPathsFromStaleReasons(reasons).filter((path) => !missingPaths.includes(path));
+    const movedPaths = unique([...missingPaths, ...changedContentPaths]);
+    const presentPaths = citedPaths.filter((path) => !movedPaths.includes(path));
+    const allCitedGone = citedPaths.length > 0 && missingPaths.length === citedPaths.length;
+
+    const freshness = (packet.freshness ?? {}) as Record<string, unknown>;
+    const lastVerifiedAt = typeof freshness.last_verified_at === "string"
+      ? freshness.last_verified_at
+      : (typeof packet.updated_at === "string" ? packet.updated_at : null);
+
+    const action: StaleTriageEntry["suggested_action"] = allCitedGone ? "supersede" : "reverify";
+    const command = action === "reverify"
+      ? `kage reverify --project ${projectDir} --packet ${packet.id}`
+      : `kage supersede --project ${projectDir} --packet ${packet.id} --replacement <new-packet-id>`;
+
+    entries.push({
+      id: packet.id,
+      type: packet.type,
+      title: packet.title,
+      status: packet.status,
+      reasons,
+      total_paths: citedPaths.length,
+      moved_paths: movedPaths,
+      missing_paths: missingPaths,
+      present_paths: presentPaths,
+      what_changed: movedPaths.slice(0, 6).map((path) => ({
+        path,
+        summary: whatChangedUnderPath(projectDir, path, lastVerifiedAt),
+      })),
+      rescue_score: staleRescueScore(packet, presentPaths.length, citedPaths.length, access.get(packet.id)),
+      suggested_action: action,
+      command,
+      quality_score: qualityScore(packet),
+      uses_30d: access.get(packet.id)?.uses_30d ?? 0,
+      last_verified_at: lastVerifiedAt,
+    });
+  }
+
+  entries.sort((a, b) => b.rescue_score - a.rescue_score || a.title.localeCompare(b.title));
+  const shown = entries.slice(0, limit);
+  return {
+    ok: true,
+    project_dir: projectDir,
+    generated_at: nowIso(),
+    total_stale: entries.length,
+    shown: shown.length,
+    withheld: Math.max(0, entries.length - shown.length),
+    entries: shown,
+    note: "kage reverify only refreshes GROUNDING (cited paths + fingerprints) — it does not re-check whether the claim is still true. \"what changed\" below is evidence for you to judge that; the tool isn't judging it for you.",
+  };
+}
+
+// Shared human rendering for `kage stale` (CLI and tests share this so a printed
+// empty-state or entry line can't drift from what staleTriage actually returned).
+export function formatStaleTriage(result: StaleTriageResult, limitUsed: number): string[] {
+  if (!result.total_stale) {
+    return [
+      "No stale memory to triage — every approved packet's cited grounding still checks out.",
+      "This is computed live, so re-run it after a large refactor to catch what moved.",
+    ];
+  }
+  const lines: string[] = [
+    `Kage stale triage: ${result.total_stale} packet(s) need a human call, ranked by rescue value (highest first)`,
+    result.note,
+  ];
+  for (const entry of result.entries) {
+    lines.push("");
+    lines.push(`- [${entry.type}] ${entry.title}`);
+    lines.push(`  ${entry.id}`);
+    lines.push(`  rescue score ${entry.rescue_score} · quality ${entry.quality_score ?? "n/a"} · uses/30d ${entry.uses_30d} · paths survived ${entry.present_paths.length}/${entry.total_paths}`);
+    lines.push(`  moved: ${entry.moved_paths.join(", ") || "(none listed)"}`);
+    for (const change of entry.what_changed) lines.push(`    ${change.path}: ${change.summary}`);
+    lines.push(`  suggested: ${entry.suggested_action} -> ${entry.command}`);
+  }
+  if (result.withheld) {
+    lines.push("");
+    lines.push(`...${result.withheld} more withheld by --limit ${limitUsed}. Raise --limit to see them.`);
+  }
+  return lines;
 }
 
 export function kageMemoryLineage(projectDir: string): MemoryLineageReport {
