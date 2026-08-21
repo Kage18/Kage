@@ -11,6 +11,7 @@ import { diffBudget } from "./config.js";
 import { type CheckOutcome, type CheckSpec, type ClaimRecord, type TaskRecord, runEvidenceDir } from "./contract.js";
 import { currentBranch, type DiffStats, git } from "./git.js";
 import type { ProgressSink } from "./progress.js";
+import { acquireVerifyLock, formatLockNote } from "./verify-lock.js";
 
 // 20 min, raised from 10 on 2026-08-20: the full suite (1060+ tests, several >10s
 // integration tests) outgrew the old cap in a cold worktree under concurrent
@@ -94,6 +95,10 @@ export interface TreeKillSpawnResult {
   error?: NodeJS.ErrnoException;
   /** True only when this call's own timeout fired and a group sweep ran. */
   treeKilled: boolean;
+  /** Milliseconds spent waiting for the per-machine verification lock before this command started. */
+  lockWaitMs: number;
+  /** Set only when a dead holder's stale verification lock was stolen to let this command run. */
+  lockStolenFromPid?: number;
 }
 
 /**
@@ -101,6 +106,12 @@ export interface TreeKillSpawnResult {
  * (`detached: true`) and a timeout sweeps the WHOLE group — SIGTERM, a TREE_KILL_GRACE_MS
  * grace, then SIGKILL — instead of leaving orphaned descendants running past the verdict
  * that was supposed to be their last word.
+ *
+ * Also the one choke point every executed check passes through, which is why the
+ * per-machine verification lock (verify-lock.ts) is acquired HERE rather than in each
+ * call site separately: declared "command" checks (below) and static-checks.ts's own
+ * typecheck/app-parse commands both funnel through this one function, so locking it once
+ * covers all of them. Held only for the duration of this one command, never the whole run.
  *
  * Exported so static-checks.ts's kernel-executed checks (tsc, the composed-page parse)
  * share this exact fix instead of a second hand-rolled copy that could drift — same
@@ -112,34 +123,41 @@ export function spawnWithTreeKill(
   options: { cwd: string; shell?: boolean; maxBuffer?: number },
   timeoutMs: number,
 ): TreeKillSpawnResult {
-  // @types/node's SpawnSyncOptions omits `detached` (it's only typed on the async
-  // SpawnOptions), even though the underlying binding honors it for spawnSync exactly the
-  // same way — confirmed empirically (see this run's claim). Built as a plain, unannotated
-  // object rather than an inline literal argument so the extra property is structurally
-  // allowed instead of tripping TS's excess-property check.
-  const spawnOptions = {
-    cwd: options.cwd,
-    shell: options.shell ?? false,
-    encoding: "utf8" as const,
-    stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs,
-    killSignal: "SIGTERM" as const,
-    maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
-    detached: true,
-  };
-  const result = spawnSync(cmd, args, spawnOptions);
-  // SpawnSyncReturns types `error` as a plain Error — Node itself attaches `.code` (a
-  // Node.js errno exception) at runtime, same as any other child_process spawn error.
-  const spawnError = result.error as NodeJS.ErrnoException | undefined;
-  const treeKilled = spawnError?.code === "ETIMEDOUT";
-  if (treeKilled) sweepProcessGroup(result.pid, TREE_KILL_GRACE_MS);
-  return {
-    status: result.status,
-    stdout: String(result.stdout ?? ""),
-    stderr: String(result.stderr ?? ""),
-    error: spawnError,
-    treeKilled,
-  };
+  const lock = acquireVerifyLock();
+  try {
+    // @types/node's SpawnSyncOptions omits `detached` (it's only typed on the async
+    // SpawnOptions), even though the underlying binding honors it for spawnSync exactly the
+    // same way — confirmed empirically (see this run's claim). Built as a plain, unannotated
+    // object rather than an inline literal argument so the extra property is structurally
+    // allowed instead of tripping TS's excess-property check.
+    const spawnOptions = {
+      cwd: options.cwd,
+      shell: options.shell ?? false,
+      encoding: "utf8" as const,
+      stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGTERM" as const,
+      maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
+      detached: true,
+    };
+    const result = spawnSync(cmd, args, spawnOptions);
+    // SpawnSyncReturns types `error` as a plain Error — Node itself attaches `.code` (a
+    // Node.js errno exception) at runtime, same as any other child_process spawn error.
+    const spawnError = result.error as NodeJS.ErrnoException | undefined;
+    const treeKilled = spawnError?.code === "ETIMEDOUT";
+    if (treeKilled) sweepProcessGroup(result.pid, TREE_KILL_GRACE_MS);
+    return {
+      status: result.status,
+      stdout: String(result.stdout ?? ""),
+      stderr: String(result.stderr ?? ""),
+      error: spawnError,
+      treeKilled,
+      lockWaitMs: lock.waitedMs,
+      lockStolenFromPid: lock.stolenFromPid,
+    };
+  } finally {
+    lock.handle.release();
+  }
 }
 
 // Exported so static-checks.ts (kernel-executed checks that are not part of a declared
@@ -173,11 +191,12 @@ export function runCommandCheck(
   // and still does — only a non-zero/timed-out outcome pulls stderr into the evidence too.
   const stdout = exitCode === 0 ? spawned.stdout : `${spawned.stdout}\n${spawned.stderr}`;
   const treeKillNote = spawned.treeKilled ? ` (timeout after ${timeoutMs / 1000}s - process tree killed)` : "";
+  const lockNote = formatLockNote(spawned.lockWaitMs, spawned.lockStolenFromPid);
   const evidence = writeEvidence(
     projectDir,
     runId,
     check.id,
-    `$ ${check.cmd}\n(cwd: ${worktreeDir})\n\n${stdout}\n\n--- exit code: ${exitCode}${treeKillNote} ---\n`,
+    `$ ${check.cmd}\n(cwd: ${worktreeDir})\n\n${stdout}\n\n--- exit code: ${exitCode}${treeKillNote}${lockNote} ---\n`,
   );
   // A missing interpreter/binary means the environment could not run the check. Saying
   // "unverified" here is the whole honesty contract: absence of proof is never proof.

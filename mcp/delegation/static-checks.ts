@@ -12,6 +12,7 @@ import { runInNewContext } from "node:vm";
 import { staticChecksEnabled } from "./config.js";
 import type { CheckOutcome, CheckResultKind } from "./contract.js";
 import { spawnWithTreeKill, writeEvidence } from "./verify.js";
+import { formatLockNote } from "./verify-lock.js";
 
 const STATIC_CHECK_TIMEOUT_MS = 120_000;
 // "command not found" / "cannot execute" — the environment could not run the check at
@@ -56,12 +57,17 @@ interface CommandResult {
   output: string;
   /** True only when this call's own timeout fired and verify.ts's group sweep ran. */
   treeKilled: boolean;
+  /** Milliseconds this command waited for verify.ts's per-machine verification lock. */
+  lockWaitMs: number;
+  /** Set only when a dead holder's stale verification lock was stolen to let this command run. */
+  lockStolenFromPid?: number;
 }
 
 // No shell, fixed argument arrays throughout — never a string built from worktree-derived
 // paths handed to a shell for interpretation. Runs through verify.ts's spawnWithTreeKill so
 // a hung tsc/node process tree gets the same group-kill fix declared checks get, rather
-// than a second hand-rolled timeout path that could quietly drift from it.
+// than a second hand-rolled timeout path that could quietly drift from it — and the same
+// per-machine verification lock, since spawnWithTreeKill is where that is acquired.
 function runCommand(cmd: string, args: string[], cwd: string): CommandResult {
   const spawned = spawnWithTreeKill(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024 }, STATIC_CHECK_TIMEOUT_MS);
   const exitCode = spawned.treeKilled
@@ -72,7 +78,7 @@ function runCommand(cmd: string, args: string[], cwd: string): CommandResult {
   // The success path only ever reported stdout (stderr silently dropped) before this fix
   // and still does — only a non-zero/timed-out outcome pulls stderr into the output too.
   const output = exitCode === 0 ? spawned.stdout : `${spawned.stdout}\n${spawned.stderr}`;
-  return { exitCode, output, treeKilled: spawned.treeKilled };
+  return { exitCode, output, treeKilled: spawned.treeKilled, lockWaitMs: spawned.lockWaitMs, lockStolenFromPid: spawned.lockStolenFromPid };
 }
 
 function resultFor(exitCode: number): CheckResultKind {
@@ -99,6 +105,8 @@ function writeCheckEvidence(
   exitCode: number,
   output: string,
   treeKilled: boolean,
+  lockWaitMs: number,
+  lockStolenFromPid: number | undefined,
   errorPattern?: RegExp,
 ): string {
   const detail = summarize(output, errorPattern, 5) || "(no output)";
@@ -108,11 +116,12 @@ function writeCheckEvidence(
         ? ` (timeout after ${STATIC_CHECK_TIMEOUT_MS / 1000}s - process tree killed, not counted as a failure)`
         : ` (timeout after ${STATIC_CHECK_TIMEOUT_MS / 1000}s — could not judge, not counted as a failure)`
       : "";
+  const lockNote = formatLockNote(lockWaitMs, lockStolenFromPid);
   return writeEvidence(
     projectDir,
     runId,
     id,
-    `$ ${cmdLabel}\n(cwd: ${cwd})\n\n${detail}\n\n--- exit code: ${exitCode}${timeoutNote} ---\n`,
+    `$ ${cmdLabel}\n(cwd: ${cwd})\n\n${detail}\n\n--- exit code: ${exitCode}${timeoutNote}${lockNote} ---\n`,
   );
 }
 
@@ -120,9 +129,11 @@ const TS_ERROR_PATTERN = /error TS\d+/;
 
 function runTypecheck(projectDir: string, runId: string, worktreeDir: string, tsconfigRel: string): CheckOutcome {
   const { cmd, args, label } = resolveTscCommand(worktreeDir, tsconfigRel);
-  const { exitCode, output, treeKilled } = runCommand(cmd, args, worktreeDir);
+  const { exitCode, output, treeKilled, lockWaitMs, lockStolenFromPid } = runCommand(cmd, args, worktreeDir);
   const result = resultFor(exitCode);
-  const evidence = writeCheckEvidence(projectDir, runId, "static-typecheck", label, worktreeDir, exitCode, output, treeKilled, TS_ERROR_PATTERN);
+  const evidence = writeCheckEvidence(
+    projectDir, runId, "static-typecheck", label, worktreeDir, exitCode, output, treeKilled, lockWaitMs, lockStolenFromPid, TS_ERROR_PATTERN,
+  );
   return {
     id: "static-typecheck",
     kind: "command",
@@ -201,9 +212,11 @@ function runComposedPageCheck(projectDir: string, runId: string, worktreeDir: st
   const tmpFile = join(tmpDir, "composed-app.js");
   try {
     writeFileSync(tmpFile, script, "utf8");
-    const { exitCode, output, treeKilled } = runCommand(process.execPath, ["--check", tmpFile], tmpDir);
+    const { exitCode, output, treeKilled, lockWaitMs, lockStolenFromPid } = runCommand(process.execPath, ["--check", tmpFile], tmpDir);
     const result = resultFor(exitCode);
-    const evidence = writeCheckEvidence(projectDir, runId, "static-app-parse", "node --check <composed inline script>", worktreeDir, exitCode, output, treeKilled);
+    const evidence = writeCheckEvidence(
+      projectDir, runId, "static-app-parse", "node --check <composed inline script>", worktreeDir, exitCode, output, treeKilled, lockWaitMs, lockStolenFromPid,
+    );
     return { id: "static-app-parse", kind: "command", cmd: "node --check <composed inline script>", expect, result, exit_code: exitCode, evidence };
   } finally {
     try {
