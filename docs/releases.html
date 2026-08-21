@@ -157,6 +157,27 @@
       <section class="section">
         <div class="wrap">
           <div class="section-head">
+            <span class="eyebrow">Desktop app</span>
+            <h2>Kage.app for macOS</h2>
+          </div>
+          <p class="lede">A thin native shell over the same daemon the CLI runs — dock presence, a global hotkey, native notifications. Grab the latest <code>.dmg</code> from <a href="https://github.com/kage-core/Kage/releases">GitHub releases</a> (look for the newest release with a <code>Kage-&lt;version&gt;.dmg</code> asset).</p>
+          <div class="highlights">
+            <div class="highlight">
+              <strong>Unsigned builds: right-click → Open</strong>
+              <span>Builds without a paid Apple Developer ID are ad-hoc signed, so macOS shows "unidentified developer" on first launch. Right-click the app in Finder and choose <strong>Open</strong> once — after that it opens normally.</span>
+            </div>
+            <div class="highlight">
+              <strong>Auto-update, once installed</strong>
+              <span>The app checks for updates on launch and every 4 hours, and installs on restart via a "Restart to Update…" menu item — never a dialog that interrupts a working session. Ad-hoc (unsigned) builds can't install updates themselves, so they notify you instead and point back to this releases page.</span>
+            </div>
+          </div>
+          <p class="lede" style="margin-top: 14px;">Prefer the CLI? <code>npx -y @kage-core/kage-graph-mcp install</code> works everywhere the desktop app doesn't need to.</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="wrap">
+          <div class="section-head">
             <span class="eyebrow">Release channels</span>
             <h2>Where to look</h2>
           </div>

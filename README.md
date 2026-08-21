@@ -128,6 +128,24 @@ kage app --project <dir>
 kage projects add <dir> --agent claude
 ```
 
+## Desktop app
+
+A thin native shell (macOS, arm64 only) over the same daemon the CLI runs — dock presence,
+a global hotkey, native notifications. Download the latest `.dmg` from
+[GitHub releases](https://github.com/kage-core/Kage/releases) (look for a
+`Kage-<version>.dmg` asset).
+
+Unsigned builds show macOS's "unidentified developer" prompt on first launch —
+right-click the app in Finder and choose **Open** once. Once installed, it checks for
+updates on launch and every 4 hours and installs on restart; ad-hoc (unsigned) builds
+can't self-install and notify you instead, linking back to the releases page.
+
+Prefer the CLI? The one-line install works everywhere the app doesn't need to:
+
+```bash
+npx -y @kage-core/kage-graph-mcp install
+```
+
 ## What is Kage
 
 Kage is an orchestrator for coding agents, built on a memory layer. As your agent works, it captures what it learns
