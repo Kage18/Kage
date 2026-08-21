@@ -295,7 +295,18 @@ export type RoomControlOp = { op: "ask"; message: string } | { op: "status" } | 
  */
 export type RoomStreamEvent =
   | { kind: "tool" | "text"; text: string }
-  | { kind: "final"; text: string; tools: string[]; corrections?: string[] }
+  | {
+      kind: "final";
+      text: string;
+      tools: string[];
+      corrections?: string[];
+      /** False when the manager's OWN text came back empty — computed before `text` is
+       * substituted with EMPTY_MANAGER_REPLY_TEXT, so the caller (api.ts's
+       * resolveRoomReply) can tell a genuine empty reply from the honest sentinel this
+       * module already fills in for it. Undefined only for the control socket's own
+       * "busy"/"stopping" replies, which reuse kind:"final" but are never a chat turn. */
+      ok?: boolean;
+    }
   | { kind: "error"; text: string };
 
 function userFrame(message: string): string {
@@ -428,6 +439,11 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
         const parsed = JSON.parse(line) as { type?: string; result?: unknown };
         if (parsed.type === "result" && activeTurn) {
           const rawText = typeof parsed.result === "string" ? parsed.result : "";
+          // Captured before the EMPTY_MANAGER_REPLY_TEXT substitution below — that
+          // substitution exists so the TEXT always reads honestly, but it also means
+          // `text` is never actually falsy, so a caller checking it for emptiness (to
+          // decide whether to retry) would never see one. `ok` is that real signal.
+          const ok = Boolean(rawText.trim());
           const guarded = guardManagerProse(rawText || EMPTY_MANAGER_REPLY_TEXT, collectManagerFacts(projectDir));
           // Tool names arrived interleaved with "say" text in the tool-push above —
           // separate them back out by re-deriving from the raw lines would duplicate
@@ -449,6 +465,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
             kind: "final",
             text,
             tools: turn.tools,
+            ok,
             ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
           });
           // Now idle: pick up anything the event bridge left pending while this turn

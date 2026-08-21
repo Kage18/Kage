@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 
 import { roomDirFor } from "./room-sessions.js";
+import type { RoomActions } from "./room-actions.js";
 
 export interface RoomHistoryTurn {
   role: "you" | "kage";
@@ -18,6 +19,12 @@ export interface RoomHistoryTurn {
   tools?: string[];
   /** Card numbers the manager restated and the kernel checked on the way out. */
   corrections?: string[];
+  /** Parsed from a trailing kage-actions fence (room-actions.ts) and stripped out of
+   * `text` before this turn was persisted — chips/cards the client renders so the user
+   * can click instead of typing. Undefined (never present) for a "you" turn, or a "kage"
+   * turn whose reply carried no valid kage-actions block — additive, so a turn recorded
+   * before this field existed still renders exactly as it always did. */
+  actions?: RoomActions;
   /** Which session actually produced a "kage" turn: the live interactive pty session,
    * or the headless fallback (a live -p supervisor or the one-shot askManager path).
    * Undefined for a "you" turn, or a "kage" turn from a test's askRoomFn override that
