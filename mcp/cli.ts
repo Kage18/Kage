@@ -293,12 +293,12 @@ Usage:
   kage replay --project <dir> [--session <id>] [--limit <n>] [--json]
   kage distill --project <dir> --session <id> [--auto] [--json]
   kage resume --project <dir> [--json]
-  kage learn --project <dir> --learning <text> [--personal] [--title <title>] [--type <type>] [--evidence <text>] [--verified-by <text>] [--tags a,b] [--paths a,b] [--graph-nodes a,b] [--discovery-tokens <n>] [--allow-missing-paths]
+  kage learn --project <dir> --learning <text> [--personal] [--title <title>] [--type <type>] [--evidence <text>] [--verified-by <text>] [--tags a,b] [--paths a,b] [--graph-nodes a,b] [--discovery-tokens <n>] [--allow-missing-paths] [--allow-low-quality]
   kage sync setup --remote <git-url>            init ~/.kage/memory as a git repo wired to your private remote
   kage sync [--json]                            commit + pull --rebase + push personal memory (newest-wins conflicts)
   kage sync --status [--json]                   ahead/behind/dirty for the personal store (fetch only)
   kage feedback --project <dir> --packet <packet-id> --kind helpful|wrong|stale
-  kage capture --project <dir> --title <title> --body <body> [--type <type>] [--summary <summary>] [--tags a,b] [--paths a,b] [--stack a,b] [--graph-nodes a,b] [--allow-missing-paths]
+  kage capture --project <dir> --title <title> --body <body> [--type <type>] [--summary <summary>] [--tags a,b] [--paths a,b] [--stack a,b] [--graph-nodes a,b] [--allow-missing-paths] [--allow-low-quality]
   kage propose --project <dir> --from-diff
   kage review-artifact --project <dir>
   kage promote --project <dir> --public <packet-id>
@@ -1160,6 +1160,10 @@ async function main(): Promise<void> {
     }
     const label = dryRun ? " [dry-run]" : "";
     console.log(`Kage GC${label} — scanned ${result.total_scanned} packets`);
+    if (result.excluded_end_state.length) {
+      console.log(`\nExcluded end-state (${result.excluded_end_state.length}, already deprecated/superseded — not re-processed):`);
+      for (const p of result.excluded_end_state) console.log(`  ⊘ ${p.title} [${p.status}]`);
+    }
     if (result.deprecated.length) {
       console.log(`\nDeprecated (${result.deprecated.length}):`);
       for (const p of result.deprecated) console.log(`  ✗ ${p.title} — ${p.reason}`);
@@ -1168,9 +1172,27 @@ async function main(): Promise<void> {
       console.log(`\nDeleted (${result.deleted.length}):`);
       for (const p of result.deleted) console.log(`  🗑  ${p.title}`);
     }
-    if (!result.deprecated.length && !result.deleted.length) {
-      console.log("No stale packets found — memory is clean.");
+    if (result.merged_duplicates.length) {
+      console.log(`\nAuto-merged duplicates >= 0.95 similarity (${result.merged_duplicates.length}):`);
+      for (const m of result.merged_duplicates) console.log(`  ⇄ ${m.superseded.title} → superseded by ${m.kept.title} (${m.score})`);
     }
+    if (result.contradiction_pairs.length) {
+      console.log(`\nContradiction pairs — listed, not auto-resolved (${result.contradiction_pairs.length}), ranked by recall traffic:`);
+      for (const c of result.contradiction_pairs) {
+        console.log(`  ⚡ ${c.a.title} <-> ${c.b.title} (recalled ${c.recall_traffic_30d}x/30d)`);
+        console.log(`      ${c.suggestion}`);
+      }
+    }
+    if (!result.deprecated.length && !result.deleted.length && !result.merged_duplicates.length && !result.contradiction_pairs.length && !result.excluded_end_state.length) {
+      console.log("No stale packets, duplicates, or contradictions found — memory is clean.");
+    }
+    console.log(
+      `\nBefore -> After: ${result.before.total_packets} -> ${result.after.total_packets} packets` +
+        ` · stale ${result.before.stale} -> ${result.after.stale}` +
+        ` · duplicate pairs (>=0.95) ${result.before.duplicate_pairs_ge_95} -> ${result.after.duplicate_pairs_ge_95}` +
+        ` · contradiction pairs ${result.before.contradiction_pairs} -> ${result.after.contradiction_pairs}` +
+        (dryRun ? " (dry-run: nothing written, after == before)" : "")
+    );
     return;
   }
 
@@ -2463,6 +2485,7 @@ async function main(): Promise<void> {
       strictCitations: true,
       strictContradictions: args.includes("--strict-contradictions"),
       discoveryTokens: args.includes("--discovery-tokens") ? numberArg(args, "--discovery-tokens", 0) : undefined,
+      allowLowQuality: args.includes("--allow-low-quality"),
     });
     if (!result.ok) {
       console.error(`Learning capture blocked:\n${result.errors.map((error) => `  - ${error}`).join("\n")}`);
@@ -2732,6 +2755,7 @@ async function main(): Promise<void> {
       allowMissingPaths: args.includes("--allow-missing-paths"),
       strictCitations: true,
       strictContradictions: args.includes("--strict-contradictions"),
+      allowLowQuality: args.includes("--allow-low-quality"),
     };
     const result = capture(input);
     if (!result.ok) {

@@ -264,6 +264,7 @@ test("MCP kage_capture creates repo-local memory and blocks sensitive input", as
     title: "Run webhook tests",
     body: "Run npm test -- webhooks after billing changes.",
     type: "runbook",
+    allow_low_quality: true,
   });
   assert.equal(safe.isError, false);
   assert.match(textContent(safe), /Captured repo-local packet/);
@@ -648,6 +649,7 @@ test("MCP kage_inbox returns actionable memory review items", async () => {
     body: "This packet needs structured follow-up context.",
     type: "reference",
     paths: ["src/server.ts"],
+    allow_low_quality: true,
   });
 
   const result = await callTool("kage_inbox", { project_dir: project });
