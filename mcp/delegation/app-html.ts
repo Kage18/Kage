@@ -97,16 +97,31 @@ ${APP_STYLES}
       <div class="room-banner" id="room-banner" style="display:none"></div>
       <div class="room-scroll"><div class="room-col" id="room-col">
         <div class="primer" id="room-primer">
-          <div class="pseal"><svg class="pseal-eye" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris2" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris2)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg></div>
-          <p>Tell Kage what should happen. It reads the room, compiles a brief from what this repo has learned, hires an agent in a worktree, and reports back once the kernel — not the agent — has checked the work.</p>
-          <div class="loopstrip">
-            <span class="ls-step">you ask</span><span class="ls-arrow">→</span>
-            <span class="ls-step">brief from repo memory</span><span class="ls-arrow">→</span>
-            <span class="ls-step">agent works in a worktree</span><span class="ls-arrow">→</span>
-            <span class="ls-step">Kage re-runs the checks</span><span class="ls-arrow">→</span>
-            <span class="ls-step">merge lands code + learnings</span>
+          <div id="primer-default">
+            <div class="pseal"><svg class="pseal-eye" viewBox="0 0 96 96" aria-hidden="true"><defs><radialGradient id="kiris2" cx="50%" cy="50%" r="58%"><stop offset="0" stop-color="#eafff4"/><stop offset=".32" stop-color="#39ff9a"/><stop offset=".72" stop-color="#0bbf67"/><stop offset="1" stop-color="#06351f"/></radialGradient></defs><path d="M9 49c9-15 22-23 39-23s30 8 39 23c-9 14-22 21-39 21S18 63 9 49Z" fill="#06130d" stroke="#39ff9a" stroke-width="3"/><circle cx="48" cy="48" r="16" fill="url(#kiris2)"/><circle cx="48" cy="48" r="6" fill="#020405"/><path d="M24 47c7-7 15-10 24-10s17 3 24 10" stroke="#eafff4" stroke-width="2" stroke-linecap="round" opacity=".72"/></svg></div>
+            <p>Tell Kage what should happen. It reads the room, compiles a brief from what this repo has learned, hires an agent in a worktree, and reports back once the kernel — not the agent — has checked the work.</p>
+            <div class="loopstrip">
+              <span class="ls-step">you ask</span><span class="ls-arrow">→</span>
+              <span class="ls-step">brief from repo memory</span><span class="ls-arrow">→</span>
+              <span class="ls-step">agent works in a worktree</span><span class="ls-arrow">→</span>
+              <span class="ls-step">Kage re-runs the checks</span><span class="ls-arrow">→</span>
+              <span class="ls-step">merge lands code + learnings</span>
+            </div>
+            <div class="loophint">⌘⏎ skips the conversation and dispatches a run immediately</div>
           </div>
-          <div class="loophint">⌘⏎ skips the conversation and dispatches a run immediately</div>
+          <div id="primer-firstopen">
+            <div class="fo-card">
+              <h1>No orchestrator is running for this project.</h1>
+              <p>The orchestrator is a real agent session with Kage's tools — it plans, hires workers into isolated worktrees, and reports with receipts. Start it, then just say what you want done.</p>
+              <button class="fo-start" id="fo-start">Start the orchestrator</button>
+              <div class="fo-teach">
+                <div class="fo-t"><span class="k">⏎</span>ask Kage anything about this repo</div>
+                <div class="fo-t"><span class="k">⌘⏎</span>dispatch a single run directly — no orchestrator needed</div>
+                <div class="fo-t"><span class="k">⌥⏎</span>orchestrate a multi-run goal with approval gates</div>
+              </div>
+              <div class="fo-note">First time here? The board fills as runs are hired — nothing is faked meanwhile.</div>
+            </div>
+          </div>
         </div>
         <div id="room-turns"></div>
         <div class="typing" id="room-typing" style="display:none"><span id="room-typing-text">thinking</span><span class="dots"><i></i><i></i><i></i></span></div>

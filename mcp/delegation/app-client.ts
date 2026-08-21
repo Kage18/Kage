@@ -1318,26 +1318,33 @@ function renderTranscriptTurns(turnsEl, turns) {
     turnsEl.appendChild(wrap);
   });
 }
-function renderPresenceBanner() {
+// Shared by the thin presence banner and the first-open teach card's own Start
+// button (docs/design/mockups/FirstOpen.dc.html) — one start mechanism, two places
+// it can be reached from. The same path the Terminal tab already uses to bring the
+// orchestrator's pty up (primeTerminal/ensurePtyAttached) — no new start mechanism
+// invented for this.
+function startOrchestrator(btn, label) {
+  btn.disabled = true;
+  btn.textContent = "starting…";
+  api("/room/pty/snapshot?session=" + encodeURIComponent(state.session)).then(function () {
+    refreshRoom();
+  }).catch(function () {
+    btn.disabled = false;
+    btn.textContent = label;
+  });
+}
+function renderPresenceBanner(firstOpen) {
   var banner = document.getElementById("room-banner");
   if (!banner) return;
-  if (state.room.live) { banner.style.display = "none"; return; }
+  // The first-open teach card already says "no orchestrator" with its own Start
+  // button — stacking this thin banner on top of it would repeat the same message
+  // twice on the one screen a new user sees first.
+  if (state.room.live || firstOpen) { banner.style.display = "none"; return; }
   banner.textContent = "";
   banner.style.display = "flex";
   banner.appendChild(h("span", "", "No orchestrator is running"));
   var start = h("button", "btn primary sm", "Start");
-  start.onclick = function () {
-    start.disabled = true;
-    start.textContent = "starting…";
-    // The same path the Terminal tab already uses to bring the orchestrator's pty up
-    // (primeTerminal/ensurePtyAttached) — no new start mechanism invented for this.
-    api("/room/pty/snapshot?session=" + encodeURIComponent(state.session)).then(function () {
-      refreshRoom();
-    }).catch(function () {
-      start.disabled = false;
-      start.textContent = "Start";
-    });
-  };
+  start.onclick = function () { startOrchestrator(start, "Start"); };
   banner.appendChild(start);
 }
 function renderRoom() {
@@ -1348,16 +1355,22 @@ function renderRoom() {
   var turns = useTranscript ? state.transcript.turns : (state.room.turns || []);
   var last = turns.length ? turns[turns.length - 1] : null;
   var linkedCount = Object.keys(roomLinkedRuns).length;
+  // First-open (docs/design/mockups/FirstOpen.dc.html): no orchestrator has ever run
+  // for this project AND nothing has been dispatched yet. Replaces the generic
+  // primer explainer with the designed teach screen — the SAME slot, not a second
+  // empty state living somewhere else.
+  var firstOpen = !state.room.live && !turns.length && !(state.runs || []).length;
   // A cheap fingerprint of what would be painted. refreshRoom polls every 15s and
   // refresh() every 30s, and neither implies the transcript actually changed — every
   // rebuild replayed the .turn entry animation on every existing turn, so the whole
   // thread shimmered continuously. Skip the rebuild entirely when nothing moved.
   var signature = (useTranscript ? "t" : "h") + turns.length + "|" +
     (last ? String(last.text || "").length + ":" + (last.tools ? last.tools.length : 0) : 0) + "|" +
-    (state.room.busy ? "1" : "0") + "|" + linkedCount + "|" + (state.room.live ? "1" : "0") + "|" + (state.room.has_transcript ? "1" : "0");
+    (state.room.busy ? "1" : "0") + "|" + linkedCount + "|" + (state.room.live ? "1" : "0") + "|" + (state.room.has_transcript ? "1" : "0") +
+    "|" + (firstOpen ? "1" : "0");
 
   updateRoomTyping();
-  renderPresenceBanner();
+  renderPresenceBanner(firstOpen);
   document.getElementById("room-send").disabled = state.room.busy;
   if (signature === roomSignature) return;
   roomSignature = signature;
@@ -1367,6 +1380,8 @@ function renderRoom() {
   var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   var turnsEl = document.getElementById("room-turns");
   document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
+  document.getElementById("primer-default").style.display = firstOpen ? "none" : "block";
+  document.getElementById("primer-firstopen").style.display = firstOpen ? "block" : "none";
   turnsEl.textContent = "";
   if (useTranscript) renderTranscriptTurns(turnsEl, turns);
   else renderHistoryTurns(turnsEl, turns);
@@ -3896,6 +3911,9 @@ function showOverlay(on) {
   }
 }
 document.getElementById("m-new").onclick = function () { showOverlay(true); };
+document.getElementById("fo-start").onclick = function () {
+  startOrchestrator(document.getElementById("fo-start"), "Start the orchestrator");
+};
 document.getElementById("dispatch-cancel").onclick = function () { showOverlay(false); };
 document.getElementById("dispatch-go").onclick = dispatchNow;
 function dispatchNow() {
@@ -4104,12 +4122,17 @@ function paletteCommands(query) {
     { grp: "go", name: "Room", hint: "1", run: function () { setView("room"); } },
     { grp: "go", name: "Work", hint: "2", run: function () { setView("work"); } },
     { grp: "go", name: "Memory", hint: "3", run: function () { setView("memory"); } },
+    // docs/design/mockups/Palette.dc.html leads the "do" group with these three —
+    // they used to sit further down the list, past the default query's 12-item cap
+    // (see the slice(0, 12) below), so "Next needing you" in particular never
+    // actually appeared until you typed enough to filter it in.
     { grp: "do", name: "New run…", hint: "n", run: function () { showOverlay(true); } },
     { grp: "do", name: "Orchestrate as a goal…", hint: "⌥⏎", run: function () {
       setView("room");
       flash("type the goal, then ⌥⏎ to send it");
       setTimeout(function () { document.getElementById("room-input").focus(); }, 0);
     } },
+    { grp: "do", name: "Next needing you", hint: "⌥L", run: function () { cycleNeedsYou(1); } },
     { grp: "do", name: "Work: list layout", run: function () { setView("work"); setWorkLayout("list"); } },
     { grp: "do", name: "Work: board layout", run: function () { setView("work"); setWorkLayout("board"); } },
     { grp: "do", name: "Room: chat view", run: function () { setView("room"); setRoomMode("chat"); } },
@@ -4120,7 +4143,6 @@ function paletteCommands(query) {
     { grp: "do", name: "Open another project…", run: function () { addProject(); } },
     { grp: "do", name: "Toggle the projects rail", run: function () { toggleRail(); } },
     { grp: "do", name: "New conversation thread", run: function () { setView("room"); newThread(); } },
-    { grp: "do", name: "Next needing you", hint: "⌥L", run: function () { cycleNeedsYou(1); } },
     { grp: "do", name: "Toggle completion sound", run: function () {
       var off = localStorage.getItem("kageSound") === "off";
       localStorage.setItem("kageSound", off ? "on" : "off");
@@ -4161,9 +4183,20 @@ function renderPalette() {
   if (paletteSel >= cmds.length) paletteSel = Math.max(0, cmds.length - 1);
   box.textContent = "";
   if (!cmds.length) { box.appendChild(h("div", "none", "Nothing matches.")); return; }
+  // docs/design/mockups/Palette.dc.html groups rows under a section heading ("GO",
+  // "DO", …) instead of repeating the group name on every row — cmds is already
+  // built in group order, so a heading before the first row of each new grp is all
+  // this needs. The "go"/"do" rows also carry that short verb as their own mono tag,
+  // the way the mockup's ".verb" does; other groups (threads, projects, runs) don't
+  // have a natural one-word verb, so they get the heading with no per-row tag.
+  var lastGrp = null;
   cmds.forEach(function (c, i) {
+    if (c.grp !== lastGrp) {
+      box.appendChild(h("div", "pgrp", c.grp));
+      lastGrp = c.grp;
+    }
     var row = h("div", "row" + (i === paletteSel ? " sel" : ""));
-    row.appendChild(h("span", "grp", c.grp));
+    if (c.grp === "go" || c.grp === "do") row.appendChild(h("span", "verb", c.grp));
     row.appendChild(h("span", "name", c.name));
     if (c.hint) row.appendChild(h("span", "hint", c.hint));
     row.onclick = function () { showPalette(false); c.run(); };
