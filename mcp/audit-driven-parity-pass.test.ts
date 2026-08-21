@@ -198,7 +198,7 @@ test("no call site relies on window.prompt/confirm/alert any more — every one 
 
 test("rejecting a run swaps the trigger for an inline reason row (optional reason, not required) via the shared rejectRunClick/inlineAsk helper, reused by both the actionbar Reject and the claimless-stopped-receipt Reject", () => {
   const script = composedScript();
-  assert.match(script, /function rejectRunClick\(run, trigger\) \{/);
+  assert.match(script, /function rejectRunClick\(run, trigger, presetValue\) \{/);
   assert.match(script, /actOnRun\(run\.id, "reject", reason \? \{ reason: reason \} : \{\}, "Rejecting…", "rejected"\);/,
     "an empty reason must still reject the run, just without a reason in the payload");
   assert.match(script, /reject\.onclick = function \(\) \{ rejectRunClick\(run, reject\); \};/);
