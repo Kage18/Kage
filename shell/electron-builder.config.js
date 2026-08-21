@@ -71,11 +71,21 @@ module.exports = {
   appId: "dev.kage.desktop",
   productName: "Kage",
   directories: { output: "dist", buildResources: "build" },
-  files: ["main.js", "package.json", "build/icon.icns"],
-  extraMetadata: { main: "main.js" },
+  files: ["main.js", "update.js", "package.json", "build/icon.icns", "node_modules/**/*"],
+  // `autoUpdateSigned` rides into the packaged package.json so update.js can read, at
+  // runtime, the same signing decision made here at build time — see update.js for why
+  // an ad-hoc-signed bundle must degrade to notify-only instead of attempting installs
+  // Squirrel.Mac will refuse to apply.
+  extraMetadata: { main: "main.js", autoUpdateSigned: Boolean(identity) },
   mac: {
     category: "public.app-category.developer-tools",
-    target: [{ target: "dmg", arch: ["arm64"] }],
+    // zip is not a second human download — it exists because Squirrel.Mac (the engine
+    // electron-updater drives on macOS) updates FROM a zip, never from a dmg. The dmg
+    // stays the one users double-click; the zip is auto-update's own artifact.
+    target: [
+      { target: "dmg", arch: ["arm64"] },
+      { target: "zip", arch: ["arm64"] },
+    ],
     icon: "build/icon.icns",
     // "-" is codesign's ad-hoc identity: a real, self-consistent signature with no
     // certificate behind it.
@@ -87,4 +97,9 @@ module.exports = {
       : {}),
   },
   dmg: { title: "Kage" },
+  // Publishing to GitHub Releases is what makes electron-builder emit latest-mac.yml —
+  // the manifest electron-updater polls to learn a new version exists. `publish` only
+  // fires when the build is run with --publish (see shell/README's release flow); a
+  // plain `npm run dmg` never touches the network.
+  publish: [{ provider: "github", owner: "kage-core", repo: "Kage" }],
 };

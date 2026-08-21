@@ -12,6 +12,7 @@ const { app, BrowserWindow, Menu, globalShortcut, nativeImage, shell } = require
 const { execFile, execFileSync } = require("node:child_process");
 const { writeFileSync, existsSync, readFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
+const { startAutoUpdate, restartToUpdate } = require("./update.js");
 
 /**
  * The app's own mark — the 影 seal the titlebar already shows.
@@ -209,6 +210,17 @@ function splashUrl(message) {
 
 let win = null;
 
+// The dock badge has two independent sources — the renderer's "needs a human" count and
+// an update sitting ready to install — so it is composed in one place rather than each
+// source clobbering the other's setBadge call. The decisions count wins when both are
+// true: it is the more time-sensitive of the two.
+let lastTitleBadge = "";
+let updateReady = false;
+function applyDockBadge() {
+  if (process.platform !== "darwin" || !app.dock) return;
+  app.dock.setBadge(lastTitleBadge || (updateReady ? "1" : ""));
+}
+
 // Where the window was is part of the user's muscle memory — restore it.
 function windowStatePath() {
   return join(app.getPath("userData"), "window-state.json");
@@ -247,9 +259,9 @@ function createWindow() {
   // The title is the one channel a sandboxed page and its shell already share, so
   // the dock badge needs no IPC surface at all.
   win.on("page-title-updated", (_event, title) => {
-    if (process.platform !== "darwin") return;
     const match = title.match(/·\s*(\d+)/);
-    app.dock.setBadge(match ? match[1] : "");
+    lastTitleBadge = match ? match[1] : "";
+    applyDockBadge();
   });
 
   // External links (evidence files, PRs) belong in the default browser, not the shell.
@@ -329,6 +341,9 @@ function buildMenu() {
       submenu: [
         { label: "New Run…", accelerator: "CmdOrCtrl+N", click: () => runInPage("showOverlay(true)") },
         { label: "New Thread", click: () => runInPage('setView("room"); newThread()') },
+        ...(updateReady
+          ? [{ type: "separator" }, { label: "Restart to Update…", click: () => restartToUpdate() }]
+          : []),
         { type: "separator" },
         { role: "close" },
       ],
@@ -400,6 +415,15 @@ app.whenReady().then(async () => {
   // screen they could not tell from a hang.
   createWindow();
   await openAppInWindow();
+
+  // After the window shows, never before — an update check must never be what a first
+  // launch waits on. startAutoUpdate is itself a no-op in dev or under the
+  // KAGE_NO_AUTO_UPDATE=1 kill-switch (see update.js).
+  startAutoUpdate((_version) => {
+    updateReady = true;
+    applyDockBadge();
+    buildMenu();
+  });
 
   // ⌥K from anywhere: summon Kage. (⌥L/⌥H next/prev-needing-you arrive with the
   // focused-run protocol; a summon key is useful from day one.)
