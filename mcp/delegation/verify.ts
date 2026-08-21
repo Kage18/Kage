@@ -99,6 +99,8 @@ export interface TreeKillSpawnResult {
   lockWaitMs: number;
   /** Set only when a dead holder's stale verification lock was stolen to let this command run. */
   lockStolenFromPid?: number;
+  /** True only when this command's lock was inherited from an ancestor that already holds it. */
+  lockInherited: boolean;
 }
 
 /**
@@ -112,6 +114,13 @@ export interface TreeKillSpawnResult {
  * call site separately: declared "command" checks (below) and static-checks.ts's own
  * typecheck/app-parse commands both funnel through this one function, so locking it once
  * covers all of them. Held only for the duration of this one command, never the whole run.
+ *
+ * Reentrancy: when this call genuinely holds the lock (acquireVerifyLock's `held`), the
+ * spawned command's env carries KAGE_VERIFY_LOCK_HELD=1 — so if that command is itself a
+ * kernel verification (e.g. this repo's own `npm test` running its own suite of checks
+ * against this very fix), any nested call back into this function inherits the lock instead
+ * of blocking on its own still-alive ancestor, which the un-reentrant version could do until
+ * the outer command's tree-kill timeout.
  *
  * Exported so static-checks.ts's kernel-executed checks (tsc, the composed-page parse)
  * share this exact fix instead of a second hand-rolled copy that could drift — same
@@ -139,6 +148,10 @@ export function spawnWithTreeKill(
       killSignal: "SIGTERM" as const,
       maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
       detached: true,
+      // Only a genuine holder has a lock for a descendant to inherit — an `inherited` or
+      // KAGE_NO_VERIFY_LOCK-skipped acquisition must not stamp the marker onto children that
+      // never actually serialized against anything.
+      env: lock.held ? { ...process.env, KAGE_VERIFY_LOCK_HELD: "1" } : process.env,
     };
     const result = spawnSync(cmd, args, spawnOptions);
     // SpawnSyncReturns types `error` as a plain Error — Node itself attaches `.code` (a
@@ -154,6 +167,7 @@ export function spawnWithTreeKill(
       treeKilled,
       lockWaitMs: lock.waitedMs,
       lockStolenFromPid: lock.stolenFromPid,
+      lockInherited: lock.inherited === true,
     };
   } finally {
     lock.handle.release();
@@ -191,7 +205,7 @@ export function runCommandCheck(
   // and still does — only a non-zero/timed-out outcome pulls stderr into the evidence too.
   const stdout = exitCode === 0 ? spawned.stdout : `${spawned.stdout}\n${spawned.stderr}`;
   const treeKillNote = spawned.treeKilled ? ` (timeout after ${timeoutMs / 1000}s - process tree killed)` : "";
-  const lockNote = formatLockNote(spawned.lockWaitMs, spawned.lockStolenFromPid);
+  const lockNote = formatLockNote(spawned.lockWaitMs, spawned.lockStolenFromPid, spawned.lockInherited);
   const evidence = writeEvidence(
     projectDir,
     runId,

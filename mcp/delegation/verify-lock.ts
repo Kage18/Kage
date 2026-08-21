@@ -30,6 +30,20 @@ export interface VerifyLockAcquisition {
   waitedMs: number;
   /** Set only when a dead holder's stale lock was removed to let this acquisition through. */
   stolenFromPid?: number;
+  /**
+   * True only when this call returned immediately because KAGE_VERIFY_LOCK_HELD was already
+   * set — an ancestor process in this same tree already holds the real file lock, so this
+   * acquisition never touched the lockfile at all. See spawnWithTreeKill's env comment.
+   */
+  inherited?: boolean;
+  /**
+   * True only when this call now genuinely holds the machine-wide lockfile (fresh create or
+   * a steal-then-create) — false for both the KAGE_NO_VERIFY_LOCK escape hatch and an
+   * `inherited` acquisition, neither of which ever touched the file. spawnWithTreeKill uses
+   * this to decide whether to export KAGE_VERIFY_LOCK_HELD=1 to child processes: only a
+   * genuine holder has anything for a descendant to inherit.
+   */
+  held: boolean;
 }
 
 function isAlive(pid: number): boolean {
@@ -92,10 +106,21 @@ function removeLock(lockPath: string): void {
  * Crash-safety: if the pid recorded in an existing lock file is no longer alive, it is
  * stolen (removed, then re-created) rather than waited on forever — a holder that crashed
  * mid-check would otherwise wedge every later verification on the machine.
+ *
+ * Reentrancy: a process that already holds the lock (or a descendant spawned from it —
+ * spawnWithTreeKill exports KAGE_VERIFY_LOCK_HELD=1 into every child it spawns while
+ * genuinely holding the lock) returns immediately here rather than contending for the file.
+ * Without this, a check nested inside the kernel's own outer `npm test` verification would
+ * try to acquire its own ancestor's still-held lock — and since the holder pid is alive, the
+ * steal path never fires, so it would block for the ancestor's entire remaining hold (in
+ * practice, the whole test suite) instead of failing fast or proceeding.
  */
 export function acquireVerifyLock(options: { lockPath?: string } = {}): VerifyLockAcquisition {
   if (process.env.KAGE_NO_VERIFY_LOCK === "1") {
-    return { handle: { release: () => {} }, waitedMs: 0 };
+    return { handle: { release: () => {} }, waitedMs: 0, held: false };
+  }
+  if (process.env.KAGE_VERIFY_LOCK_HELD === "1") {
+    return { handle: { release: () => {} }, waitedMs: 0, inherited: true, held: false };
   }
   const lockPath = options.lockPath ?? process.env.KAGE_VERIFY_LOCK_PATH ?? DEFAULT_LOCK_PATH;
   const start = Date.now();
@@ -113,11 +138,13 @@ export function acquireVerifyLock(options: { lockPath?: string } = {}): VerifyLo
     handle: { release: () => removeLock(lockPath) },
     waitedMs: Date.now() - start,
     stolenFromPid,
+    held: true,
   };
 }
 
 /** Formats acquireVerifyLock's outcome as an evidence-log note; "" when there is nothing to say. */
-export function formatLockNote(waitedMs: number, stolenFromPid?: number): string {
+export function formatLockNote(waitedMs: number, stolenFromPid?: number, inherited?: boolean): string {
+  if (inherited) return " (lock inherited from parent verification)";
   if (waitedMs <= 0 && stolenFromPid === undefined) return "";
   const parts: string[] = [];
   if (waitedMs > 0) parts.push(`waited ${waitedMs}ms for another verification on this machine to finish`);
