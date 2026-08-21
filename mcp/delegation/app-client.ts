@@ -3233,13 +3233,18 @@ function renderBoard() {
     var spec = colBuilt.spec;
     var col = h("div", "bcol");
     var head = h("div", "bh");
+    // One nowrap-and-ellipsize label atom (dot(s) + word(s)) beside one nowrap count
+    // atom — never the reverse. A wide "Idle / Working / Reviewing" column truncates
+    // its label before it ever lets the joined "0 / 0 / 0" count wrap or stack.
+    var label = h("span", "bh-label");
     spec.parts.forEach(function (part, i) {
-      if (i) head.appendChild(h("span", "sep", "/"));
+      if (i) label.appendChild(h("span", "sep", "/"));
       var dot = h("i");
       dot.style.background = part[1];
-      head.appendChild(dot);
-      head.appendChild(document.createTextNode(part[0]));
+      label.appendChild(dot);
+      label.appendChild(document.createTextNode(part[0]));
     });
+    head.appendChild(label);
     head.appendChild(h("span", "n", colBuilt.counts.join(" / ")));
     col.appendChild(head);
     // An empty column should say what lands here, so the board teaches its own

@@ -600,7 +600,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
     overflow-wrap:anywhere; }
   .qatoms { display:flex; gap:12px; margin-top:6px; flex-wrap:wrap; align-items:baseline; }
-  .atom { font-family:var(--mono); font-size:10.5px; color:var(--text3); }
+  .atom { font-family:var(--mono); font-size:10.5px; color:var(--text3); white-space:nowrap; }
   .atom.jade { color:var(--jade); } .atom.amber { color:var(--amber); } .atom.hot { color:var(--crimson); }
   /* The shared card shape (docs/design/SESSIONS_SURFACE.md §5): a state word with its
      own dot, and the VERIFIED n/n chip on a finished run — claimVerdict's own label,
@@ -964,9 +964,16 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      letter-spaced caps on top of that was pure noise. */
   .bh { display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10px;
     color:var(--text3); margin:4px 6px 14px; }
-  .bh i { width:7px; height:7px; border-radius:50%; display:block; }
-  .bh .sep { opacity:.4; margin:0 2px; }
-  .bh .n { margin-left:auto; font-variant-numeric:tabular-nums; }
+  /* .bh-label groups the dot(s) + word(s) into one inline run so a narrow column
+     ellipsizes the LABEL, never wraps it word-by-word with the dots and "/"
+     separators scattering onto their own lines (the regression this fixes: dots
+     read as stray bar glyphs once a wrap split them from their word). .n stays a
+     sibling flex item outside this run so its joined "0 / 0 / 0" count never
+     shares the label's shrink-and-ellipsis treatment. */
+  .bh-label { flex:1 1 auto; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .bh i { width:7px; height:7px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:5px; }
+  .bh .sep { display:inline-block; opacity:.4; margin:0 5px; }
+  .bh .n { flex:none; margin-left:auto; font-variant-numeric:tabular-nums; white-space:nowrap; }
   /* Three stacked rows, each the card's full width — name, slug, meta — so the name
      never again shares horizontal space with the meta cluster. .acard used to be a
      26px/1fr grid built for an avatar column that no renderer ever filled; the single
