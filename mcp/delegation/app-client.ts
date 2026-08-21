@@ -458,6 +458,43 @@ function buildMergeBtnGroup(run) {
   acts.appendChild(merge);
   return acts;
 }
+// The lost-or-failed row's own triage buttons (WorkList.dc.html): Adopt / Resume /
+// Reject, the SAME action functions the detail overlay's actionbar already wires
+// (resumeRunClick/rejectRunClick/actOnRun("adopt", …)) — never a second copy of that
+// logic. openInlineAsks reopen checks mirror the detail actionbar's own (see
+// resumeRunClick/rejectRunClick call sites there) so a reject reason typed here
+// survives a background poll rebuilding this row mid-type.
+function buildDecisionBtnGroup(run) {
+  var acts = h("div", "qbtns");
+  var pending = pendingActions[run.id];
+  if (run.display_state === "failed" && run.worktree_adoptable) {
+    var adopt = h("button", "btn primary sm", pending === "Adopting…" ? pending : "Adopt");
+    adopt.title = "Verify the work it left behind — no agent claim, Kage's own checks only.";
+    if (pending) adopt.disabled = true;
+    adopt.onclick = function (ev) { ev.stopPropagation(); actOnRun(run.id, "adopt", null, "Adopting…", "adopted"); };
+    acts.appendChild(adopt);
+  }
+  if (run.display_state === "stopped") {
+    var resume = h("button", "btn primary sm", pending === "Resuming…" ? pending : "Resume");
+    if (pending) resume.disabled = true;
+    resume.onclick = function (ev) { ev.stopPropagation(); resumeRunClick(run, resume); };
+    acts.appendChild(resume);
+    if (!pending && openInlineAsks["resume:" + run.id]) resumeRunClick(run, resume, openInlineAsks["resume:" + run.id].value);
+  }
+  if (run.display_state === "stopped" || run.display_state === "failed") {
+    var reject = h("button", "btn danger sm", "Reject…");
+    if (pending) reject.disabled = true;
+    reject.onclick = function (ev) { ev.stopPropagation(); rejectRunClick(run, reject); };
+    acts.appendChild(reject);
+    if (!pending && openInlineAsks["reject:" + run.id]) rejectRunClick(run, reject, openInlineAsks["reject:" + run.id].value);
+  }
+  // inlineAsk() replaces the trigger button with an in-place input+confirm/cancel
+  // row inside this same qbtns element — without this, a click landing on that input
+  // or on Confirm/Cancel would bubble up to the row's own onclick and open the detail
+  // overlay mid-type.
+  acts.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  return acts;
+}
 function workRow(run) {
   var needsYou = run.ownership === "needs_you";
   var row = h("div", "wrow");
@@ -513,6 +550,21 @@ function patchWorkRow(row, run, needsYou) {
     if (verdict) atomsHost.appendChild(verdictChipEl(verdict));
   }
   var mid = qt ? qt.parentNode : null;
+  // WorkList.dc.html's what-now line, row-level: the SAME sentence the detail
+  // overlay's header shows (whatNowLine), reused rather than re-worded — d is null
+  // here since a list row never carries the full claim/agent_review a "failed
+  // without an adoptable worktree" or "changes requested" sentence needs, so those
+  // two shapes fall back to whatNowLine's own null (no line) rather than guessing.
+  if (mid && atomsHost) {
+    var oldWhatNow = row.querySelector(".whatnow");
+    var whatNow = whatNowLine(run, null);
+    if (whatNow) {
+      if (oldWhatNow) oldWhatNow.textContent = whatNow;
+      else mid.insertBefore(h("div", "whatnow", whatNow), atomsHost);
+    } else if (oldWhatNow) {
+      mid.removeChild(oldWhatNow);
+    }
+  }
   var oldAnswer = row.querySelector(".qanswer");
   var answerField = oldAnswer ? oldAnswer.querySelector("input") : null;
   var touchingAnswer = Boolean(answerField && document.activeElement === answerField);
@@ -536,6 +588,10 @@ function patchWorkRow(row, run, needsYou) {
     // approved behaves like ready for merge purposes — it is a ready run that has
     // additionally cleared the opt-in review gate (ratify.ts's mergeRun).
     if (run.display_state === "ready" || run.display_state === "approved") actHost.appendChild(buildMergeBtnGroup(run));
+    // The lost-or-failed row's own Adopt/Resume/Reject (WorkList.dc.html) — the same
+    // triage the detail overlay's actionbar already offers, just reachable without
+    // opening it.
+    else if (run.display_state === "failed" || run.display_state === "stopped") actHost.appendChild(buildDecisionBtnGroup(run));
   }
 }
 
@@ -547,6 +603,7 @@ function runRowHash(run, needsYou) {
     display_state: run.display_state, needsYou: needsYou, branch: run.branch, updated_at: run.updated_at,
     tokens_used: run.tokens_used, verdict_label: run.verdict_label, display_name: run.display_name,
     intent: run.intent, waiting_on: run.waiting_on, pending: pendingActions[run.id] || null,
+    branch_landed: run.branch_landed || false, worktree_adoptable: run.worktree_adoptable || false,
   });
 }
 function getOrPatchWorkRow(run, needsYou) {
@@ -3553,7 +3610,34 @@ function diffLineClass(line) {
   if (line.indexOf("-") === 0) return "dline del";
   return "dline";
 }
-// Pair deletion runs with the additions that replaced them, hunk by hunk.
+// The hunk header git already writes ("@@ -oldStart,oldCount +newStart,newCount @@")
+// is the one source of truth for line numbers — this reads the numbers already
+// present in the diff text, it never re-diffs the files to derive them.
+var DIFF_HUNK_RE = /^@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@/;
+function isDiffMetaLine(line) {
+  return line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 ||
+    line.indexOf("index ") === 0 || line.indexOf("new file") === 0 || line.indexOf("deleted file") === 0 ||
+    line.indexOf("# ") === 0 || line.indexOf("Binary files") === 0;
+}
+// Per-line old/new gutter numbers for the unified view, one entry per file.lines
+// index (null for hunk/meta lines that carry no line number of their own).
+function hunkLineNumbers(lines) {
+  var nums = [];
+  var oldNo = 0;
+  var newNo = 0;
+  lines.forEach(function (line) {
+    var m = DIFF_HUNK_RE.exec(line);
+    if (m) { oldNo = Number(m[1]); newNo = Number(m[2]); nums.push(null); return; }
+    if (isDiffMetaLine(line)) { nums.push(null); return; }
+    if (line.indexOf("-") === 0) { nums.push({ old: oldNo, new: null }); oldNo += 1; return; }
+    if (line.indexOf("+") === 0) { nums.push({ old: null, new: newNo }); newNo += 1; return; }
+    nums.push({ old: oldNo, new: newNo }); oldNo += 1; newNo += 1;
+  });
+  return nums;
+}
+// Pair deletion runs with the additions that replaced them, hunk by hunk. Each
+// paired line keeps its own old (del) or new (add) gutter number; a ctx line
+// keeps both.
 function splitRows(lines) {
   var rows = [];
   var dels = [];
@@ -3562,8 +3646,10 @@ function splitRows(lines) {
     var n = Math.max(dels.length, adds.length);
     for (var i = 0; i < n; i += 1) {
       rows.push({
-        left: dels[i] === undefined ? "" : dels[i],
-        right: adds[i] === undefined ? "" : adds[i],
+        left: dels[i] === undefined ? "" : dels[i].text,
+        right: adds[i] === undefined ? "" : adds[i].text,
+        lno: dels[i] === undefined ? null : dels[i].no,
+        rno: adds[i] === undefined ? null : adds[i].no,
         lcls: dels[i] === undefined ? "blank" : "del",
         rcls: adds[i] === undefined ? "blank" : "add",
       });
@@ -3571,15 +3657,17 @@ function splitRows(lines) {
     dels = [];
     adds = [];
   }
+  var oldNo = 0;
+  var newNo = 0;
   lines.forEach(function (line) {
-    if (line.indexOf("@@") === 0) { flush(); rows.push({ hunk: line }); return; }
-    if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 ||
-        line.indexOf("index ") === 0 || line.indexOf("new file") === 0 || line.indexOf("deleted file") === 0 ||
-        line.indexOf("# ") === 0 || line.indexOf("Binary files") === 0) { flush(); return; }
-    if (line.indexOf("-") === 0) { dels.push(line.slice(1)); return; }
-    if (line.indexOf("+") === 0) { adds.push(line.slice(1)); return; }
+    var m = DIFF_HUNK_RE.exec(line);
+    if (m) { flush(); oldNo = Number(m[1]); newNo = Number(m[2]); rows.push({ hunk: line }); return; }
+    if (isDiffMetaLine(line)) { flush(); return; }
+    if (line.indexOf("-") === 0) { dels.push({ text: line.slice(1), no: oldNo }); oldNo += 1; return; }
+    if (line.indexOf("+") === 0) { adds.push({ text: line.slice(1), no: newNo }); newNo += 1; return; }
     flush();
-    rows.push({ left: line.slice(1), right: line.slice(1), lcls: "ctx", rcls: "ctx" });
+    rows.push({ left: line.slice(1), right: line.slice(1), lno: oldNo, rno: newNo, lcls: "ctx", rcls: "ctx" });
+    oldNo += 1; newNo += 1;
   });
   flush();
   return rows;
@@ -3634,13 +3722,32 @@ function renderDiff(body, diffText) {
             grid.appendChild(h("div", "shunk", row.hunk));
             return;
           }
-          grid.appendChild(h("div", "scell " + row.lcls, row.left || " "));
-          grid.appendChild(h("div", "scell " + row.rcls, row.right || " "));
+          var lcell = h("div", "scell " + row.lcls);
+          lcell.appendChild(h("span", "no", row.lno !== null ? String(row.lno) : ""));
+          lcell.appendChild(h("span", "code", row.left || " "));
+          grid.appendChild(lcell);
+          var rcell = h("div", "scell " + row.rcls);
+          rcell.appendChild(h("span", "no", row.rno !== null ? String(row.rno) : ""));
+          rcell.appendChild(h("span", "code", row.right || " "));
+          grid.appendChild(rcell);
         });
         pane.appendChild(grid);
       } else {
-        file.lines.forEach(function (line) {
-          pane.appendChild(h("div", diffLineClass(line), line || " "));
+        var nums = hunkLineNumbers(file.lines);
+        file.lines.forEach(function (line, i) {
+          var cls = diffLineClass(line);
+          var lrow = h("div", cls);
+          var no = nums[i];
+          if (no) {
+            var gutter = h("span", "no");
+            gutter.appendChild(h("span", "o", no.old !== null ? String(no.old) : ""));
+            gutter.appendChild(h("span", "n", no.new !== null ? String(no.new) : ""));
+            lrow.appendChild(gutter);
+            lrow.appendChild(h("span", "code", line || " "));
+          } else {
+            lrow.textContent = line || " ";
+          }
+          pane.appendChild(lrow);
         });
       }
       card.appendChild(pane);

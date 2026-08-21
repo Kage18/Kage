@@ -565,6 +565,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .wrow:focus-visible { border-color:var(--green); }
   .wrow .qt { font-size:13px; font-weight:500; }
   .wrow.attn .qt { font-weight:600; }
+  .wrow .whatnow { margin:4px 0 0; font-size:11px; }
   .showmore { display:block; margin:6px auto 2px; font-family:var(--mono); font-size:10.5px;
     color:var(--text3); padding:4px 10px; border-radius:var(--r-control); }
   .showmore:hover { color:var(--text); background:var(--surface2); }
@@ -876,7 +877,11 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .sgrid { display:grid; grid-template-columns:1fr 1fr; min-width:100%; width:max-content; }
   .shunk { grid-column:1 / -1; font-family:var(--mono); font-size:11.5px; color:var(--text3);
     padding:6px 16px 1px; white-space:pre; }
-  .scell { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre; min-width:0; }
+  .scell { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre; min-width:0;
+    display:flex; align-items:baseline; gap:10px; }
+  .scell .no { flex:none; width:38px; text-align:right; font-variant-numeric:tabular-nums;
+    color:color-mix(in srgb, var(--text3) 65%, transparent); }
+  .scell .code { white-space:pre; }
   .scell.del { color:var(--crimson); background:color-mix(in srgb, var(--crimson) 7%, transparent); }
   .scell.add { color:var(--jade); background:color-mix(in srgb, var(--jade) 7%, transparent); }
   .scell.blank { background:color-mix(in srgb, var(--line) 25%, transparent); }
@@ -891,8 +896,12 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
 
   .codepane { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card);
     padding:10px 0; overflow-x:auto; box-shadow:var(--shadow-sm); }
-  .dline { font-family:var(--mono); font-size:11.5px; padding:1px 16px; white-space:pre;
-    width:max-content; min-width:100%; box-sizing:border-box; }
+  .dline { display:flex; align-items:baseline; font-family:var(--mono); font-size:11.5px; padding:1px 16px;
+    white-space:pre; width:max-content; min-width:100%; box-sizing:border-box; }
+  .dline .no { flex:none; display:flex; gap:8px; margin-right:12px; font-variant-numeric:tabular-nums;
+    color:color-mix(in srgb, var(--text3) 65%, transparent); }
+  .dline .no .o, .dline .no .n { width:32px; text-align:right; }
+  .dline .code { white-space:pre; }
   .dline.add { color:var(--jade); background:color-mix(in srgb, var(--jade) 7%, transparent); }
   .dline.del { color:var(--crimson); background:color-mix(in srgb, var(--crimson) 7%, transparent); }
   .dline.hunk { color:var(--text3); padding-top:6px; }
