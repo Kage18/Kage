@@ -453,10 +453,16 @@ const PTY_REPLY_POLL_MS = 400;
 // text) — how long the transcript must stop growing before it's treated as settled.
 const PTY_REPLY_QUIET_MS = 1200;
 // How long resolvePtyReply waits for superviseRoomPty to have recorded its session
-// identity before giving up and deflecting — short, because in the overwhelmingly
-// common case (an already-settled pty) the identity is already on disk, and this only
-// ever pays out against the narrow startup-race window right after a fresh spawn.
-const PTY_IDENTITY_POLL_TIMEOUT_MS = 5000;
+// identity before giving up and deflecting. In the overwhelmingly common case (an
+// already-settled pty) the identity is already on disk and this never pays out at
+// all; it only matters against the narrow startup-race window right after a fresh
+// spawn, but a COLD pty (first spawn on a machine, no warm claude process cache) can
+// take longer than a few seconds to write that identity, so this is generous rather
+// than tight — a test that reaches this path must inject a short wait via
+// ctx.waitForRoomSessionIdentityFn (see DelegationApiContext's own doc) rather than
+// ever sleeping this out in real time. Exported so a test can assert the production
+// value without importing api.ts's entire runtime surface just to read one constant.
+export const PTY_IDENTITY_POLL_TIMEOUT_MS = 20_000;
 const PTY_IDENTITY_POLL_MS = 300;
 // Kage's own synthesized fallback action (never emitted by the manager) that opens the
 // Terminal tab — the honest reply is "there is nothing to summarize", not "there is

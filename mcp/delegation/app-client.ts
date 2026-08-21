@@ -1163,6 +1163,12 @@ var roomAnsweredActions = {};
 // painted — see renderRoom for why both exist (defect: continuous shimmer).
 var roomPaintedCount = 0;
 var roomSignature = "";
+// Set whenever the Chat pane is about to become the thing a person is looking at
+// (boot, a thread switch, toggling Chat/Terminal, navigating back into Room) — the
+// next renderRoom() consumes it to pin to the newest turn unconditionally, standard
+// chat behavior, instead of only when the scroller HAPPENED to already be at the
+// bottom (which it never is on a fresh view: default scrollTop is 0, i.e. the top).
+var roomEnteringView = true;
 // A literal backtick would terminate this outer template literal, so inline code
 // spans are found by splitting on the character value instead of writing one.
 var BACKTICK = String.fromCharCode(96);
@@ -1549,11 +1555,22 @@ function renderRoom() {
   updateRoomTyping();
   renderPresenceBanner(firstOpen);
   document.getElementById("room-send").disabled = state.room.busy;
-  if (signature === roomSignature) return;
+
+  var scroll = document.querySelector("#v-room .room-scroll");
+  var pinToBottom = roomEnteringView;
+  // Spend the entering-view pin only once there is real history to pin TO — a thread
+  // switch paints an empty placeholder synchronously (before its real history has
+  // loaded over the network) and that pass must not spend the flag, or the actual
+  // history arriving a moment later would render un-pinned, right back at this bug.
+  if (turns.length) roomEnteringView = false;
+
+  if (signature === roomSignature) {
+    if (pinToBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+    return;
+  }
   roomSignature = signature;
   bumpRenderCount("room");
 
-  var scroll = document.querySelector("#v-room .room-scroll");
   var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   var turnsEl = document.getElementById("room-turns");
   document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
@@ -1564,7 +1581,11 @@ function renderRoom() {
   else renderHistoryTurns(turnsEl, turns);
   roomPaintedCount = turns.length;
 
-  if (scroll && (wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
+  // Pinned when: this render made Chat newly visible (pinToBottom), the reader was
+  // already at the bottom when new turns streamed in (wasAtBottom), or there's so
+  // little history a "position to preserve" isn't meaningful yet (turns.length <= 2).
+  // Any other case leaves scrollTop untouched — the reader's own position, preserved.
+  if (scroll && (pinToBottom || wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
 }
 
 function refreshRoom() {
@@ -1906,6 +1927,7 @@ function switchThread(key) {
   // coincidentally matching) or paint the new thread's turns as "already seen".
   roomPaintedCount = 0;
   roomSignature = "";
+  roomEnteringView = true;
   if (term) term.reset();
   renderThreads();
   renderRoom();
@@ -2278,6 +2300,9 @@ function primeTerminal() {
 }
 
 function setRoomMode(mode) {
+  // Switching INTO Chat (from Terminal, or re-clicking it) is itself "entering the
+  // Chat view" — pin to the newest turn on the next render, same as a thread switch.
+  if (mode === "chat") roomEnteringView = true;
   state.roomMode = mode;
   document.getElementById("rm-chat").classList.toggle("on", mode === "chat");
   document.getElementById("rm-terminal").classList.toggle("on", mode === "terminal");
@@ -3363,6 +3388,9 @@ function renderBoard() {
 
 // --- navigation + data
 function setView(name) {
+  // Navigating back into Room is "entering the Chat view" too when Chat is the pane
+  // it opens on — the reader has been looking at Work/Memory, not this scroller.
+  if (name === "room") roomEnteringView = true;
   state.view = name;
   // Memory is index-backed and loads once at boot, which meant a packet ratified by a
   // merge mid-session did not exist in the view until a full page reload. Entering the
