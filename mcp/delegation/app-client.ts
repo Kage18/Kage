@@ -1389,6 +1389,10 @@ function renderTurnActions(turn, index, wrap) {
           if (payload.run_id) openRun(payload.run_id);
           return;
         }
+        if (a.kind === "open_terminal") {
+          setRoomMode("terminal");
+          return;
+        }
         if (a.kind === "dispatch") {
           if (!payload.intent) return;
           chip.disabled = true;

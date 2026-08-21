@@ -72,7 +72,12 @@ import {
   writeRoomSessionMeta,
   type RoomStreamEvent,
 } from "./room-supervisor.js";
-import { readNativeTranscriptPage, waitForNewAssistantTurns, TRANSCRIPT_PAGE_CAP } from "./room-transcript.js";
+import {
+  readNativeTranscriptPage,
+  waitForNewAssistantTurns,
+  waitForRoomSessionIdentity,
+  TRANSCRIPT_PAGE_CAP,
+} from "./room-transcript.js";
 import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
@@ -321,6 +326,10 @@ export interface DelegationApiContext {
   /** Test seam: replace the real reply-wait poller, so a pty-ask-timeout test can force
    * an instant "nothing arrived" without actually waiting PTY_REPLY_TIMEOUT_MS (6min). */
   waitForNewAssistantTurnsFn?: typeof waitForNewAssistantTurns;
+  /** Test seam: replace the real session-identity poller, so a test can force an instant
+   * "still unresolved" (or an instant resolve) without actually waiting
+   * PTY_IDENTITY_POLL_TIMEOUT_MS. */
+  waitForRoomSessionIdentityFn?: typeof waitForRoomSessionIdentity;
   /** Test seam: replace the real kill-and-respawn-fresh action a wedged pty supervisor
    * triggers, so a test can assert it was called without spawning a real detached
    * process (rotatePtySupervisor's own dispatchRoomPtySupervisor call is real-process
@@ -443,6 +452,16 @@ const PTY_REPLY_POLL_MS = 400;
 // A turn can arrive as several jsonl lines (thinking, a tool call, its result, more
 // text) — how long the transcript must stop growing before it's treated as settled.
 const PTY_REPLY_QUIET_MS = 1200;
+// How long resolvePtyReply waits for superviseRoomPty to have recorded its session
+// identity before giving up and deflecting — short, because in the overwhelmingly
+// common case (an already-settled pty) the identity is already on disk, and this only
+// ever pays out against the narrow startup-race window right after a fresh spawn.
+const PTY_IDENTITY_POLL_TIMEOUT_MS = 5000;
+const PTY_IDENTITY_POLL_MS = 300;
+// Kage's own synthesized fallback action (never emitted by the manager) that opens the
+// Terminal tab — the honest reply is "there is nothing to summarize", not "there is
+// nothing you can do about it".
+const OPEN_TERMINAL_ACTION: RoomActions = { actions: [{ label: "Open Terminal", kind: "open_terminal" }] };
 
 type RoomManagerLabel = "pty" | "headless";
 interface RoomReply {
@@ -454,9 +473,11 @@ interface RoomReply {
    * own prose. Propagated straight onto the persisted turn (RoomHistoryTurn.failed) so
    * the renderer can style it as a visible failure instead of an ordinary reply. */
   failed?: boolean;
-  /** Parsed from a trailing kage-actions fence (room-actions.ts) on the headless
-   * supervisor and askManager legs — see resolveRoomReply. Undefined when the reply
-   * carried no valid block, or on the pty leg, which is not parsed for this protocol. */
+  /** Parsed from a trailing kage-actions fence (room-actions.ts) on every leg that
+   * produces a manager turn — the headless supervisor, askManager, and the pty leg's
+   * transcript-extracted reply (see resolveRoomReply, resolvePtyReply). Also synthesized
+   * directly by Kage itself (OPEN_TERMINAL_ACTION) on the pty leg's own honest-deflection
+   * fallback. Undefined when the reply carried no valid block. */
   actions?: RoomActions;
 }
 
@@ -493,19 +514,31 @@ export async function resolvePtyReply(ctx: DelegationApiContext, message: string
   // one session id would fork its context and race each other's writes.
   retireStructuredRoom(projectDir, key);
 
-  const meta = readRoomSessionMeta(projectDir, key);
+  let meta = readRoomSessionMeta(projectDir, key);
   if (!meta.session_id || !meta.native_transcript_path) {
-    // The pty is live but superviseRoomPty hasn't (yet) recorded its identity — a
-    // startup race, not a failure of the session itself. The message still reaches the
-    // real session; there is just nothing to poll a reply out of for THIS turn — say so
-    // plainly rather than persisting a blank "done" turn (Terminal shows the real
-    // exchange regardless of what Chat can report here).
+    // The pty may be live but superviseRoomPty hasn't (yet) recorded its identity — a
+    // startup race, not a failure of the session itself, and one that's normally already
+    // over by the time a caller can attach at all (see waitForRoomSessionIdentity's own
+    // doc). Give it a brief chance to land before treating it as unresolved, rather than
+    // deflecting on the very first read.
+    const pollIdentity = ctx.waitForRoomSessionIdentityFn ?? waitForRoomSessionIdentity;
+    meta = await pollIdentity(() => readRoomSessionMeta(projectDir, key), {
+      timeoutMs: PTY_IDENTITY_POLL_TIMEOUT_MS,
+      pollMs: PTY_IDENTITY_POLL_MS,
+    });
+  }
+  if (!meta.session_id || !meta.native_transcript_path) {
+    // Still unresolved by the deadline. The message still reaches the real session;
+    // there is just nothing to poll a reply out of for THIS turn — say so plainly rather
+    // than persisting a blank "done" turn, and hand over an actual door into the
+    // Terminal tab rather than only telling the user to go find it themselves.
     attachment.write(frameChatInputForPty(message));
     return {
-      text: "Kage sent your message to the terminal session, but hasn't recorded its identity yet, so there is nothing to summarize here for this turn — check the Terminal tab for the real reply.",
+      text: "Kage sent your message to the terminal session, but hasn't recorded its identity yet, so there is nothing to summarize here for this turn — the terminal is still processing it.",
       tools: [],
       manager: "pty",
       failed: true,
+      actions: OPEN_TERMINAL_ACTION,
     };
   }
 
@@ -549,7 +582,10 @@ export async function resolvePtyReply(ctx: DelegationApiContext, message: string
   // path already applies, rather than being taken at face value as ordinary prose.
   const stuckTool = detectPermissionStuckMention(text);
   if (stuckTool) text = `${text}\n\n${permissionStuckNote(stuckTool)}`;
-  return { text, tools, manager: "pty" };
+  // Same protocol, same parser, as the headless legs (room-actions.ts) — a trailing
+  // kage-actions fence rides a terminal-answered thread identically to a headless one.
+  const parsed = parseKageActionsReply(text);
+  return { text: parsed.text, tools, manager: "pty", ...(parsed.actions ? { actions: parsed.actions } : {}) };
 }
 
 /**

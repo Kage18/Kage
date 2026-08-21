@@ -1,9 +1,12 @@
 // The kage-actions protocol — the manager may end any Room reply with one fenced block
 // labelled kage-actions, holding JSON that turns the reply into clickable chips/cards
-// instead of a wall of prose the user has to type back into. Shared by both legs that
-// produce a manager turn (the held headless supervisor and the one-shot askManager
-// fallback, both in api.ts) so the fence is parsed and stripped exactly once, the same
-// way, everywhere it can appear.
+// instead of a wall of prose the user has to type back into. Shared by every leg that
+// produces a manager turn (the held headless supervisor, the one-shot askManager
+// fallback, and the pty leg's transcript-extracted reply, all in api.ts) so the fence is
+// parsed and stripped exactly once, the same way, everywhere it can appear. "open_terminal"
+// is also synthesized directly by Kage itself (not just proposed by the manager) on the
+// pty leg's own fallback turns, when there is no real reply text to summarize but the
+// Terminal tab is where the real exchange is happening.
 
 export interface KageActionOption {
   label: string;
@@ -16,7 +19,7 @@ export interface KageActionProposal {
   type: string;
 }
 
-export type KageActionKind = "open_run" | "dispatch" | "create_goal";
+export type KageActionKind = "open_run" | "dispatch" | "create_goal" | "open_terminal";
 
 export interface KageAction {
   label: string;
@@ -39,7 +42,7 @@ export interface ParsedReply {
   actions?: RoomActions;
 }
 
-const ACTION_KINDS = new Set<KageActionKind>(["open_run", "dispatch", "create_goal"]);
+const ACTION_KINDS = new Set<KageActionKind>(["open_run", "dispatch", "create_goal", "open_terminal"]);
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 
