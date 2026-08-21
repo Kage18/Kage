@@ -138,6 +138,38 @@ async function realSleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+export interface WaitForSessionIdentityOptions {
+  timeoutMs: number;
+  pollMs: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Polls for a pty session's identity (session_id + native_transcript_path) to land on
+ * disk, up to a bounded timeout. superviseRoomPty (room-pty.ts) writes both BEFORE its
+ * control socket ever accepts a connection, so this is normally already resolved the
+ * instant a caller can attach at all — but a caller can still observe a beat between
+ * "the socket exists" and "the identity write landed" (the process was only just
+ * spawned), and that beat is a startup race, not a failure of the session. Returns
+ * whatever the last read produced, resolved or not — the caller decides what an
+ * unresolved identity means for it.
+ */
+export async function waitForRoomSessionIdentity<T extends { session_id?: string; native_transcript_path?: string }>(
+  readMeta: () => T,
+  options: WaitForSessionIdentityOptions,
+): Promise<T> {
+  const sleep = options.sleep ?? realSleep;
+  const now = options.now ?? Date.now;
+  const deadline = now() + options.timeoutMs;
+  let meta = readMeta();
+  while ((!meta.session_id || !meta.native_transcript_path) && now() < deadline) {
+    await sleep(options.pollMs);
+    meta = readMeta();
+  }
+  return meta;
+}
+
 export interface WaitForReplyOptions {
   /** Total turn count (TranscriptPage.total) captured immediately before the message
    * was written into the pty — only turns beyond this count count as "the reply". */
