@@ -52,6 +52,11 @@ test("resolveRoomReply routes a message to the pty session when it is available 
   const ctx = baseCtx(project);
   const written: string[] = [];
   ctx.ensurePtyAttachedFn = (async () => fakeAttachment((data) => written.push(data))) as never;
+  // No session.json written for this project, so the identity poll would otherwise wait
+  // out its real 5s timeout before this test's assertions ever run — an instant "already
+  // exhausted" stub keeps the pty-routing behavior under test unchanged (this thread's
+  // identity was never going to resolve either way) without the real wait.
+  ctx.waitForRoomSessionIdentityFn = (async (readMeta: () => unknown) => readMeta()) as never;
 
   const reply = await resolveRoomReply(ctx, "hello pty", [], undefined);
 

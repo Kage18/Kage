@@ -20,13 +20,19 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { createServer, connect, type Socket } from "node:net";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isProcessAlive, readRun } from "./contract.js";
 import { DEFAULT_SESSION, normalizeSessionKey, readActiveGoal, roomDirFor } from "./room-sessions.js";
 import { sessionIdFrom } from "./adapters/cli-agent.js";
 import {
-  MANAGER_ALLOWED_TOOLS, collectManagerFacts, managerEventFrom, guardManagerProse, type ManagerEvent } from "./manager-client.js";
+  MANAGER_ALLOWED_TOOLS,
+  EMPTY_MANAGER_REPLY_TEXT,
+  collectManagerFacts,
+  managerEventFrom,
+  guardManagerProse,
+  type ManagerEvent,
+} from "./manager-client.js";
 import { MANAGER_CONSTITUTION, managerPromptFor } from "./manager-prompt.js";
 import { writeRoomMcpConfig } from "./room.js";
 import { readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
@@ -95,6 +101,13 @@ export interface RoomSessionMeta {
    * Set only by the pty manager (room-pty.ts), which knows its cwd; the headless
    * manager's stream-json protocol has no equivalent file to point at. */
   native_transcript_path?: string;
+  /** Set true the instant an ask (pty or headless) times out waiting for a reply, and
+   * cleared back to false the instant an ask genuinely succeeds. A wedged claude
+   * session answers `alive:true` to a process-liveness probe forever — this is the
+   * only honest signal that the SESSION itself, not just its process, stopped
+   * answering, and is what makes a wedged-forever session recyclable instead of
+   * silently eating another full timeout window on every future ask. */
+  last_ask_timed_out?: boolean;
 }
 
 export function readRoomSessionMeta(projectDir: string, session?: string): RoomSessionMeta {
@@ -137,6 +150,40 @@ export function readRoomSessionId(projectDir: string, session?: string): string 
 export function writeRoomSessionId(projectDir: string, sessionId: string, session?: string): void {
   const existing = readRoomSessionMeta(projectDir, session);
   writeRoomSessionMeta(projectDir, { ...existing, session_id: sessionId }, session);
+}
+
+/**
+ * Retires a wedged session's identity so the NEXT spawn (headless or pty) can never
+ * --resume the exact session id that stopped answering — killing and respawning the
+ * *process* alone cannot fix this, because a fresh process just resumes the same
+ * poisoned session again (resolveRoomResumeId trusts whatever session_id is on disk).
+ * The old record is renamed aside, never overwritten in place, so a wedge stays
+ * inspectable after the fact instead of vanishing the moment it's recovered from — the
+ * same instinct behind hand-preserving a wedged session.json rather than deleting it.
+ * A fresh, empty meta is left in its place: superviseRoom/superviseRoomPty then see no
+ * session_id, spawn without --resume, and (since firstTurnPending tracks "no resumeId",
+ * not "the permission digest changed") replay recent history so the thread still reads
+ * as continuous despite the session underneath being brand new.
+ */
+export function retireRoomSession(projectDir: string, session?: string, reason = "wedged"): void {
+  const path = roomSessionPath(projectDir, session);
+  if (existsSync(path)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    try {
+      renameSync(path, `${path}.${reason}-${stamp}`);
+    } catch {
+      // Best effort: if the rename fails (e.g. a concurrent writer), the fresh write
+      // below still lands — losing the forensic copy is much better than never
+      // recovering the session at all.
+    }
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${JSON.stringify({}, null, 2)}\n`, "utf8");
+  } catch {
+    // Nothing more this function can do if even a fresh write fails — the next reader
+    // falls back to readRoomSessionMeta's own torn-file handling.
+  }
 }
 
 /**
@@ -211,7 +258,14 @@ export function detectPermissionStuckMention(text: string): string | null {
   return null;
 }
 
-function permissionStuckNote(toolName: string): string {
+/**
+ * Exported so the pty reply path (api.ts) can apply the exact same honesty guard the
+ * headless supervisor already applies to its own replies — a manager narrating that it
+ * is stuck waiting for a permission prompt is never true in EITHER headless or pty
+ * rooms (both pre-approve MANAGER_ALLOWED_TOOLS), so both paths must catch it the same
+ * way instead of only one of them silently accepting the impossible claim as prose.
+ */
+export function permissionStuckNote(toolName: string): string {
   return (
     `(Kage note: ${toolName} is already permitted for this session — there is no permission ` +
     "prompt to grant in this headless room. If this repeats, try again in a moment or reopen the Room.)"
@@ -241,7 +295,18 @@ export type RoomControlOp = { op: "ask"; message: string } | { op: "status" } | 
  */
 export type RoomStreamEvent =
   | { kind: "tool" | "text"; text: string }
-  | { kind: "final"; text: string; tools: string[]; corrections?: string[] }
+  | {
+      kind: "final";
+      text: string;
+      tools: string[];
+      corrections?: string[];
+      /** False when the manager's OWN text came back empty — computed before `text` is
+       * substituted with EMPTY_MANAGER_REPLY_TEXT, so the caller (api.ts's
+       * resolveRoomReply) can tell a genuine empty reply from the honest sentinel this
+       * module already fills in for it. Undefined only for the control socket's own
+       * "busy"/"stopping" replies, which reuse kind:"final" but are never a chat turn. */
+      ok?: boolean;
+    }
   | { kind: "error"; text: string };
 
 function userFrame(message: string): string {
@@ -338,8 +403,17 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
   let busy = false;
   let pending = "";
   // True only until the FIRST turn of a freshly-restarted (non-resumed) session is sent
-  // or completed — a resumed session (digestChanged === false) never touches either.
-  let firstTurnPending = digestChanged;
+  // or completed — a resumed session never touches this. Keyed on "no resumeId at all",
+  // not on digestChanged specifically: a session can also start fresh because
+  // retireRoomSession rotated away a wedged session_id, and that history replay is just
+  // as necessary there as it is on a permission-digest change (readRoomHistory is a
+  // no-op on a brand-new room either way, so this is never wrong to set too broadly).
+  let firstTurnPending = !resumeId;
+  // The restart NOTICE, unlike the replay above, is specific wording about permissions
+  // changing — it must stay tied to digestChanged alone, or a wedge-recovery restart
+  // would tell the user something false ("tool permissions changed") about why it
+  // restarted. The failure turn recorded at the moment of the timeout (api.ts) is what
+  // tells the truth for a wedge recovery instead.
   let noticePending = digestChanged;
   // Set only while a turn is in flight, so stdout parsing can route events to the
   // control connection that asked for them instead of the next caller entirely.
@@ -365,7 +439,12 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
         const parsed = JSON.parse(line) as { type?: string; result?: unknown };
         if (parsed.type === "result" && activeTurn) {
           const rawText = typeof parsed.result === "string" ? parsed.result : "";
-          const guarded = guardManagerProse(rawText || "(the manager returned nothing)", collectManagerFacts(projectDir));
+          // Captured before the EMPTY_MANAGER_REPLY_TEXT substitution below — that
+          // substitution exists so the TEXT always reads honestly, but it also means
+          // `text` is never actually falsy, so a caller checking it for emptiness (to
+          // decide whether to retry) would never see one. `ok` is that real signal.
+          const ok = Boolean(rawText.trim());
+          const guarded = guardManagerProse(rawText || EMPTY_MANAGER_REPLY_TEXT, collectManagerFacts(projectDir));
           // Tool names arrived interleaved with "say" text in the tool-push above —
           // separate them back out by re-deriving from the raw lines would duplicate
           // parsing, so keep a dedicated tool list instead of reusing `text` pushes.
@@ -386,6 +465,7 @@ export async function superviseRoom(projectDir: string, session?: string): Promi
             kind: "final",
             text,
             tools: turn.tools,
+            ok,
             ...(guarded.corrections.length ? { corrections: guarded.corrections } : {}),
           });
           // Now idle: pick up anything the event bridge left pending while this turn

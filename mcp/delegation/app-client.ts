@@ -458,6 +458,43 @@ function buildMergeBtnGroup(run) {
   acts.appendChild(merge);
   return acts;
 }
+// The lost-or-failed row's own triage buttons (WorkList.dc.html): Adopt / Resume /
+// Reject, the SAME action functions the detail overlay's actionbar already wires
+// (resumeRunClick/rejectRunClick/actOnRun("adopt", …)) — never a second copy of that
+// logic. openInlineAsks reopen checks mirror the detail actionbar's own (see
+// resumeRunClick/rejectRunClick call sites there) so a reject reason typed here
+// survives a background poll rebuilding this row mid-type.
+function buildDecisionBtnGroup(run) {
+  var acts = h("div", "qbtns");
+  var pending = pendingActions[run.id];
+  if (run.display_state === "failed" && run.worktree_adoptable) {
+    var adopt = h("button", "btn primary sm", pending === "Adopting…" ? pending : "Adopt");
+    adopt.title = "Verify the work it left behind — no agent claim, Kage's own checks only.";
+    if (pending) adopt.disabled = true;
+    adopt.onclick = function (ev) { ev.stopPropagation(); actOnRun(run.id, "adopt", null, "Adopting…", "adopted"); };
+    acts.appendChild(adopt);
+  }
+  if (run.display_state === "stopped") {
+    var resume = h("button", "btn primary sm", pending === "Resuming…" ? pending : "Resume");
+    if (pending) resume.disabled = true;
+    resume.onclick = function (ev) { ev.stopPropagation(); resumeRunClick(run, resume); };
+    acts.appendChild(resume);
+    if (!pending && openInlineAsks["resume:" + run.id]) resumeRunClick(run, resume, openInlineAsks["resume:" + run.id].value);
+  }
+  if (run.display_state === "stopped" || run.display_state === "failed") {
+    var reject = h("button", "btn danger sm", "Reject…");
+    if (pending) reject.disabled = true;
+    reject.onclick = function (ev) { ev.stopPropagation(); rejectRunClick(run, reject); };
+    acts.appendChild(reject);
+    if (!pending && openInlineAsks["reject:" + run.id]) rejectRunClick(run, reject, openInlineAsks["reject:" + run.id].value);
+  }
+  // inlineAsk() replaces the trigger button with an in-place input+confirm/cancel
+  // row inside this same qbtns element — without this, a click landing on that input
+  // or on Confirm/Cancel would bubble up to the row's own onclick and open the detail
+  // overlay mid-type.
+  acts.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  return acts;
+}
 function workRow(run) {
   var needsYou = run.ownership === "needs_you";
   var row = h("div", "wrow");
@@ -513,6 +550,21 @@ function patchWorkRow(row, run, needsYou) {
     if (verdict) atomsHost.appendChild(verdictChipEl(verdict));
   }
   var mid = qt ? qt.parentNode : null;
+  // WorkList.dc.html's what-now line, row-level: the SAME sentence the detail
+  // overlay's header shows (whatNowLine), reused rather than re-worded — d is null
+  // here since a list row never carries the full claim/agent_review a "failed
+  // without an adoptable worktree" or "changes requested" sentence needs, so those
+  // two shapes fall back to whatNowLine's own null (no line) rather than guessing.
+  if (mid && atomsHost) {
+    var oldWhatNow = row.querySelector(".whatnow");
+    var whatNow = whatNowLine(run, null);
+    if (whatNow) {
+      if (oldWhatNow) oldWhatNow.textContent = whatNow;
+      else mid.insertBefore(h("div", "whatnow", whatNow), atomsHost);
+    } else if (oldWhatNow) {
+      mid.removeChild(oldWhatNow);
+    }
+  }
   var oldAnswer = row.querySelector(".qanswer");
   var answerField = oldAnswer ? oldAnswer.querySelector("input") : null;
   var touchingAnswer = Boolean(answerField && document.activeElement === answerField);
@@ -536,6 +588,10 @@ function patchWorkRow(row, run, needsYou) {
     // approved behaves like ready for merge purposes — it is a ready run that has
     // additionally cleared the opt-in review gate (ratify.ts's mergeRun).
     if (run.display_state === "ready" || run.display_state === "approved") actHost.appendChild(buildMergeBtnGroup(run));
+    // The lost-or-failed row's own Adopt/Resume/Reject (WorkList.dc.html) — the same
+    // triage the detail overlay's actionbar already offers, just reachable without
+    // opening it.
+    else if (run.display_state === "failed" || run.display_state === "stopped") actHost.appendChild(buildDecisionBtnGroup(run));
   }
 }
 
@@ -547,6 +603,7 @@ function runRowHash(run, needsYou) {
     display_state: run.display_state, needsYou: needsYou, branch: run.branch, updated_at: run.updated_at,
     tokens_used: run.tokens_used, verdict_label: run.verdict_label, display_name: run.display_name,
     intent: run.intent, waiting_on: run.waiting_on, pending: pendingActions[run.id] || null,
+    branch_landed: run.branch_landed || false, worktree_adoptable: run.worktree_adoptable || false,
   });
 }
 function getOrPatchWorkRow(run, needsYou) {
@@ -1097,10 +1154,21 @@ function turnDispatched(turn) {
 // arrival is trustworthy — after a reload there's no way to know which old turn
 // caused which old run.
 var roomLinkedRuns = {};
+// Which turns' kage-actions question chips have already been clicked, keyed by turn
+// index (same scheme as roomLinkedRuns) — a full re-render must still show that row as
+// answered, not reset it back to clickable, or a second click could send the option a
+// second time.
+var roomAnsweredActions = {};
 // How many turns have ever been painted, and a cheap fingerprint of what was last
 // painted — see renderRoom for why both exist (defect: continuous shimmer).
 var roomPaintedCount = 0;
 var roomSignature = "";
+// Set whenever the Chat pane is about to become the thing a person is looking at
+// (boot, a thread switch, toggling Chat/Terminal, navigating back into Room) — the
+// next renderRoom() consumes it to pin to the newest turn unconditionally, standard
+// chat behavior, instead of only when the scroller HAPPENED to already be at the
+// bottom (which it never is on a fresh view: default scrollTop is 0, i.e. the top).
+var roomEnteringView = true;
 // A literal backtick would terminate this outer template literal, so inline code
 // spans are found by splitting on the character value instead of writing one.
 var BACKTICK = String.fromCharCode(96);
@@ -1236,6 +1304,128 @@ function turnRunCard(run) {
   return card;
 }
 
+// Consecutive "ran X · Y" tool-name lines read as noise once a reply used more than
+// one tool — one grouped, expandable chip (foldrow + hidden list) keeps the thread
+// scannable instead of listing every call. Shared by both turn renderers below so the
+// two Chat registers (transcript-backed and history-fallback) never drift apart.
+function toolGroupChip(tools) {
+  var uniq = tools.map(toolLabel).filter(function (t, i, arr) { return arr.indexOf(t) === i; });
+  var group = h("div", "toolgroup");
+  var summary = h("button", "foldrow", "Ran " + tools.length + " tool call" + (tools.length === 1 ? "" : "s"));
+  var list = h("div", "toolgrouplist");
+  list.style.display = "none";
+  uniq.forEach(function (name) { list.appendChild(h("div", "toolgroupitem", name)); });
+  summary.onclick = function () {
+    var open = list.style.display !== "none";
+    list.style.display = open ? "none" : "block";
+    summary.classList.toggle("open", !open);
+  };
+  group.appendChild(summary);
+  group.appendChild(list);
+  return group;
+}
+// The quiet "done · age · N tools" line under a kage reply — replaces the old
+// full-width DONE/AGE turn-boundary rule, which floated between exchanges instead of
+// belonging to the reply it was reporting on.
+function turnMetaLine(atIso, toolCount) {
+  var suffix = toolCount ? " · " + toolCount + " tool" + (toolCount === 1 ? "" : "s") : "";
+  return atIso ? ageSpan("meta2", atIso, "done · ", suffix) : h("div", "meta2", "done" + suffix);
+}
+
+// Fills the room composer with the given text and sends it exactly the way a typed
+// message would — a chip click is a shortcut for typing, never a second delivery path.
+function sendRoomActionMessage(text) {
+  var input = document.getElementById("room-input");
+  input.value = text;
+  sendRoomMessage();
+}
+// kage-actions (room-actions.ts): renders a kage turn's own clickable follow-up — a
+// clarifying question's options, a proposed run's Dispatch card, or a run/goal
+// shortcut — appended after everything else the turn already renders. index is the
+// turn's position in the currently-painted list (roomLinkedRuns' own scheme), used to
+// remember which question row was already answered across a full re-render.
+function renderTurnActions(turn, index, wrap) {
+  var actions = turn.actions;
+  if (!actions) return;
+  var box = h("div", "turn-actions");
+  if (actions.question && actions.options && actions.options.length) {
+    box.appendChild(h("div", "turn-actions-q", actions.question));
+    var row = h("div", "chiprow");
+    var answered = Boolean(roomAnsweredActions[index]);
+    actions.options.forEach(function (opt) {
+      var chip = h("button", "chip action-chip", opt.label);
+      chip.disabled = answered;
+      chip.onclick = function () {
+        if (roomAnsweredActions[index]) return;
+        roomAnsweredActions[index] = true;
+        Array.prototype.forEach.call(row.querySelectorAll(".chip"), function (c) { c.disabled = true; });
+        sendRoomActionMessage(opt.send);
+      };
+      row.appendChild(chip);
+    });
+    box.appendChild(row);
+  }
+  (actions.proposals || []).forEach(function (p) {
+    var card = h("div", "turn-proposal");
+    card.appendChild(h("div", "turn-proposal-intent", p.intent));
+    var prow = h("div", "turn-proposal-row");
+    prow.appendChild(h("span", "chip", p.type));
+    var dispatchBtn = h("button", "btn primary sm", "Dispatch");
+    dispatchBtn.onclick = function () {
+      dispatchBtn.disabled = true;
+      dispatchBtn.textContent = "dispatching…";
+      api("/runs", { method: "POST", body: { intent: p.intent, agent: composerPrefs.agent, type: p.type } }).then(function (out) {
+        if (!out.ok) { dispatchBtn.disabled = false; dispatchBtn.textContent = "Dispatch"; showError(out.error || "dispatch failed"); return; }
+        dispatchBtn.textContent = "dispatched";
+        flash("dispatched — watch the rail above");
+        refresh();
+      });
+    };
+    prow.appendChild(dispatchBtn);
+    card.appendChild(prow);
+    box.appendChild(card);
+  });
+  if (actions.actions && actions.actions.length) {
+    var arow = h("div", "chiprow");
+    actions.actions.forEach(function (a) {
+      var chip = h("button", "chip action-chip", a.label);
+      chip.onclick = function () {
+        var payload = a.payload || {};
+        if (a.kind === "open_run") {
+          if (payload.run_id) openRun(payload.run_id);
+          return;
+        }
+        if (a.kind === "open_terminal") {
+          setRoomMode("terminal");
+          return;
+        }
+        if (a.kind === "dispatch") {
+          if (!payload.intent) return;
+          chip.disabled = true;
+          api("/runs", { method: "POST", body: { intent: payload.intent, agent: composerPrefs.agent, type: payload.type || composerPrefs.type } }).then(function (out) {
+            if (!out.ok) { chip.disabled = false; showError(out.error || "dispatch failed"); return; }
+            flash("dispatched — watch the rail above");
+            refresh();
+          });
+          return;
+        }
+        if (a.kind === "create_goal") {
+          if (!payload.intent) return;
+          chip.disabled = true;
+          api("/goals", { method: "POST", body: { intent: payload.intent, session: state.session } }).then(function (out) {
+            if (!out.ok) { chip.disabled = false; showError(out.error || "could not create the goal"); return; }
+            flash("goal created");
+            refresh();
+          });
+        }
+      };
+      arow.appendChild(chip);
+    });
+    box.appendChild(arow);
+  }
+  if (box.children.length) wrap.appendChild(box);
+}
+
 // The Room's history register (docs/design/SESSIONS_SURFACE.md §2) — the manager's OWN
 // paraphrase of what happened, from GET /room. This is what Chat falls back to when
 // /room/transcript carries nothing yet (a thread the pty has never answered): a
@@ -1249,23 +1439,13 @@ function renderHistoryTurns(turnsEl, turns) {
   // so this call site's signature stays exactly what piece 2's own regression test
   // (sessions-ui.test.ts) already locks down.
   if (turns.length) {
-    turnsEl.appendChild(h("div", "meta2", state.room.has_transcript
-      ? "showing the manager's summary — the live session transcript hasn't loaded yet"
-      : "showing the manager's summary — no live session transcript for this thread"));
+    turnsEl.appendChild(h("div", "meta2", state.room.has_transcript ? "summary — transcript loading" : "summary only"));
   }
   turns.forEach(function (turn, index) {
-    // Close the previous exchange with a rule + elapsed time, so a long thread reads
-    // as a sequence of completed turns rather than one undifferentiated column.
-    if (turn.role === "you" && index > 0) {
-      var prev = turns[index - 1];
-      var brk = h("div", "turnbreak");
-      brk.appendChild(h("span", "rule"));
-      brk.appendChild(prev.at ? ageSpan("label", prev.at, "done · ") : h("span", "label", "done"));
-      turnsEl.appendChild(brk);
-    }
     // The entry animation is for turns arriving right now — replaying it on turns
     // that were already on screen is exactly what made the thread shimmer.
-    var wrap = h("div", "turn " + turn.role + (index >= roomPaintedCount ? " turn-new" : ""));
+    var isFailedTurn = turn.role === "kage" && Boolean(turn.failed);
+    var wrap = h("div", "turn " + turn.role + (isFailedTurn ? " turn-failed" : "") + (index >= roomPaintedCount ? " turn-new" : ""));
     // Say who is speaking. Alignment alone carried it before, which meant a transcript
     // you had to decode rather than read.
     var who = h("div", "who", turn.role === "you" ? "You" : "Kage");
@@ -1273,16 +1453,16 @@ function renderHistoryTurns(turnsEl, turns) {
     // headless fallback's own label is shown quietly, next to "Kage" — the API already
     // reports which one answered (RoomHistoryTurn.manager, room-history.ts).
     if (turn.role === "kage" && turn.manager === "headless") who.appendChild(h("span", "who-sub", "headless"));
+    // Kage's own honest report of a failure (an ask that timed out, an empty reply, an
+    // unhandled error) must read as a failure at a glance, not as ordinary prose the
+    // manager said — this is the only signal RoomHistoryTurn.failed exists to carry.
+    if (isFailedTurn) who.appendChild(h("span", "who-fail", "failed"));
     wrap.appendChild(who);
     wrap.appendChild(turn.role === "kage" ? renderTurnBubble(turn.text) : h("div", "bubble2", turn.text));
-    if (turn.role === "kage" && turn.tools && turn.tools.length) {
-      var used = turn.tools.map(toolLabel);
-      var uniq = used.filter(function (t, i) { return used.indexOf(t) === i; });
-      var tl = h("div", "toolline");
-      tl.appendChild(h("span", "verb", "ran"));
-      tl.appendChild(h("span", "", uniq.join(" · ")));
-      wrap.appendChild(tl);
-    }
+    if (turn.role === "kage" && turn.tools && turn.tools.length) wrap.appendChild(toolGroupChip(turn.tools));
+    // Belongs to the reply it reports on — not a full-width rule floating between the
+    // next exchange, which is what this line replaced (see turnMetaLine above).
+    if (turn.role === "kage") wrap.appendChild(turnMetaLine(turn.at, turn.tools ? turn.tools.length : 0));
     if (turn.role === "kage" && turn.corrections && turn.corrections.length) {
       var meta = h("div", "meta2");
       meta.appendChild(h("span", "redact", "kernel checked " + turn.corrections.length + " restated number" +
@@ -1302,6 +1482,7 @@ function renderHistoryTurns(turnsEl, turns) {
     if (turn.role === "kage") {
       runsMentionedIn(turn.text).forEach(function (run) { wrap.appendChild(turnRunCard(run)); });
     }
+    if (turn.role === "kage" && turn.actions) renderTurnActions(turn, index, wrap);
     turnsEl.appendChild(wrap);
   });
 }
@@ -1315,23 +1496,8 @@ function renderTranscriptTurns(turnsEl, turns) {
     var wrap = h("div", "turn " + (turn.role === "user" ? "you" : "kage") + (index >= roomPaintedCount ? " turn-new" : ""));
     wrap.appendChild(h("div", "who", turn.role === "user" ? "You" : "Kage"));
     if (turn.text) wrap.appendChild(turn.role === "user" ? h("div", "bubble2", turn.text) : renderTurnBubble(turn.text));
-    if (turn.tools && turn.tools.length) {
-      var uniq = turn.tools.map(toolLabel).filter(function (t, i, arr) { return arr.indexOf(t) === i; });
-      var group = h("div", "toolgroup");
-      var summary = h("button", "foldrow", "Ran " + turn.tools.length + " tool call" + (turn.tools.length === 1 ? "" : "s"));
-      var list = h("div", "toolgrouplist");
-      list.style.display = "none";
-      uniq.forEach(function (name) { list.appendChild(h("div", "toolgroupitem", name)); });
-      summary.onclick = function () {
-        var open = list.style.display !== "none";
-        list.style.display = open ? "none" : "block";
-        summary.classList.toggle("open", !open);
-      };
-      group.appendChild(summary);
-      group.appendChild(list);
-      wrap.appendChild(group);
-    }
-    if (turn.timestamp) wrap.appendChild(h("span", "ts", String(turn.timestamp).slice(11, 19)));
+    if (turn.tools && turn.tools.length) wrap.appendChild(toolGroupChip(turn.tools));
+    if (turn.role === "assistant") wrap.appendChild(turnMetaLine(turn.timestamp, turn.tools ? turn.tools.length : 0));
     turnsEl.appendChild(wrap);
   });
 }
@@ -1389,11 +1555,22 @@ function renderRoom() {
   updateRoomTyping();
   renderPresenceBanner(firstOpen);
   document.getElementById("room-send").disabled = state.room.busy;
-  if (signature === roomSignature) return;
+
+  var scroll = document.querySelector("#v-room .room-scroll");
+  var pinToBottom = roomEnteringView;
+  // Spend the entering-view pin only once there is real history to pin TO — a thread
+  // switch paints an empty placeholder synchronously (before its real history has
+  // loaded over the network) and that pass must not spend the flag, or the actual
+  // history arriving a moment later would render un-pinned, right back at this bug.
+  if (turns.length) roomEnteringView = false;
+
+  if (signature === roomSignature) {
+    if (pinToBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+    return;
+  }
   roomSignature = signature;
   bumpRenderCount("room");
 
-  var scroll = document.querySelector("#v-room .room-scroll");
   var wasAtBottom = scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   var turnsEl = document.getElementById("room-turns");
   document.getElementById("room-primer").style.display = turns.length ? "none" : "block";
@@ -1404,7 +1581,11 @@ function renderRoom() {
   else renderHistoryTurns(turnsEl, turns);
   roomPaintedCount = turns.length;
 
-  if (scroll && (wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
+  // Pinned when: this render made Chat newly visible (pinToBottom), the reader was
+  // already at the bottom when new turns streamed in (wasAtBottom), or there's so
+  // little history a "position to preserve" isn't meaningful yet (turns.length <= 2).
+  // Any other case leaves scrollTop untouched — the reader's own position, preserved.
+  if (scroll && (pinToBottom || wasAtBottom || turns.length <= 2)) scroll.scrollTop = scroll.scrollHeight;
 }
 
 function refreshRoom() {
@@ -1746,6 +1927,7 @@ function switchThread(key) {
   // coincidentally matching) or paint the new thread's turns as "already seen".
   roomPaintedCount = 0;
   roomSignature = "";
+  roomEnteringView = true;
   if (term) term.reset();
   renderThreads();
   renderRoom();
@@ -1785,8 +1967,24 @@ function dispatchFromComposer() {
     .then(function (out) {
       if (!out.ok) { showError(out.error || "dispatch failed"); input.value = intent; return; }
       flash("dispatched — watch the rail above");
+      markComposerTaught("kageDispatchedRun");
       refresh();
     });
+}
+// Teach the composer's keystroke shortcuts once, then get out of the way — once a
+// real send AND a real dispatch have both succeeded, the hint row has done its job
+// and just repeats what the palette and the first-open screen already cover.
+function markComposerTaught(flag) {
+  try { localStorage.setItem(flag, "1"); } catch (e) {}
+  updateRoomHintVisibility();
+}
+function updateRoomHintVisibility() {
+  var el = document.getElementById("room-hint");
+  if (!el) return;
+  var taught;
+  try { taught = localStorage.getItem("kageSentMsg") === "1" && localStorage.getItem("kageDispatchedRun") === "1"; }
+  catch (e) { taught = false; }
+  el.style.display = taught ? "none" : "";
 }
 
 // ⌥⏎: a third composer path, for intent too large for one run. Creates the goal
@@ -1908,6 +2106,7 @@ function sendRoomMessage() {
   renderRoom();
   api("/room/message?session=" + encodeURIComponent(state.session), { method: "POST", body: { message: message } }).then(function (out) {
     if (!out.ok) { state.room.busy = false; renderRoom(); showError(out.error || "the room did not accept that message"); return; }
+    markComposerTaught("kageSentMsg");
     refreshRoom();
   });
 }
@@ -2101,6 +2300,9 @@ function primeTerminal() {
 }
 
 function setRoomMode(mode) {
+  // Switching INTO Chat (from Terminal, or re-clicking it) is itself "entering the
+  // Chat view" — pin to the newest turn on the next render, same as a thread switch.
+  if (mode === "chat") roomEnteringView = true;
   state.roomMode = mode;
   document.getElementById("rm-chat").classList.toggle("on", mode === "chat");
   document.getElementById("rm-terminal").classList.toggle("on", mode === "terminal");
@@ -3156,13 +3358,18 @@ function renderBoard() {
     var spec = colBuilt.spec;
     var col = h("div", "bcol");
     var head = h("div", "bh");
+    // One nowrap-and-ellipsize label atom (dot(s) + word(s)) beside one nowrap count
+    // atom — never the reverse. A wide "Idle / Working / Reviewing" column truncates
+    // its label before it ever lets the joined "0 / 0 / 0" count wrap or stack.
+    var label = h("span", "bh-label");
     spec.parts.forEach(function (part, i) {
-      if (i) head.appendChild(h("span", "sep", "/"));
+      if (i) label.appendChild(h("span", "sep", "/"));
       var dot = h("i");
       dot.style.background = part[1];
-      head.appendChild(dot);
-      head.appendChild(document.createTextNode(part[0]));
+      label.appendChild(dot);
+      label.appendChild(document.createTextNode(part[0]));
     });
+    head.appendChild(label);
     head.appendChild(h("span", "n", colBuilt.counts.join(" / ")));
     col.appendChild(head);
     // An empty column should say what lands here, so the board teaches its own
@@ -3181,6 +3388,9 @@ function renderBoard() {
 
 // --- navigation + data
 function setView(name) {
+  // Navigating back into Room is "entering the Chat view" too when Chat is the pane
+  // it opens on — the reader has been looking at Work/Memory, not this scroller.
+  if (name === "room") roomEnteringView = true;
   state.view = name;
   // Memory is index-backed and loads once at boot, which meant a packet ratified by a
   // merge mid-session did not exist in the view until a full page reload. Entering the
@@ -3297,7 +3507,15 @@ function renderProjects() {
     var current = project.dir === state.projectDir;
     var row = h("div", "prow" + (current ? " on" : ""));
     row.title = project.dir;
-    row.appendChild(h("div", "pn", project.name));
+    var pn = h("div", "pn");
+    // Every row gets a dot — the active one green, the "this is the daemon we're
+    // actually talking to" language the status bar's own .conn dot already carries;
+    // every other row a dim placeholder, same size, so the list doesn't jump when
+    // the active project changes. The name is the only text an inactive row carries
+    // now — its full path is one hover away via the row's own title attribute.
+    pn.appendChild(h("span", "pdot" + (current ? "" : " dim")));
+    pn.appendChild(document.createTextNode(project.name));
+    row.appendChild(pn);
     if (current && needs) row.appendChild(h("span", "pcount", String(needs)));
     else if (!current) {
       var forget = h("button", "pforget", "×");
@@ -3310,7 +3528,9 @@ function renderProjects() {
       };
       row.appendChild(forget);
     }
-    row.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
+    // The path is real information only on the row you're actually looking at —
+    // every other row repeating it, unread, is exactly the microtext this pass cuts.
+    if (current) row.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
     if (!current) row.onclick = function () { openProject(project.dir, row); };
     list.appendChild(row);
     // The sidebar fleet (docs/design/SESSIONS_SURFACE.md §1): under the ACTIVE project
@@ -3548,7 +3768,34 @@ function diffLineClass(line) {
   if (line.indexOf("-") === 0) return "dline del";
   return "dline";
 }
-// Pair deletion runs with the additions that replaced them, hunk by hunk.
+// The hunk header git already writes ("@@ -oldStart,oldCount +newStart,newCount @@")
+// is the one source of truth for line numbers — this reads the numbers already
+// present in the diff text, it never re-diffs the files to derive them.
+var DIFF_HUNK_RE = /^@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@/;
+function isDiffMetaLine(line) {
+  return line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 ||
+    line.indexOf("index ") === 0 || line.indexOf("new file") === 0 || line.indexOf("deleted file") === 0 ||
+    line.indexOf("# ") === 0 || line.indexOf("Binary files") === 0;
+}
+// Per-line old/new gutter numbers for the unified view, one entry per file.lines
+// index (null for hunk/meta lines that carry no line number of their own).
+function hunkLineNumbers(lines) {
+  var nums = [];
+  var oldNo = 0;
+  var newNo = 0;
+  lines.forEach(function (line) {
+    var m = DIFF_HUNK_RE.exec(line);
+    if (m) { oldNo = Number(m[1]); newNo = Number(m[2]); nums.push(null); return; }
+    if (isDiffMetaLine(line)) { nums.push(null); return; }
+    if (line.indexOf("-") === 0) { nums.push({ old: oldNo, new: null }); oldNo += 1; return; }
+    if (line.indexOf("+") === 0) { nums.push({ old: null, new: newNo }); newNo += 1; return; }
+    nums.push({ old: oldNo, new: newNo }); oldNo += 1; newNo += 1;
+  });
+  return nums;
+}
+// Pair deletion runs with the additions that replaced them, hunk by hunk. Each
+// paired line keeps its own old (del) or new (add) gutter number; a ctx line
+// keeps both.
 function splitRows(lines) {
   var rows = [];
   var dels = [];
@@ -3557,8 +3804,10 @@ function splitRows(lines) {
     var n = Math.max(dels.length, adds.length);
     for (var i = 0; i < n; i += 1) {
       rows.push({
-        left: dels[i] === undefined ? "" : dels[i],
-        right: adds[i] === undefined ? "" : adds[i],
+        left: dels[i] === undefined ? "" : dels[i].text,
+        right: adds[i] === undefined ? "" : adds[i].text,
+        lno: dels[i] === undefined ? null : dels[i].no,
+        rno: adds[i] === undefined ? null : adds[i].no,
         lcls: dels[i] === undefined ? "blank" : "del",
         rcls: adds[i] === undefined ? "blank" : "add",
       });
@@ -3566,15 +3815,17 @@ function splitRows(lines) {
     dels = [];
     adds = [];
   }
+  var oldNo = 0;
+  var newNo = 0;
   lines.forEach(function (line) {
-    if (line.indexOf("@@") === 0) { flush(); rows.push({ hunk: line }); return; }
-    if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 ||
-        line.indexOf("index ") === 0 || line.indexOf("new file") === 0 || line.indexOf("deleted file") === 0 ||
-        line.indexOf("# ") === 0 || line.indexOf("Binary files") === 0) { flush(); return; }
-    if (line.indexOf("-") === 0) { dels.push(line.slice(1)); return; }
-    if (line.indexOf("+") === 0) { adds.push(line.slice(1)); return; }
+    var m = DIFF_HUNK_RE.exec(line);
+    if (m) { flush(); oldNo = Number(m[1]); newNo = Number(m[2]); rows.push({ hunk: line }); return; }
+    if (isDiffMetaLine(line)) { flush(); return; }
+    if (line.indexOf("-") === 0) { dels.push({ text: line.slice(1), no: oldNo }); oldNo += 1; return; }
+    if (line.indexOf("+") === 0) { adds.push({ text: line.slice(1), no: newNo }); newNo += 1; return; }
     flush();
-    rows.push({ left: line.slice(1), right: line.slice(1), lcls: "ctx", rcls: "ctx" });
+    rows.push({ left: line.slice(1), right: line.slice(1), lno: oldNo, rno: newNo, lcls: "ctx", rcls: "ctx" });
+    oldNo += 1; newNo += 1;
   });
   flush();
   return rows;
@@ -3629,13 +3880,32 @@ function renderDiff(body, diffText) {
             grid.appendChild(h("div", "shunk", row.hunk));
             return;
           }
-          grid.appendChild(h("div", "scell " + row.lcls, row.left || " "));
-          grid.appendChild(h("div", "scell " + row.rcls, row.right || " "));
+          var lcell = h("div", "scell " + row.lcls);
+          lcell.appendChild(h("span", "no", row.lno !== null ? String(row.lno) : ""));
+          lcell.appendChild(h("span", "code", row.left || " "));
+          grid.appendChild(lcell);
+          var rcell = h("div", "scell " + row.rcls);
+          rcell.appendChild(h("span", "no", row.rno !== null ? String(row.rno) : ""));
+          rcell.appendChild(h("span", "code", row.right || " "));
+          grid.appendChild(rcell);
         });
         pane.appendChild(grid);
       } else {
-        file.lines.forEach(function (line) {
-          pane.appendChild(h("div", diffLineClass(line), line || " "));
+        var nums = hunkLineNumbers(file.lines);
+        file.lines.forEach(function (line, i) {
+          var cls = diffLineClass(line);
+          var lrow = h("div", cls);
+          var no = nums[i];
+          if (no) {
+            var gutter = h("span", "no");
+            gutter.appendChild(h("span", "o", no.old !== null ? String(no.old) : ""));
+            gutter.appendChild(h("span", "n", no.new !== null ? String(no.new) : ""));
+            lrow.appendChild(gutter);
+            lrow.appendChild(h("span", "code", line || " "));
+          } else {
+            lrow.textContent = line || " ";
+          }
+          pane.appendChild(lrow);
         });
       }
       card.appendChild(pane);
@@ -4499,6 +4769,7 @@ bellLabel();
 loadProjects();
 loadMemory();
 renderComposerBar();
+updateRoomHintVisibility();
 try { applyTheme(localStorage.getItem("kageTheme") || "system"); } catch (e) { applyTheme("system"); }
 refresh();
 refreshRoom();

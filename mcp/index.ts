@@ -66,6 +66,7 @@ import {
   recordFeedback,
   verifyCitations,
   compactProject,
+  gcProject,
   kageConflicts,
   generateSkills,
   refreshProject,
@@ -972,6 +973,7 @@ export function listTools() {
           graph_nodes: { type: "array", items: { type: "string" }, description: "Optional code-graph symbol or file ids this memory is grounded to." },
           allow_missing_paths: { type: "boolean", description: "Allow the write even if cited paths do not exist yet (e.g. a file you are about to create)." },
           discovery_tokens: { type: "number", description: "Approximate token cost of producing this knowledge (exploration + reasoning). Stored on the packet so recall receipts can report replay value; a conservative per-type default is estimated when omitted." },
+          allow_low_quality: { type: "boolean", description: "Admit this capture even though its computed quality score is below the admission floor (60). The write is otherwise rejected — this is the explicit override." },
         },
         required: ["project_dir", "learning"],
       },
@@ -993,6 +995,7 @@ export function listTools() {
           stack: { type: "array", items: { type: "string" } },
           graph_nodes: { type: "array", items: { type: "string" }, description: "Code-graph node references (symbol/route/file) this memory is about." },
           allow_missing_paths: { type: "boolean" },
+          allow_low_quality: { type: "boolean", description: "Admit this capture even though its computed quality score is below the admission floor (60). The write is otherwise rejected — this is the explicit override." },
         },
         required: ["project_dir", "title", "body"],
       },
@@ -1019,6 +1022,20 @@ export function listTools() {
         properties: {
           project_dir: { type: "string" },
           dry_run: { type: "boolean" },
+        },
+        required: ["project_dir"],
+      },
+    },
+    {
+      name: "kage_gc",
+      description:
+        "Curate repo memory in one pass: (1) excludes deprecated/superseded packets from the stale/warning surfaces they used to dominate — they are end-state, not actionable, (2) auto-merges near-duplicate approved packets (similarity >= 0.95) by superseding the lower-quality one, with lineage recorded, (3) lists contradiction pairs ranked by recall traffic with a one-line resolution suggestion each — listing is automatic, resolving stays a human/operator decision. Prints an honest before/after count line. Defaults to a dry run; pass dry_run=false to apply.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_dir: { type: "string" },
+          dry_run: { type: "boolean", description: "Preview without writing (default true)." },
+          force: { type: "boolean", description: "Also hard-delete stale packets with no helpful votes instead of deprecating them. Never applies to the new duplicate-merge or contradiction-listing behavior, which only supersede or list." },
         },
         required: ["project_dir"],
       },
@@ -1854,8 +1871,11 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     // Visible receipt: surface what the harness saved today so agents relay it. Kept
     // outside the size cap so it always survives.
     const gains = valueSummary(projectDir).today;
-    // Observed counts lead; token savings are an estimate and say so (honest receipt v1).
-    const gainsLine = `\n\nGains today: ${gains.recalls} recall${gains.recalls === 1 ? "" : "s"} served · ${gains.stale_withheld} stale withheld${gains.tokens_saved > 0 ? ` · est. ~${formatTokenCount(gains.tokens_saved)} tokens saved` : ""}`;
+    // Observed counts lead; token savings are an estimate and say so, naming the basis
+    // inline (not just "est.") so this never reads as a measurement of anything actually
+    // metered — it's a proxy: source-file bytes/4 avoided by reading the compact recall
+    // context instead, or the packet's discovery_tokens replay estimate, whichever is larger.
+    const gainsLine = `\n\nGains today: ${gains.recalls} recall${gains.recalls === 1 ? "" : "s"} served · ${gains.stale_withheld} stale withheld${gains.tokens_saved > 0 ? ` · ~${formatTokenCount(gains.tokens_saved)} tokens saved (est. by indexed-source token proxy)` : ""}`;
     // Backstop: per-field clamping + graph dedup keep this compact in practice, but never
     // let a pathological repo overflow the MCP response again. ~24k chars ≈ 6k tokens.
     const MAX_CONTEXT_CHARS = 24000;
@@ -1883,7 +1903,7 @@ export async function callTool(name: string, args: Record<string, unknown> | und
     const receiptParts = receipt
       ? [
           ...(receipt.stale_withheld > 0 ? [`stale memories withheld: ${receipt.stale_withheld}`] : []),
-          ...(receipt.tokens_saved > 0 ? [`est. ~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall`] : []),
+          ...(receipt.tokens_saved > 0 ? [`~${formatTokenCount(receipt.tokens_saved)} tokens saved by this recall (est. by indexed-source token proxy)`] : []),
         ]
       : [];
     const gainsLine = receiptParts.length ? `\n\nGains: ${receiptParts.join(" · ")}` : "";
@@ -2411,6 +2431,7 @@ export async function callTool(name: string, args: Record<string, unknown> | und
       allowMissingPaths: Boolean(args?.allow_missing_paths),
       strictCitations: true,
       discoveryTokens: args?.discovery_tokens === undefined ? undefined : Number(args.discovery_tokens),
+      allowLowQuality: Boolean(args?.allow_low_quality),
     });
     const learnWarnings = result.warnings?.length ? `\nWarnings:\n${result.warnings.map((warning) => `- ${warning}`).join("\n")}` : "";
     return {
@@ -2439,6 +2460,7 @@ export async function callTool(name: string, args: Record<string, unknown> | und
       graphNodes: arrayArg(args?.graph_nodes),
       allowMissingPaths: Boolean(args?.allow_missing_paths),
       strictCitations: true,
+      allowLowQuality: Boolean(args?.allow_low_quality),
     });
 
     const captureWarnings = result.warnings?.length ? `\nWarnings:\n${result.warnings.map((warning) => `- ${warning}`).join("\n")}` : "";
@@ -2468,6 +2490,17 @@ export async function callTool(name: string, args: Record<string, unknown> | und
   if (name === "kage_compact") {
     const result = compactProject(String(args?.project_dir ?? ""), {
       dryRun: args?.dry_run === undefined ? true : Boolean(args.dry_run),
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
+    };
+  }
+
+  if (name === "kage_gc") {
+    const result = gcProject(String(args?.project_dir ?? ""), {
+      dryRun: args?.dry_run === undefined ? true : Boolean(args.dry_run),
+      force: Boolean(args?.force),
     });
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

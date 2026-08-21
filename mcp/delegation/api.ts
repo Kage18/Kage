@@ -58,17 +58,26 @@ import { suggestedNextForRoom, suggestedNextPrompt } from "./suggest.js";
 import { readActivity } from "./progress.js";
 import { currentBranch, diffFileTree, git, type DiffFileEntry } from "./git.js";
 import { worktreePath } from "./worktree.js";
-import { askManager } from "./manager-client.js";
+import { askManager, EMPTY_REPLY_RETRY_NUDGE } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
+import { parseKageActionsReply, type RoomActions } from "./room-actions.js";
 import {
   askRoomSupervisor,
+  detectPermissionStuckMention,
   dispatchRoomSupervisor,
   isRoomSupervisorLive,
+  permissionStuckNote,
   readRoomSessionMeta,
   readRoomSupervisorRecord,
+  writeRoomSessionMeta,
   type RoomStreamEvent,
 } from "./room-supervisor.js";
-import { readNativeTranscriptPage, waitForNewAssistantTurns, TRANSCRIPT_PAGE_CAP } from "./room-transcript.js";
+import {
+  readNativeTranscriptPage,
+  waitForNewAssistantTurns,
+  waitForRoomSessionIdentity,
+  TRANSCRIPT_PAGE_CAP,
+} from "./room-transcript.js";
 import { ADAPTER_NAMES, isAgentInstalled } from "./adapters/index.js";
 import { DEFAULT_DIFF_BUDGET, DEFAULT_MAX_CONCURRENT, readDelegationConfig, writeDelegationConfig } from "./config.js";
 import { forgetProject, rememberProject } from "./projects.js";
@@ -80,10 +89,12 @@ import {
   attachRoomPty,
   dispatchRoomPtySupervisor,
   frameChatInputForPty,
+  isPtySupervisorStale,
   isRoomPtyLive,
   readRoomPtyRecord,
   retirePtyRoom,
   retireStructuredRoom,
+  rotatePtySupervisor,
   type RoomPtyAttachment,
 } from "./room-pty.js";
 import {
@@ -305,8 +316,25 @@ export interface DelegationApiContext {
   askManagerFn?: typeof askManager;
   /** Test seam: replace the whole live-supervisor-or-fallback orchestration below. */
   askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; corrections?: string[] }>;
+  /** Test seam: replace the held headless supervisor's own ask (askRoomSupervisor,
+   * room-supervisor.ts) so a test can exercise the empty-reply retry (below) — and the
+   * kage-actions parsing that rides the same leg — without spawning a real `claude`
+   * process or a real control socket. Production always uses the real askRoomSupervisor. */
+  askRoomSupervisorFn?: typeof askRoomSupervisor;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
+  /** Test seam: replace the real reply-wait poller, so a pty-ask-timeout test can force
+   * an instant "nothing arrived" without actually waiting PTY_REPLY_TIMEOUT_MS (6min). */
+  waitForNewAssistantTurnsFn?: typeof waitForNewAssistantTurns;
+  /** Test seam: replace the real session-identity poller, so a test can force an instant
+   * "still unresolved" (or an instant resolve) without actually waiting
+   * PTY_IDENTITY_POLL_TIMEOUT_MS. */
+  waitForRoomSessionIdentityFn?: typeof waitForRoomSessionIdentity;
+  /** Test seam: replace the real kill-and-respawn-fresh action a wedged pty supervisor
+   * triggers, so a test can assert it was called without spawning a real detached
+   * process (rotatePtySupervisor's own dispatchRoomPtySupervisor call is real-process
+   * spawning, exactly what every other test seam in this file exists to avoid). */
+  recyclePtySupervisorFn?: typeof rotatePtySupervisor;
   /** Test seam: replace real take-over pty spawning entirely — never a real claude. */
   takeOverRunFn?: typeof takeOverRun;
   /** Test seam: replace the real kill-and-reattach hand-back entirely. */
@@ -424,6 +452,22 @@ const PTY_REPLY_POLL_MS = 400;
 // A turn can arrive as several jsonl lines (thinking, a tool call, its result, more
 // text) — how long the transcript must stop growing before it's treated as settled.
 const PTY_REPLY_QUIET_MS = 1200;
+// How long resolvePtyReply waits for superviseRoomPty to have recorded its session
+// identity before giving up and deflecting. In the overwhelmingly common case (an
+// already-settled pty) the identity is already on disk and this never pays out at
+// all; it only matters against the narrow startup-race window right after a fresh
+// spawn, but a COLD pty (first spawn on a machine, no warm claude process cache) can
+// take longer than a few seconds to write that identity, so this is generous rather
+// than tight — a test that reaches this path must inject a short wait via
+// ctx.waitForRoomSessionIdentityFn (see DelegationApiContext's own doc) rather than
+// ever sleeping this out in real time. Exported so a test can assert the production
+// value without importing api.ts's entire runtime surface just to read one constant.
+export const PTY_IDENTITY_POLL_TIMEOUT_MS = 20_000;
+const PTY_IDENTITY_POLL_MS = 300;
+// Kage's own synthesized fallback action (never emitted by the manager) that opens the
+// Terminal tab — the honest reply is "there is nothing to summarize", not "there is
+// nothing you can do about it".
+const OPEN_TERMINAL_ACTION: RoomActions = { actions: [{ label: "Open Terminal", kind: "open_terminal" }] };
 
 type RoomManagerLabel = "pty" | "headless";
 interface RoomReply {
@@ -431,20 +475,42 @@ interface RoomReply {
   tools: string[];
   corrections?: string[];
   manager?: RoomManagerLabel;
+  /** True when `text` is Kage's own honest report of a failure — never the manager's
+   * own prose. Propagated straight onto the persisted turn (RoomHistoryTurn.failed) so
+   * the renderer can style it as a visible failure instead of an ordinary reply. */
+  failed?: boolean;
+  /** Parsed from a trailing kage-actions fence (room-actions.ts) on every leg that
+   * produces a manager turn — the headless supervisor, askManager, and the pty leg's
+   * transcript-extracted reply (see resolveRoomReply, resolvePtyReply). Also synthesized
+   * directly by Kage itself (OPEN_TERMINAL_ACTION) on the pty leg's own honest-deflection
+   * fallback. Undefined when the reply carried no valid block. */
+  actions?: RoomActions;
 }
 
 /**
  * Writes the message into the SAME interactive session Terminal shows (no second
  * channel), then waits for claude's own native transcript to grow with a new assistant
  * turn. Returns null — quickly, never spawning a new session to find out — when no pty
- * is ALREADY live, or its identity hasn't been recorded yet; either way the caller
- * falls back to headless honestly, never guessing at a reply and never blocking a chat
- * message behind a fresh interactive claude spawn (see ensurePtyAttached's
- * `spawnIfNeeded` doc — that spawn is for the explicit Terminal-open routes only).
+ * is ALREADY live; either way the caller falls back to headless honestly, never
+ * guessing at a reply and never blocking a chat message behind a fresh interactive
+ * claude spawn (see ensurePtyAttached's `spawnIfNeeded` doc — that spawn is for the
+ * explicit Terminal-open routes only).
  */
 export async function resolvePtyReply(ctx: DelegationApiContext, message: string, session?: string): Promise<RoomReply | null> {
   const { projectDir } = ctx;
   const key = normalizeSessionKey(session);
+  const recycle = ctx.recyclePtySupervisorFn ?? rotatePtySupervisor;
+
+  // Guard against a wedged-forever session BEFORE this ask ever reaches it: a
+  // supervisor whose last ask timed out, or that has been holding the same session
+  // open for 12h+, gets rotated (fresh process, fresh session identity) here rather
+  // than being trusted on the strength of a process-liveness probe alone — see
+  // isPtySupervisorStale's own doc for why that probe can't tell a wedged session from
+  // a healthy one.
+  if (isPtySupervisorStale(readRoomPtyRecord(projectDir, key), readRoomSessionMeta(projectDir, key))) {
+    recycle(projectDir, key);
+  }
+
   const ensureAttached = ctx.ensurePtyAttachedFn ?? ensurePtyAttached;
   const attachment = await ensureAttached(ctx, key, false);
   if (!attachment) return null;
@@ -454,30 +520,78 @@ export async function resolvePtyReply(ctx: DelegationApiContext, message: string
   // one session id would fork its context and race each other's writes.
   retireStructuredRoom(projectDir, key);
 
-  const meta = readRoomSessionMeta(projectDir, key);
+  let meta = readRoomSessionMeta(projectDir, key);
   if (!meta.session_id || !meta.native_transcript_path) {
-    // The pty is live but superviseRoomPty hasn't (yet) recorded its identity — a
-    // startup race. The message still reaches the real session; there is just nothing
-    // to poll a reply out of this turn.
+    // The pty may be live but superviseRoomPty hasn't (yet) recorded its identity — a
+    // startup race, not a failure of the session itself, and one that's normally already
+    // over by the time a caller can attach at all (see waitForRoomSessionIdentity's own
+    // doc). Give it a brief chance to land before treating it as unresolved, rather than
+    // deflecting on the very first read.
+    const pollIdentity = ctx.waitForRoomSessionIdentityFn ?? waitForRoomSessionIdentity;
+    meta = await pollIdentity(() => readRoomSessionMeta(projectDir, key), {
+      timeoutMs: PTY_IDENTITY_POLL_TIMEOUT_MS,
+      pollMs: PTY_IDENTITY_POLL_MS,
+    });
+  }
+  if (!meta.session_id || !meta.native_transcript_path) {
+    // Still unresolved by the deadline. The message still reaches the real session;
+    // there is just nothing to poll a reply out of for THIS turn — say so plainly rather
+    // than persisting a blank "done" turn, and hand over an actual door into the
+    // Terminal tab rather than only telling the user to go find it themselves.
     attachment.write(frameChatInputForPty(message));
-    return { text: "", tools: [], manager: "pty" };
+    return {
+      text: "Kage sent your message to the terminal session, but hasn't recorded its identity yet, so there is nothing to summarize here for this turn — the terminal is still processing it.",
+      tools: [],
+      manager: "pty",
+      failed: true,
+      actions: OPEN_TERMINAL_ACTION,
+    };
   }
 
   const readPage = () => readNativeTranscriptPage(meta.native_transcript_path as string, { limit: TRANSCRIPT_PAGE_CAP });
   const beforeTotal = readPage().total;
   attachment.write(frameChatInputForPty(message));
-  const newTurns = await waitForNewAssistantTurns(readPage, {
+  const wait = ctx.waitForNewAssistantTurnsFn ?? waitForNewAssistantTurns;
+  const newTurns = await wait(readPage, {
     beforeTotal,
     timeoutMs: PTY_REPLY_TIMEOUT_MS,
     pollMs: PTY_REPLY_POLL_MS,
     quietMs: PTY_REPLY_QUIET_MS,
   });
-  const text = newTurns
+
+  if (!newTurns.length) {
+    // The manager did not answer within the window. A process-liveness probe (e.g.
+    // /room/pty/status) would still report this session alive — it only checks that
+    // the pid exists, not that it answers — so "alive" can never again be treated as
+    // "answering" here: recycle now, honestly, rather than let the NEXT message eat
+    // another full timeout against the same wedged session.
+    recycle(projectDir, key);
+    writeRoomSessionMeta(projectDir, { last_ask_timed_out: true }, key);
+    const minutes = Math.round(PTY_REPLY_TIMEOUT_MS / 60_000);
+    return {
+      text: `The manager did not answer within ${minutes} minutes — its session stopped responding. Kage rotated it to a fresh session, so your next message reaches a live manager instead of another ${minutes}-minute wait.`,
+      tools: [],
+      manager: "pty",
+      failed: true,
+    };
+  }
+  writeRoomSessionMeta(projectDir, { last_ask_timed_out: false }, key);
+
+  let text = newTurns
     .map((turn) => turn.text)
     .filter(Boolean)
     .join("\n\n");
   const tools = [...new Set(newTurns.flatMap((turn) => turn.tools))];
-  return { text, tools, manager: "pty" };
+  // The pty manager runs with every delegation tool pre-approved (MANAGER_ALLOWED_TOOLS)
+  // the same as the headless supervisor — a permission prompt is never real here either,
+  // so a reply that narrates waiting on one gets the same honest correction the headless
+  // path already applies, rather than being taken at face value as ordinary prose.
+  const stuckTool = detectPermissionStuckMention(text);
+  if (stuckTool) text = `${text}\n\n${permissionStuckNote(stuckTool)}`;
+  // Same protocol, same parser, as the headless legs (room-actions.ts) — a trailing
+  // kage-actions fence rides a terminal-answered thread identically to a headless one.
+  const parsed = parseKageActionsReply(text);
+  return { text: parsed.text, tools, manager: "pty", ...(parsed.actions ? { actions: parsed.actions } : {}) };
 }
 
 /**
@@ -525,34 +639,75 @@ export async function resolveRoomReply(
       ptyState.attachment = null;
       ptyState.scrollback = "";
     }
-    let live: RoomStreamEvent | null = await askRoomSupervisor(projectDir, message, onDelta, key);
+    const askSupervisor = ctx.askRoomSupervisorFn ?? askRoomSupervisor;
+    let live: RoomStreamEvent | null = await askSupervisor(projectDir, message, onDelta, key);
     if (!live) {
       dispatchRoomSupervisor(projectDir, key);
       const deadline = Date.now() + ROOM_SUPERVISOR_STARTUP_TIMEOUT_MS;
       while (Date.now() < deadline && !(await isRoomSupervisorLive(projectDir, key))) {
         await new Promise((pause) => setTimeout(pause, 200));
       }
-      live = await askRoomSupervisor(projectDir, message, onDelta, key);
+      live = await askSupervisor(projectDir, message, onDelta, key);
     }
     if (live?.kind === "final") {
+      if (live.ok === false) {
+        // Same bounded retry as the askManager leg below, through the same seam this
+        // leg already asks its questions through — never a loop, never a second retry.
+        const retryLive = await askSupervisor(projectDir, EMPTY_REPLY_RETRY_NUDGE, onDelta, key);
+        if (retryLive?.kind === "final" && retryLive.ok !== false) {
+          live = retryLive;
+        } else {
+          return {
+            text: "The manager returned an empty reply twice in a row (returned empty twice) — nothing to show for this turn.",
+            tools: live.tools,
+            manager: "headless",
+            failed: true,
+          };
+        }
+      }
+      const parsed = parseKageActionsReply(live.text);
       return {
-        text: live.text,
+        text: parsed.text,
         tools: live.tools,
         ...(live.corrections?.length ? { corrections: live.corrections } : {}),
         manager: "headless",
+        ...(parsed.actions ? { actions: parsed.actions } : {}),
       };
     }
     // live?.kind === "error", or still null after the startup wait — fall through.
   }
 
   const ask = ctx.askManagerFn ?? askManager;
-  const reply = await ask({
-    projectDir,
-    question: message,
-    history: historyBefore.map((turn) => ({ role: turn.role, text: turn.text })),
-    onEvent: onDelta,
-  });
-  return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}), manager: "headless" };
+  const priorTurns = historyBefore.map((turn) => ({ role: turn.role, text: turn.text }));
+  let reply = await ask({ projectDir, question: message, history: priorTurns, onEvent: onDelta });
+  if (!reply.ok) {
+    // One bounded retry, never a loop: a manager turn that resolved with no text gets
+    // exactly one more chance, nudged to answer plainly, before this leg gives up and
+    // reports an honest failure. See EMPTY_REPLY_RETRY_NUDGE's own doc.
+    const retryHistory = [...priorTurns, { role: "you" as const, text: message }, { role: "kage" as const, text: reply.text }];
+    reply = await ask({ projectDir, question: EMPTY_REPLY_RETRY_NUDGE, history: retryHistory, onEvent: onDelta });
+  }
+  if (!reply.ok) {
+    const detail = [
+      reply.exitCode !== undefined ? `exit code ${reply.exitCode}` : null,
+      reply.stderr ? `stderr: ${reply.stderr.slice(0, 200)}` : null,
+    ].filter((part): part is string => Boolean(part));
+    const why = detail.length ? detail.join("; ") : "returned empty twice";
+    return {
+      text: `The manager returned an empty reply twice in a row (${why}) — nothing to show for this turn.`,
+      tools: reply.tools,
+      manager: "headless",
+      failed: true,
+    };
+  }
+  const parsed = parseKageActionsReply(reply.text);
+  return {
+    text: parsed.text,
+    tools: reply.tools,
+    ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
+    manager: "headless",
+    ...(parsed.actions ? { actions: parsed.actions } : {}),
+  };
 }
 
 /**
@@ -575,15 +730,27 @@ function queueRoomTurn(
   room.chain = room.chain.then(async () => {
     try {
       const reply = await resolveRoomReply(ctx, message, historyBefore, key);
+      // Last-resort backstop, independent of which leg produced the reply: an empty
+      // reply is never a valid "done" turn — a blank bubble marked DONE is exactly the
+      // symptom that made a wedged manager session read as a silently-answered message
+      // instead of the failure it was. Every leg that KNOWS why it's empty (the pty
+      // timeout/startup-race branches above) already sets failed:true with an honest
+      // explanation; this only fires for a leg that slips through with blank text some
+      // other way. A reply carrying valid kage-actions but no other prose (a bare
+      // clarifying question rendered entirely as chips) is not blank — actions ARE the
+      // content of that turn.
+      const blank = (!reply.text || !reply.text.trim()) && !reply.actions;
       appendRoomTurn(projectDir, {
         role: "kage",
-        text: reply.text,
+        text: blank ? "The manager returned an empty reply — nothing to show for this turn." : reply.text,
         tools: reply.tools,
         ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
         ...(reply.manager ? { manager: reply.manager } : {}),
+        ...(reply.actions ? { actions: reply.actions } : {}),
+        ...(blank || reply.failed ? { failed: true } : {}),
       }, key);
     } catch (error) {
-      appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}` }, key);
+      appendRoomTurn(projectDir, { role: "kage", text: `Manager error: ${(error as Error).message}`, failed: true }, key);
     } finally {
       feed.notifyRoom({ kind: "final", done: true, session: key });
       room.pending -= 1;

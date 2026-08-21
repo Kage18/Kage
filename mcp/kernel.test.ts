@@ -461,6 +461,7 @@ test("recall tokenizes multilingual memory without requiring spaces", () => {
     summary: "Operational note",
     body: "Deployment assets are uploaded after npm run build.",
     type: "reference",
+    allowLowQuality: true,
   });
   capture({
     projectDir: project,
@@ -468,6 +469,7 @@ test("recall tokenizes multilingual memory without requiring spaces", () => {
     summary: "支付重试说明",
     body: "支付重试逻辑必须保留幂等键检查。Verified by checkout retry tests.",
     type: "reference",
+    allowLowQuality: true,
   });
 
   const result = recall(project, "支付重试", 2, true);
@@ -584,6 +586,7 @@ test("memory lifecycle report turns packet state into review actions", () => {
     type: "reference",
     tags: ["architecture"],
     paths: [],
+    allowLowQuality: true,
   });
   assert.ok(hot.packet);
   assert.ok(stale.packet);
@@ -752,6 +755,7 @@ test("memory audit report records pending review actions", () => {
     body: "Review this packet before sharing it with future agents.",
     type: "runbook",
     paths: ["README.md"],
+    allowLowQuality: true,
   });
   const rejected = capture({
     projectDir: project,
@@ -759,6 +763,7 @@ test("memory audit report records pending review actions", () => {
     body: "Reject this packet because it is not durable enough.",
     type: "reference",
     paths: ["README.md"],
+    allowLowQuality: true,
   });
   assert.ok(approved.packet);
   assert.ok(rejected.packet);
@@ -855,6 +860,7 @@ test("recall expands relative temporal queries when a question date is supplied"
     summary: "Temporal note",
     body: "Session date: 2023/03/20\nI mentioned an ordinary planning update.",
     type: "reference",
+    allowLowQuality: true,
   });
   capture({
     projectDir: project,
@@ -862,6 +868,7 @@ test("recall expands relative temporal queries when a question date is supplied"
     summary: "Temporal note",
     body: "Session date: 2023/02/28\nI signed a contract with my first client.",
     type: "reference",
+    allowLowQuality: true,
   });
 
   const result = recall(project, "What was the significant business milestone I mentioned four weeks ago?\nQuestion date: 2023/03/28 (Tue)", 2, true);
@@ -877,6 +884,7 @@ test("recall expands common memory concepts without requiring exact wording", ()
     summary: "Food note",
     body: "We discussed dinner plans and a restaurant reservation.",
     type: "reference",
+    allowLowQuality: true,
   });
   capture({
     projectDir: project,
@@ -884,6 +892,7 @@ test("recall expands common memory concepts without requiring exact wording", ()
     summary: "Food note",
     body: "The user harvested tomatoes and herbs from the garden and wanted recipes using that produce.",
     type: "reference",
+    allowLowQuality: true,
   });
 
   const result = recall(project, "What should I serve for dinner with homegrown ingredients?", 2, true);
@@ -927,6 +936,7 @@ test("recall reuses persisted sparse vector index when current", () => {
     summary: "Food note",
     body: "We discussed dinner plans and a restaurant reservation.",
     type: "reference",
+    allowLowQuality: true,
   });
   capture({
     projectDir: project,
@@ -934,6 +944,7 @@ test("recall reuses persisted sparse vector index when current", () => {
     summary: "Food note",
     body: "The user harvested tomatoes and herbs from the garden and wanted recipes using that produce.",
     type: "reference",
+    allowLowQuality: true,
   });
   buildIndexes(project);
 
@@ -951,6 +962,7 @@ test("embedding recall uses optional dense embedding artifact", async () => {
     summary: "Deploy note",
     body: "The release job uploads static assets.",
     type: "reference",
+    allowLowQuality: true,
   });
   capture({
     projectDir: project,
@@ -958,6 +970,7 @@ test("embedding recall uses optional dense embedding artifact", async () => {
     summary: "Checkout behavior",
     body: "The idempotency callback path must stay separate from session retry logic.",
     type: "reference",
+    allowLowQuality: true,
   });
   const provider = {
     name: "test",
@@ -1007,6 +1020,7 @@ test("recall prioritizes runbooks for command-intent queries", () => {
     summary: "Operational note",
     body: "Use npm test to run the suite.",
     type: "runbook",
+    allowLowQuality: true,
   });
 
   const result = recall(project, "how do I run tests", 2, true);
@@ -1038,20 +1052,33 @@ test("recall applies type intent for gotcha queries", () => {
 
 test("recall diversifies results across observed session sources", () => {
   const project = tempProject();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let template: any = null;
+  let sequence = 0;
   const writeSessionPacket = (title: string, sessionId: string) => {
-    const result = capture({
-      projectDir: project,
-      title,
-      summary: "Checkout retry memory",
-      body: "Checkout retry idempotency behavior must stay split between callback retries and user checkout retries.",
-      type: "bug_fix",
-      tags: ["checkout", "retry"],
-    });
-    assert.ok(result.packet);
-    assert.ok(result.path);
-    const packet = parsePacket(result.path);
-    packet.source_refs = [{ kind: "observation_session", session_id: sessionId }];
-    writePacketFixture(result.path, packet);
+    if (!template) {
+      const result = capture({
+        projectDir: project,
+        title,
+        summary: "Checkout retry memory",
+        body: "Checkout retry idempotency behavior must stay split between callback retries and user checkout retries.",
+        type: "bug_fix",
+        tags: ["checkout", "retry"],
+      });
+      assert.ok(result.packet);
+      assert.ok(result.path);
+      const packet = { ...result.packet!, source_refs: [{ kind: "observation_session", session_id: sessionId }] };
+      writePacketFixture(result.path!, packet);
+      template = packet;
+      return;
+    }
+    // These packets are near-identical on purpose (same topic observed across sessions) —
+    // capture() now blocks anything this similar at the admission gate, so simulate the
+    // pre-gate backlog by writing directly to disk, mirroring what an older auto-distill
+    // pass (or migrated memory) would already have on disk.
+    sequence += 1;
+    const packet = { ...template, id: `${template.id}-dup-${sequence}`, title, source_refs: [{ kind: "observation_session", session_id: sessionId }] };
+    writeFileSync(join(packetsDir(project), `session-dup-${sequence}.json`), JSON.stringify(packet, null, 2), "utf8");
   };
 
   writeSessionPacket("A checkout retry session note", "noisy-session");
@@ -2773,6 +2800,9 @@ test("memory admission rejects session bookkeeping and accepts durable repo know
     summary: "Observed commands: npm test",
     body: "Observed during session abc:\n- npm test (exit 0)",
     type: "runbook",
+    // allowLowQuality: this test exercises evaluateMemoryAdmission's separate, lower-signal
+    // classifier, which needs the packet to actually exist to be evaluated against.
+    allowLowQuality: true,
   });
   assert.equal(bad.ok, true);
   assert.equal(evaluateMemoryAdmission(project, bad.packet!).admit, false);
@@ -3143,6 +3173,9 @@ test("capture never writes private tag content into packet JSON", () => {
     body: "The gateway retries twice. <private>password: super-secret-value-123</private> Timeouts are 30s.",
     type: "reference",
     context: { why: "Because <private>customer XYZ filed a sev1</private> retries were flaky." },
+    // allowLowQuality: redaction shortens the stored body below the admission floor; this
+    // test is about the private-tag sanitizer, not packet quality.
+    allowLowQuality: true,
   });
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.ok(result.path);
@@ -3162,6 +3195,9 @@ test("capture handles an unclosed private tag by redacting to end of string", ()
     title: "Unclosed tag capture",
     body: "Public part stays. <private>everything after this must vanish password=oops-no-closing-tag",
     type: "reference",
+    // allowLowQuality: redaction shortens the stored body below the admission floor; this
+    // test is about the private-tag sanitizer, not packet quality.
+    allowLowQuality: true,
   });
   assert.equal(result.ok, true, result.errors.join("\n"));
   const raw = readFileSync(result.path!, "utf8");
@@ -3195,7 +3231,9 @@ test("observe sanitizes private spans before writing observation events", () => 
 test("non-tagged capture text is stored untouched by the private sanitizer", () => {
   const project = tempProject();
   const body = "Plain reference text with angle brackets like Array<string> and <div> markup.";
-  const result = capture({ projectDir: project, title: "Plain text", body, type: "reference" });
+  // allowLowQuality: this test is about the private-tag sanitizer leaving non-tagged text
+  // untouched, not packet quality — the fixture body sits right under the admission floor.
+  const result = capture({ projectDir: project, title: "Plain text", body, type: "reference", allowLowQuality: true });
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.equal(result.packet?.body, body);
   const raw = readFileSync(result.path!, "utf8");
@@ -3226,6 +3264,7 @@ test("project validation warns when approved packet paths are ungrounded", () =>
     body: "This should point at a real subsystem.",
     type: "reference",
     paths: ["missing/subsystem"],
+    allowLowQuality: true,
   });
   assert.equal(result.ok, true);
   const packet = parsePacket(result.path!);
@@ -3405,6 +3444,7 @@ test("creates review artifact for legacy pending packets and branch summaries", 
     title: "Review me",
     body: "Legacy pending memory needs human review.",
     type: "reference",
+    allowLowQuality: true,
   });
   assert.equal(result.ok, true);
   const pendingPacket = { ...result.packet!, id: `${result.packet!.id}-pending`, status: "pending" };
@@ -3997,7 +4037,11 @@ test("pr check ignores stale packets that were already superseded", () => {
   assert.equal(replacement.ok, true);
   const supersede = supersedeMemory(project, oldMemory.packet!.id, replacement.packet!.id, "Retry mode changed and memory was replaced.");
   assert.equal(supersede.ok, true);
-  assert.equal(refreshProject(project).stale_packets.some((packet) => packet.id === oldMemory.packet!.id), true);
+  // refreshProject itself now hard-excludes superseded packets from stale_packets (they are
+  // end-state, not actionable) — the prCheck-level filtering below used to be the only thing
+  // keeping this packet out; now it is excluded a step earlier too, which prCheck's own
+  // filter is still correct to keep as a second line of defense.
+  assert.equal(refreshProject(project).stale_packets.some((packet) => packet.id === oldMemory.packet!.id), false);
 
   const check = prCheck(project);
 
@@ -5056,7 +5100,7 @@ test("recall receipt uses knowledge replay value when larger, floored at the rea
   mkdirSync(join(project, "src"), { recursive: true });
   // Tiny cited file: the read-vs-source estimate is ~0, so the replay value must win.
   writeFileSync(join(project, "src", "billing.ts"), "export const billing = 1;\n", "utf8");
-  capture({ projectDir: project, title: "Billing retry rule", body: "Billing retries use idempotency keys in src/billing.ts.", type: "decision", paths: ["src/billing.ts"], discoveryTokens: 50_000 });
+  capture({ projectDir: project, title: "Billing retry rule", body: "Billing retries use idempotency keys in src/billing.ts.", type: "decision", paths: ["src/billing.ts"], discoveryTokens: 50_000, allowLowQuality: true });
 
   const result = recall(project, "billing retry idempotency", 5);
   assert.equal(result.results.some((entry) => entry.packet.title === "Billing retry rule"), true);
@@ -5078,7 +5122,7 @@ test("recall receipt uses knowledge replay value when larger, floored at the rea
   const floored = tempProject();
   mkdirSync(join(floored, "src"), { recursive: true });
   writeFileSync(join(floored, "src", "big.ts"), `// big module\n${"export const line = 1;\n".repeat(4000)}`, "utf8");
-  capture({ projectDir: floored, title: "Big module invariant", body: "Big module exports stable line constants from src/big.ts.", type: "reference", paths: ["src/big.ts"], discoveryTokens: 10 });
+  capture({ projectDir: floored, title: "Big module invariant", body: "Big module exports stable line constants from src/big.ts.", type: "reference", paths: ["src/big.ts"], discoveryTokens: 10, allowLowQuality: true });
   const flooredResult = recall(floored, "big module line constants", 5);
   assert.equal(flooredResult.results.some((entry) => entry.packet.title === "Big module invariant"), true);
   assert.ok(flooredResult.value_receipt);
@@ -5122,10 +5166,19 @@ test("file-context returns only verified packets citing the file, capped at thre
   assert.equal(afterChange.packets.length, 0);
   assert.equal(afterChange.context_block, "");
 
-  // Cap: at most three verified packets even when more cite the file.
+  // Cap: at most three verified packets even when more cite the file. Bodies are distinct
+  // per rule (not just the title) so the near-duplicate admission gate does not block
+  // captures 2-5 for being too similar to the first.
   writeFileSync(join(project, "src", "billing.ts"), "export const billing = 1;\n", "utf8");
-  for (const title of ["Billing rule A", "Billing rule B", "Billing rule C", "Billing rule D", "Billing rule E"]) {
-    assert.equal(capture({ projectDir: project, title, body: `${title}: billing invariants live in src/billing.ts.`, type: "decision", paths: ["src/billing.ts"] }).ok, true);
+  const billingRules: Array<[string, string]> = [
+    ["Billing rule A", "Retries must use the idempotency key stored in src/billing.ts before charging."],
+    ["Billing rule B", "Refunds in src/billing.ts must reference the original charge id, never a new one."],
+    ["Billing rule C", "Currency conversion in src/billing.ts always rounds down to avoid overcharging."],
+    ["Billing rule D", "Webhook receipts in src/billing.ts are verified against the signing secret first."],
+    ["Billing rule E", "Partial captures in src/billing.ts release the remaining authorization hold."],
+  ];
+  for (const [title, body] of billingRules) {
+    assert.equal(capture({ projectDir: project, title, body, type: "decision", paths: ["src/billing.ts"] }).ok, true);
   }
   const capped = kageFileContext(project, "src/billing.ts");
   assert.equal(capped.packets.length, 3);
@@ -5243,6 +5296,7 @@ test("repair backs up and auto-resolves a merge-conflicted packet keeping the ne
     body: "Run npm run build inside mcp before running tests.",
     type: "runbook",
     tags: ["build"],
+    allowLowQuality: true,
   });
   assert.equal(captured.ok, true);
   const packetPath = captured.path!;
@@ -5713,9 +5767,9 @@ test("kageLayers buckets memory into L0 observations, L1 reviewed, L2 synthesis"
   const project = tempProject();
   writeFileSync(join(project, "a.ts"), "export const a = 1;\n", "utf8");
   initProject(project, { policy: false });
-  learn({ projectDir: project, learning: "a.ts holds the constant.", paths: ["a.ts"], type: "reference" });
+  learn({ projectDir: project, learning: "a.ts holds the constant.", paths: ["a.ts"], type: "reference", allowLowQuality: true });
   // add a repo_map packet so L2 synthesis has something to bucket
-  learn({ projectDir: project, learning: "Repo overview: a small TS lib.", type: "repo_map" });
+  learn({ projectDir: project, learning: "Repo overview: a small TS lib.", type: "repo_map", allowLowQuality: true });
   const report = kageLayers(project);
   const byLayer = Object.fromEntries(report.layers.map((l) => [l.layer, l]));
   assert.equal(byLayer.L0.label, "Raw observations");
@@ -5774,7 +5828,7 @@ test("doc-lie check resolves links relative to the doc's directory, not just rep
 test("reverify refreshes grounding in place and clears stale flags", () => {
   const project = tempProject();
   writeFileSync(join(project, "lib.ts"), "export const v = 1;\n", "utf8");
-  const captured = learn({ projectDir: project, learning: "lib.ts holds the version constant.", paths: ["lib.ts"], type: "reference" });
+  const captured = learn({ projectDir: project, learning: "lib.ts holds the version constant.", paths: ["lib.ts"], type: "reference", allowLowQuality: true });
   assert.equal(captured.ok, true);
   const id = captured.packet!.id;
   const packetFile = () => {
@@ -5801,7 +5855,7 @@ test("reverify refreshes grounding in place and clears stale flags", () => {
 test("reverify refuses when all cited evidence is gone", () => {
   const project = tempProject();
   writeFileSync(join(project, "gone.ts"), "export const x = 1;\n", "utf8");
-  const captured = learn({ projectDir: project, learning: "gone.ts explains the x constant.", paths: ["gone.ts"], type: "reference" });
+  const captured = learn({ projectDir: project, learning: "gone.ts explains the x constant.", paths: ["gone.ts"], type: "reference", allowLowQuality: true });
   assert.equal(captured.ok, true);
   rmSync(join(project, "gone.ts"));
   const result = reverifyMemory(project, captured.packet!.id);
