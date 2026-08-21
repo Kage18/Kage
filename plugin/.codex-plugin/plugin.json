@@ -1,6 +1,6 @@
 {
   "name": "kage",
-  "version": "3.2.0",
+  "version": "5.0.0",
   "description": "Kage manages your memory and agents. It briefs and runs agents in isolated git worktrees for a single run or a multi-wave goal, re-runs the checks itself instead of trusting the agent's report, and remembers what it learns so each brief is smarter than the last.",
   "mcpServers": "./.mcp.json"
 }
