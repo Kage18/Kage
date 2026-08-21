@@ -134,7 +134,7 @@ ${APP_STYLES}
         </div>
         <div class="cbar" id="room-cbar"></div>
         <div class="preflight" id="room-preflight"></div>
-        <div class="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now · ⌥⏎ orchestrate as a goal · ⇧⏎ newline</div>
+        <div class="room-hint" id="room-hint">⏎ ask Kage · ⌘⏎ dispatch a run now</div>
       </div>
     </div>
     <div id="room-term-pane"><div id="room-term"></div></div>
@@ -196,7 +196,7 @@ ${APP_STYLES}
 <div class="status">
   <span class="conn" id="conn" title="live"></span>
   <span id="st-left">connecting…</span>
-  <span class="right"><span id="st-counts"></span><span>⌘K commands · ⌘N new run · ⌥L next needing you</span></span>
+  <span class="right"><span id="st-counts"></span><span>⌘K commands</span></span>
 </div>
 <div class="overlay" id="settings-overlay">
   <div class="settings">

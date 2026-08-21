@@ -197,12 +197,18 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .side .sidehead button:hover { background:var(--inset); color:var(--text); }
   .plist { flex:1; overflow-y:auto; padding:0 8px 10px; }
   .prow { display:grid; grid-template-columns:1fr auto; align-items:center; gap:6px;
-    padding:7px 9px; border-radius:var(--r-panel); cursor:pointer; margin-bottom:1px; }
+    padding:10px 14px; border-radius:var(--r-control); cursor:pointer; margin-bottom:1px; }
   .prow:hover { background:var(--inset); }
   .prow.on { background:var(--surface); box-shadow:var(--shadow-sm); }
-  .prow .pn { font-size:12.5px; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .prow.on .pn { color:var(--text); }
-  .prow .pp { grid-column:1/2; font-family:var(--mono); font-size:10px; color:var(--text3);
+  .prow .pn { font-size:13px; font-weight:600; color:var(--text); display:flex; align-items:center;
+    gap:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* The active row is the only one whose daemon we are actually connected to —
+     this dot says so, the same "live" language the status bar's .conn dot uses.
+     Every other row still gets a dot, just a dim one: a status marker at a
+     constant position beats text that only sometimes shows up. */
+  .prow .pdot { width:6px; height:6px; border-radius:50%; background:var(--green); flex:none; }
+  .prow .pdot.dim { background:var(--line-strong); }
+  .prow .pp { grid-column:1/2; font-family:var(--mono); font-size:10.5px; color:var(--text3);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .prow .pcount { font-family:var(--mono); font-size:10px; color:#fff; background:var(--amber);
     border-radius:var(--r-card); padding:1px 6px; }
@@ -217,7 +223,8 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   /* The sidebar fleet (docs/design/SESSIONS_SURFACE.md §1): under the ACTIVE project
      only. Orchestrator first with its own live dot, then every non-terminal run by
      display_name with its own state dot — a merged/rejected run's home is the board. */
-  .pfleet { padding:2px 2px 8px 14px; display:flex; flex-direction:column; gap:1px; }
+  .pfleet { margin-left:12px; padding:2px 2px 8px 12px; border-left:1px solid var(--line);
+    display:flex; flex-direction:column; gap:1px; }
   .pfleet-row { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:var(--r-control);
     cursor:pointer; font-size:11.5px; color:var(--text2); }
   .pfleet-row:hover { background:var(--inset); }
@@ -391,7 +398,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      composer and lets the empty space fall above, where it reads as headroom. */
   .room-scroll { overflow-y:auto; flex:1; display:flex; flex-direction:column; }
   .room-col { max-width:760px; width:100%; margin:0 auto; padding:32px 24px 8px;
-    display:flex; flex-direction:column; justify-content:flex-end; gap:22px; flex:1; box-sizing:border-box; }
+    display:flex; flex-direction:column; justify-content:flex-end; gap:26px; flex:1; box-sizing:border-box; }
   .primer { text-align:center; padding:20px; color:var(--text3); margin:auto 0; }
   .primer .pseal-eye { width:46px; height:46px; display:block; }
   .primer .pseal { width:46px; height:46px; color:var(--green);
@@ -426,8 +433,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   /* One column, one rhythm. Right-aligned bubbles of wildly different widths (830px
      next to 65px for "hi") read as accidental; a labelled left-aligned turn with a
      rule down the side reads as a transcript, which is what this is. */
-  .turn { display:flex; flex-direction:column; gap:7px; max-width:100%; align-self:stretch; }
-  .turn.you { margin-top:6px; }
+  .turn { display:flex; flex-direction:column; gap:6px; max-width:100%; align-self:stretch; }
   .turn .who { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
     text-transform:uppercase; color:var(--text3); }
   .turn.you .who { color:var(--green); }
@@ -446,7 +452,13 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .turn .bubble2 { font-size:14.5px; line-height:1.7; white-space:pre-wrap; }
   .turn.you .bubble2 { color:var(--text2); max-width:68ch;
     border-left:3px solid var(--green); padding-left:14px; }
-  .turn.kage .bubble2 { color:var(--text); max-width:68ch; }
+  /* The green-left-bar block becomes an actual tinted block, not just a rule down the
+     side — a second declaration for the same selector rather than folding into the one
+     above, so the pre-existing rule stays byte-for-byte (a regression test anchors to
+     it) while this still wins the cascade for padding (the shorthand below replaces
+     the left-only padding the first rule set). */
+  .turn.you .bubble2 { background:var(--surface); border-radius:12px; padding:12px 16px; }
+  .turn.kage .bubble2 { color:var(--text); max-width:68ch; font-size:15px; line-height:1.7; }
   /* Kage speaks markdown — a blank line is a paragraph break, inline code gets the
      mono/code treatment already used everywhere else in the app. */
   .turn-para + .turn-para { margin-top:.85em; }
@@ -465,12 +477,10 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .turnbreak .rule { flex:1; height:1px; background:var(--line2); }
   .turnbreak .label { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
     text-transform:uppercase; color:var(--text3); }
-  /* Tool use reads as an action line in the flow ("Ran dispatch ·"), not as a grey
-     footnote appended to the prose. */
-  .turn .toolline { display:flex; align-items:baseline; gap:8px; font-family:var(--mono);
-    font-size:11.5px; color:var(--text3); padding:2px 0; }
-  .turn .toolline .verb { color:var(--jade); }
-  .turn .meta2 { font-family:var(--mono); font-size:10px; color:var(--text3); padding:0 3px; }
+  /* The "done · age · N tools" line under a kage reply (turnMetaLine in app-client.ts):
+     the turn's own gap already gives 6px, +2px here reaches the rhythm pass's 8px
+     reply-to-meta spacing without a one-off gap value on .turn itself. */
+  .turn .meta2 { font-family:var(--mono); font-size:10px; color:var(--text3); padding:0 3px; margin-top:2px; }
   .turn .meta2 .redact { color:var(--amber); }
   .turn .opened { display:inline-flex; align-items:center; gap:6px; margin-top:2px; padding:6px 11px;
     border:1px solid var(--line); border-radius:var(--r-card); background:var(--surface2); color:var(--text);
@@ -486,13 +496,17 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   @keyframes pulse2 { 0%,60%,100% { opacity:.25; } 30% { opacity:1; } }
   .room-composer { padding:14px 24px 18px; background:var(--surface); border-top:1px solid var(--line); flex:none; }
   .room-cwrap { display:flex; gap:10px; align-items:flex-end; background:var(--inset); border:1px solid var(--line);
-    border-radius:var(--r-card); padding:10px 14px; max-width:720px; margin:0 auto; }
+    border-radius:var(--r-card); padding:10px 14px; max-width:712px; margin:0 auto; }
   .room-cwrap:focus-within { border-color:var(--text3); }
   .room-cwrap textarea { flex:1; border:none; background:none; color:var(--text); font-size:14px; font-family:var(--sans);
     outline:none; resize:none; max-height:140px; line-height:1.5; padding:2px 0; }
   .room-send { background:var(--seal); color:#0c130f; border-radius:var(--r-card); padding:7px 14px; font-size:12.5px; font-weight:700; }
   .room-send:disabled { opacity:.45; cursor:default; }
-  .room-hint { text-align:center; font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:8px; }
+  /* Aligned to the SAME 712px column the thread itself reads at (.room-col's
+     760px max-width minus its 24px gutters) — a quiet line under the composer, not
+     a hint stretched to the full width of the pane. */
+  .room-hint { max-width:712px; margin:8px auto 0; text-align:center; font-family:var(--mono);
+    font-size:10px; color:var(--text3); }
   /* Presence banner (docs/design/SESSIONS_SURFACE.md §6): absence stated, not a blank
      pane — the same discipline the Memory view already applies to an unmeasured repo. */
   .room-banner { display:none; align-items:center; gap:12px; padding:10px 24px;
@@ -504,7 +518,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      One quiet line — it informs the dispatch decision, it must not shout over it. */
   .preflight { display:none; align-items:baseline; gap:12px; flex-wrap:wrap;
     font-family:var(--mono); font-size:10.5px; color:var(--text3);
-    max-width:720px; margin:8px auto 0; }
+    max-width:712px; margin:8px auto 0; }
   /* The standing defect: the Dispatch button used to drop the instant the forecast
      resolved and this box's height inserted above it. display:flex + visibility:hidden
      (JS toggles visibility here, never display — see renderPreflight) reserves the
@@ -515,7 +529,7 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
   .preflight .pf-tag { opacity:.6; margin-left:auto; letter-spacing:.08em; text-transform:uppercase; font-size:9.5px; }
   /* composer controls: a row of pickers under the input, each opening a menu whose
      options carry their own one-line explanation. */
-  .cbar { display:flex; gap:8px; align-items:center; max-width:720px; margin:8px auto 0; }
+  .cbar { display:flex; gap:8px; align-items:center; max-width:712px; margin:8px auto 0; }
   .picker { position:relative; }
   .picker > button { font-family:var(--mono); font-size:11px; padding:4px 10px; border-radius:var(--r-panel);
     border:1px solid var(--line); background:var(--surface); color:var(--text2); }
@@ -942,8 +956,14 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     min-height:220px; min-width:0; display:flex; flex-direction:column; }
   .bcol .bempty { margin:auto; text-align:center; color:var(--text3); font-size:11.5px;
     line-height:1.6; padding:14px 10px; max-width:190px; }
+  /* The count chip pinned right by .n's margin-left:auto, and 14px clear below before
+     the first card — the three states used to run together at a tighter 10px, which
+     read as one cramped word instead of a header. Sentence case, not the seclabel
+     small-caps treatment: each word already sits next to its own color dot, so the
+     dot carries the state and the word only needs to name it — shouting it in
+     letter-spaced caps on top of that was pure noise. */
   .bh { display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10px;
-    letter-spacing:.13em; text-transform:uppercase; color:var(--text3); margin:4px 6px 10px; }
+    color:var(--text3); margin:4px 6px 14px; }
   .bh i { width:7px; height:7px; border-radius:50%; display:block; }
   .bh .sep { opacity:.4; margin:0 2px; }
   .bh .n { margin-left:auto; font-variant-numeric:tabular-nums; }
