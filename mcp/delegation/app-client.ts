@@ -1293,6 +1293,34 @@ function turnRunCard(run) {
   return card;
 }
 
+// Consecutive "ran X · Y" tool-name lines read as noise once a reply used more than
+// one tool — one grouped, expandable chip (foldrow + hidden list) keeps the thread
+// scannable instead of listing every call. Shared by both turn renderers below so the
+// two Chat registers (transcript-backed and history-fallback) never drift apart.
+function toolGroupChip(tools) {
+  var uniq = tools.map(toolLabel).filter(function (t, i, arr) { return arr.indexOf(t) === i; });
+  var group = h("div", "toolgroup");
+  var summary = h("button", "foldrow", "Ran " + tools.length + " tool call" + (tools.length === 1 ? "" : "s"));
+  var list = h("div", "toolgrouplist");
+  list.style.display = "none";
+  uniq.forEach(function (name) { list.appendChild(h("div", "toolgroupitem", name)); });
+  summary.onclick = function () {
+    var open = list.style.display !== "none";
+    list.style.display = open ? "none" : "block";
+    summary.classList.toggle("open", !open);
+  };
+  group.appendChild(summary);
+  group.appendChild(list);
+  return group;
+}
+// The quiet "done · age · N tools" line under a kage reply — replaces the old
+// full-width DONE/AGE turn-boundary rule, which floated between exchanges instead of
+// belonging to the reply it was reporting on.
+function turnMetaLine(atIso, toolCount) {
+  var suffix = toolCount ? " · " + toolCount + " tool" + (toolCount === 1 ? "" : "s") : "";
+  return atIso ? ageSpan("meta2", atIso, "done · ", suffix) : h("div", "meta2", "done" + suffix);
+}
+
 // The Room's history register (docs/design/SESSIONS_SURFACE.md §2) — the manager's OWN
 // paraphrase of what happened, from GET /room. This is what Chat falls back to when
 // /room/transcript carries nothing yet (a thread the pty has never answered): a
@@ -1306,20 +1334,9 @@ function renderHistoryTurns(turnsEl, turns) {
   // so this call site's signature stays exactly what piece 2's own regression test
   // (sessions-ui.test.ts) already locks down.
   if (turns.length) {
-    turnsEl.appendChild(h("div", "meta2", state.room.has_transcript
-      ? "showing the manager's summary — the live session transcript hasn't loaded yet"
-      : "showing the manager's summary — no live session transcript for this thread"));
+    turnsEl.appendChild(h("div", "meta2", state.room.has_transcript ? "summary — transcript loading" : "summary only"));
   }
   turns.forEach(function (turn, index) {
-    // Close the previous exchange with a rule + elapsed time, so a long thread reads
-    // as a sequence of completed turns rather than one undifferentiated column.
-    if (turn.role === "you" && index > 0) {
-      var prev = turns[index - 1];
-      var brk = h("div", "turnbreak");
-      brk.appendChild(h("span", "rule"));
-      brk.appendChild(prev.at ? ageSpan("label", prev.at, "done · ") : h("span", "label", "done"));
-      turnsEl.appendChild(brk);
-    }
     // The entry animation is for turns arriving right now — replaying it on turns
     // that were already on screen is exactly what made the thread shimmer.
     var isFailedTurn = turn.role === "kage" && Boolean(turn.failed);
@@ -1337,14 +1354,10 @@ function renderHistoryTurns(turnsEl, turns) {
     if (isFailedTurn) who.appendChild(h("span", "who-fail", "failed"));
     wrap.appendChild(who);
     wrap.appendChild(turn.role === "kage" ? renderTurnBubble(turn.text) : h("div", "bubble2", turn.text));
-    if (turn.role === "kage" && turn.tools && turn.tools.length) {
-      var used = turn.tools.map(toolLabel);
-      var uniq = used.filter(function (t, i) { return used.indexOf(t) === i; });
-      var tl = h("div", "toolline");
-      tl.appendChild(h("span", "verb", "ran"));
-      tl.appendChild(h("span", "", uniq.join(" · ")));
-      wrap.appendChild(tl);
-    }
+    if (turn.role === "kage" && turn.tools && turn.tools.length) wrap.appendChild(toolGroupChip(turn.tools));
+    // Belongs to the reply it reports on — not a full-width rule floating between the
+    // next exchange, which is what this line replaced (see turnMetaLine above).
+    if (turn.role === "kage") wrap.appendChild(turnMetaLine(turn.at, turn.tools ? turn.tools.length : 0));
     if (turn.role === "kage" && turn.corrections && turn.corrections.length) {
       var meta = h("div", "meta2");
       meta.appendChild(h("span", "redact", "kernel checked " + turn.corrections.length + " restated number" +
@@ -1377,23 +1390,8 @@ function renderTranscriptTurns(turnsEl, turns) {
     var wrap = h("div", "turn " + (turn.role === "user" ? "you" : "kage") + (index >= roomPaintedCount ? " turn-new" : ""));
     wrap.appendChild(h("div", "who", turn.role === "user" ? "You" : "Kage"));
     if (turn.text) wrap.appendChild(turn.role === "user" ? h("div", "bubble2", turn.text) : renderTurnBubble(turn.text));
-    if (turn.tools && turn.tools.length) {
-      var uniq = turn.tools.map(toolLabel).filter(function (t, i, arr) { return arr.indexOf(t) === i; });
-      var group = h("div", "toolgroup");
-      var summary = h("button", "foldrow", "Ran " + turn.tools.length + " tool call" + (turn.tools.length === 1 ? "" : "s"));
-      var list = h("div", "toolgrouplist");
-      list.style.display = "none";
-      uniq.forEach(function (name) { list.appendChild(h("div", "toolgroupitem", name)); });
-      summary.onclick = function () {
-        var open = list.style.display !== "none";
-        list.style.display = open ? "none" : "block";
-        summary.classList.toggle("open", !open);
-      };
-      group.appendChild(summary);
-      group.appendChild(list);
-      wrap.appendChild(group);
-    }
-    if (turn.timestamp) wrap.appendChild(h("span", "ts", String(turn.timestamp).slice(11, 19)));
+    if (turn.tools && turn.tools.length) wrap.appendChild(toolGroupChip(turn.tools));
+    if (turn.role === "assistant") wrap.appendChild(turnMetaLine(turn.timestamp, turn.tools ? turn.tools.length : 0));
     turnsEl.appendChild(wrap);
   });
 }
@@ -1847,8 +1845,24 @@ function dispatchFromComposer() {
     .then(function (out) {
       if (!out.ok) { showError(out.error || "dispatch failed"); input.value = intent; return; }
       flash("dispatched — watch the rail above");
+      markComposerTaught("kageDispatchedRun");
       refresh();
     });
+}
+// Teach the composer's keystroke shortcuts once, then get out of the way — once a
+// real send AND a real dispatch have both succeeded, the hint row has done its job
+// and just repeats what the palette and the first-open screen already cover.
+function markComposerTaught(flag) {
+  try { localStorage.setItem(flag, "1"); } catch (e) {}
+  updateRoomHintVisibility();
+}
+function updateRoomHintVisibility() {
+  var el = document.getElementById("room-hint");
+  if (!el) return;
+  var taught;
+  try { taught = localStorage.getItem("kageSentMsg") === "1" && localStorage.getItem("kageDispatchedRun") === "1"; }
+  catch (e) { taught = false; }
+  el.style.display = taught ? "none" : "";
 }
 
 // ⌥⏎: a third composer path, for intent too large for one run. Creates the goal
@@ -1970,6 +1984,7 @@ function sendRoomMessage() {
   renderRoom();
   api("/room/message?session=" + encodeURIComponent(state.session), { method: "POST", body: { message: message } }).then(function (out) {
     if (!out.ok) { state.room.busy = false; renderRoom(); showError(out.error || "the room did not accept that message"); return; }
+    markComposerTaught("kageSentMsg");
     refreshRoom();
   });
 }
@@ -3359,7 +3374,15 @@ function renderProjects() {
     var current = project.dir === state.projectDir;
     var row = h("div", "prow" + (current ? " on" : ""));
     row.title = project.dir;
-    row.appendChild(h("div", "pn", project.name));
+    var pn = h("div", "pn");
+    // Every row gets a dot — the active one green, the "this is the daemon we're
+    // actually talking to" language the status bar's own .conn dot already carries;
+    // every other row a dim placeholder, same size, so the list doesn't jump when
+    // the active project changes. The name is the only text an inactive row carries
+    // now — its full path is one hover away via the row's own title attribute.
+    pn.appendChild(h("span", "pdot" + (current ? "" : " dim")));
+    pn.appendChild(document.createTextNode(project.name));
+    row.appendChild(pn);
     if (current && needs) row.appendChild(h("span", "pcount", String(needs)));
     else if (!current) {
       var forget = h("button", "pforget", "×");
@@ -3372,7 +3395,9 @@ function renderProjects() {
       };
       row.appendChild(forget);
     }
-    row.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
+    // The path is real information only on the row you're actually looking at —
+    // every other row repeating it, unread, is exactly the microtext this pass cuts.
+    if (current) row.appendChild(h("div", "pp", project.dir.replace(/^\\/Users\\/[^/]+/, "~")));
     if (!current) row.onclick = function () { openProject(project.dir, row); };
     list.appendChild(row);
     // The sidebar fleet (docs/design/SESSIONS_SURFACE.md §1): under the ACTIVE project
@@ -4611,6 +4636,7 @@ bellLabel();
 loadProjects();
 loadMemory();
 renderComposerBar();
+updateRoomHintVisibility();
 try { applyTheme(localStorage.getItem("kageTheme") || "system"); } catch (e) { applyTheme("system"); }
 refresh();
 refreshRoom();
