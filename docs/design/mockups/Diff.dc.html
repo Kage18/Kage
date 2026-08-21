@@ -1,0 +1,57 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.wrap{width:1280px;height:828px;background:var(--bg);display:flex;overflow:hidden;border-radius:var(--r-control)}
+.tree{width:300px;border-right:1px solid var(--line);background:var(--chrome);padding:16px 12px;display:flex;flex-direction:column;gap:4px}
+.f{display:flex;align-items:baseline;gap:8px;font-family:var(--mono);font-size:11.5px;color:var(--text2);padding:6px 10px;border-radius:var(--r-control)}
+.f.on{background:var(--surface2);color:var(--text)}
+.f .pm{margin-left:auto;font-size:10px}.f .pm b{color:var(--green);font-weight:600}.f .pm span{color:var(--crimson)}
+.hunks{flex:1;padding:18px 22px;overflow:hidden;display:flex;flex-direction:column;gap:12px}
+.hunk{background:var(--code-bg);border-radius:var(--r-control);overflow:hidden;font-family:var(--mono);font-size:11.5px;line-height:1.7}
+.hh{padding:6px 14px;color:var(--code);background:color-mix(in srgb,var(--code) 8%,var(--code-bg));font-size:10.5px}
+.ln{display:flex;padding:0 14px}
+.ln .no{width:34px;color:color-mix(in srgb,var(--code-text) 30%,transparent);font-size:10px}
+.ln.add{background:rgba(67,201,138,.08);color:var(--green-strong)}
+.ln.del{background:rgba(224,122,140,.08);color:var(--crimson)}
+.ln.ctx{color:color-mix(in srgb,var(--code-text) 70%,transparent)}
+.bar{display:flex;align-items:center;gap:10px;padding:0 0 4px}
+h2{font-family:var(--serif);font-weight:600;font-size:17px;margin:0}
+</style></helmet>
+<div class="wrap">
+  <div class="tree">
+    <div class="seclabel" style="padding:0 10px 8px">uncommitted in the worktree · 3 files</div>
+    <div class="f on">delegation/ratify.ts<span class="pm"><b>+47</b> <span>−3</span></span></div>
+    <div class="f">delegation/verify.ts<span class="pm"><b>+38</b> <span>−6</span></span></div>
+    <div class="f">merge-honesty.test.ts<span class="pm"><b>+204</b></span></div>
+  </div>
+  <div class="hunks">
+    <div class="bar"><h2>delegation/ratify.ts</h2><span class="chip">@@ mergeRun</span></div>
+    <div class="hunk">
+      <div class="hh">@@ -212,6 +212,14 @@ export function mergeRun(projectDir, runId)</div>
+      <div class="ln ctx"><span class="no">212</span>  const task = readRun(projectDir, runId);</div>
+      <div class="ln add"><span class="no">213</span>+ // A feature branch adding no commits merges NOTHING while reading verified —</div>
+      <div class="ln add"><span class="no">214</span>+ // refuse, and never delete the worktree that may hold the only copy.</div>
+      <div class="ln add"><span class="no">215</span>+ if (commitsBeyondBase(task) === 0 &amp;&amp; REQUIRES_CONTENT.has(task.type)) {</div>
+      <div class="ln add"><span class="no">216</span>+   return refuse("this branch adds no commits — the work was never committed");</div>
+      <div class="ln add"><span class="no">217</span>+ }</div>
+      <div class="ln ctx"><span class="no">218</span>  const claim = readClaim(projectDir, runId);</div>
+      <div class="ln del"><span class="no">219</span>- removeWorktree(projectDir, runId);</div>
+      <div class="ln add"><span class="no">220</span>+ if (merged.ok) removeWorktree(projectDir, runId);</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

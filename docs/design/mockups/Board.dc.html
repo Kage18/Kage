@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+  <style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.top{height:46px;background:var(--chrome);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;padding:0 16px}
+.appname{font-family:var(--serif);font-weight:700;font-size:16px}
+.seg{display:flex;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);padding:3px}
+.seg button{font-family:var(--mono);font-size:12px;padding:5px 14px;border-radius:var(--r-control);color:var(--text3)}
+.seg button.on{background:var(--surface2);color:var(--text)}
+.workbar{display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--text3)}
+.viewtoggle{margin-left:auto;display:flex;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);padding:3px}
+.viewtoggle span{padding:4px 12px;border-radius:var(--r-control);font-size:11px}
+.viewtoggle .on{background:var(--surface2);color:var(--text)}
+.board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:18px 20px;height:678px;overflow:hidden}
+.col{background:var(--inset);border:1px solid var(--line2);border-radius:var(--r-card);padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.colhead{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--text2);padding:2px 4px 8px}
+.colhead .n{margin-left:auto;color:var(--text3)}
+.acard{border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface);padding:11px 12px;display:flex;flex-direction:column;gap:5px;min-width:0;box-shadow:var(--shadow-sm)}
+.at{font-size:13px;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.aslug{font-family:var(--mono);font-size:10px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--text2)}
+.arow .age{margin-left:auto;color:var(--text3)}
+.vchip{font-family:var(--mono);font-size:9.5px;padding:2px 8px;border-radius:var(--r-panel);border:1px solid color-mix(in srgb,var(--green) 50%,transparent);color:var(--green);letter-spacing:.04em}
+.duechip{font-family:var(--mono);font-size:9.5px;padding:2px 8px;border-radius:var(--r-panel);border:1px solid color-mix(in srgb,var(--amber) 50%,transparent);color:var(--amber)}
+.goalcard{border:1px dashed var(--line-strong);border-radius:var(--r-card);background:var(--surface);padding:11px 12px;display:flex;flex-direction:column;gap:6px}
+  </style>
+</helmet>
+<div style="width:1280px;height:828px;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-control)">
+  <div class="top">
+    <svg width="20" height="14" viewBox="0 0 24 16" fill="none" stroke="#43c98a" stroke-width="1.6"><path d="M1 8c3.5-4.5 7-6.8 11-6.8S19.5 3.5 23 8c-3.5 4.5-7 6.8-11 6.8S4.5 12.5 1 8Z"></path><circle cx="12" cy="8" r="3"></circle></svg>
+    <div class="appname">Kage</div>
+    <div class="seg" style="margin-left:12px"><button>Room</button><button class="on">Work</button><button>Memory</button></div>
+    <div style="flex:1"></div>
+  </div>
+  <div class="workbar"><span>1 need you · 3 working · 97 done</span>
+    <div class="viewtoggle"><span>List</span><span class="on">Board</span></div>
+  </div>
+  <div class="board">
+    <div class="col">
+      <div class="colhead"><span class="dot m"></span>IDLE / <span style="color:var(--green)">WORKING</span><span class="n">0 / 3</span></div>
+      <div class="acard"><div class="at">Adapters &amp; dispatch wiring for the reviewer role</div><div class="aslug">⎇ adapters-dispatch…-260820-41d2</div><div class="arow"><span class="dot g"></span>running · 412k tok<span class="age">6m</span></div></div>
+      <div class="acard"><div class="at">Surface rendering for the reviewer role</div><div class="aslug">⎇ surface-rendering…-260820-01e9</div><div class="arow"><span class="dot g"></span>running · 1.1M tok<span class="age">6m</span></div></div>
+      <div class="acard"><div class="at">Merge-honesty guards</div><div class="aslug">⎇ two-verification…-260820-7f97</div><div class="arow"><span class="dot g"></span>verifying<span class="age">2m</span></div></div>
+      <div class="goalcard"><div class="at" style="font-size:12.5px">Add a reviewer agent role to Kage's run pipeline</div><div class="arow"><span class="chip ok">executing</span><span class="chip">recommend</span><span class="duechip">wave 2 due</span></div></div>
+    </div>
+    <div class="col">
+      <div class="colhead"><span class="dot a"></span>NEEDS YOU<span class="n">1</span></div>
+      <div class="acard"><div class="at">Write the release notes for the next version</div><div class="aslug">⎇ write-the-release…-260818-cb42</div><div class="arow"><span class="dot a"></span>failed · worktree holds work<span class="age">1d</span></div><div class="arow"><span class="duechip">Adopt — verify what it left</span></div></div>
+    </div>
+    <div class="col">
+      <div class="colhead"><span class="dot p"></span>IN REVIEW<span class="n">1</span></div>
+      <div class="acard"><div class="at">Store migration for the graph tables</div><div class="aslug">⎇ m3-of-the-memory…-260820-f723</div><div class="arow"><span class="dot p"></span>reviewing · reviewer: claude<span class="age">40s</span></div></div>
+    </div>
+    <div class="col">
+      <div class="colhead"><span class="dot g"></span>READY / MERGED<span class="n">2 / 97</span></div>
+      <div class="acard"><div class="at">Kill the flicker — render calm</div><div class="aslug">⎇ kill-the-flicker…-260820-d142</div><div class="arow"><span class="dot g"></span>merged · 31M tok<span class="age">1h</span><span class="vchip">VERIFIED 6/6</span></div></div>
+      <div class="acard"><div class="at">M4: benchmarks &amp; the scale guard</div><div class="aslug">⎇ m4-of-the-memory…-260820-8ee3</div><div class="arow"><span class="dot g"></span>merged · 23M tok<span class="age">2h</span><span class="vchip">VERIFIED 5/5</span></div></div>
+      <div class="acard"><div class="at">Every dead end gets a next step</div><div class="aslug">⎇ every-dead-end…-260820-8681</div><div class="arow"><span class="dot g"></span>merged · 38M tok<span class="age">3h</span><span class="vchip">VERIFIED 6/6</span></div></div>
+    </div>
+  </div>
+  <div style="height:26px;border-top:1px solid var(--line);background:var(--chrome);display:flex;align-items:center;gap:14px;padding:0 16px;font-family:var(--mono);font-size:10.5px;color:var(--text3)"><span class="dot g"></span>live<span style="flex:1"></span>⌘K commands · ⌥L next needing you</div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

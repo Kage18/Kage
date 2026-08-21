@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.scrim{width:760px;height:720px;background:color-mix(in srgb,var(--bg) 72%,black);display:flex;align-items:center;justify-content:center;border-radius:var(--r-control)}
+.ov{width:620px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-hero);box-shadow:var(--shadow-md);overflow:hidden}
+.hd{padding:18px 24px;display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line2)}
+h1{font-family:var(--serif);font-weight:600;font-size:18px;margin:0}
+.path{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text3)}
+.f{padding:14px 24px;border-bottom:1px solid var(--line2);display:flex;align-items:flex-start;gap:16px}
+.f .l{flex:1}
+.f .n{font-size:13px;font-weight:600}
+.f .d{font-size:11.5px;color:var(--text2);line-height:1.5;margin-top:2px;max-width:40ch}
+.f .v{font-family:var(--mono);font-size:11.5px;background:var(--inset);border:1px solid var(--line);border-radius:var(--r-control);padding:7px 12px;color:var(--code-text);white-space:nowrap}
+.tog{width:38px;height:22px;border-radius:12px;background:var(--green);position:relative;flex:none;margin-top:4px}
+.tog::after{content:"";position:absolute;right:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#0c130f}
+.ft{padding:14px 24px;display:flex;gap:10px}
+.save{font-family:var(--mono);font-size:12px;padding:7px 18px;border-radius:var(--r-panel);background:var(--green);color:#0c130f;font-weight:700}
+.cl{font-family:var(--mono);font-size:11.5px;color:var(--text2);border:1px solid var(--line);border-radius:var(--r-panel);padding:7px 14px}
+</style></helmet>
+<div class="scrim"><div class="ov">
+  <div class="hd"><h1>Project settings</h1><span class="path">~/code/Kage</span></div>
+  <div class="f"><div class="l"><div class="n">Test command</div><div class="d">The backbone check of every brief. Kage runs this itself — the agent's word is never the verdict.</div></div><span class="v">npm test --prefix mcp</span></div>
+  <div class="f"><div class="l"><div class="n">Diff budget</div><div class="d">A claim changing more lines than this is refused as too large to review well.</div></div><span class="v">1600</span></div>
+  <div class="f"><div class="l"><div class="n">Max concurrent runs</div><div class="d">Enforced in the kernel, so every surface obeys.</div></div><span class="v">3</span></div>
+  <div class="f"><div class="l"><div class="n">Strict verification</div><div class="d">Any non-passing check blocks a run from reaching ready. Turning this off lets unverified work look finished — honesty over convenience.</div></div><span class="tog"></span></div>
+  <div class="ft"><span class="save">Save</span><span class="cl">Close</span></div>
+</div></div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

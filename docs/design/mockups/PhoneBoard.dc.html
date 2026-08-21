@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.ph{width:390px;height:844px;background:var(--bg);display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-control)}
+.top{height:44px;background:var(--chrome);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 10px}
+.seg{display:flex;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);padding:2px}
+.seg span{font-family:var(--mono);font-size:10.5px;padding:4px 10px;border-radius:8px;color:var(--text3)}
+.seg .on{background:var(--surface2);color:var(--text)}
+.list{flex:1;padding:12px;display:flex;flex-direction:column;gap:9px;overflow:hidden}
+.grp{font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--text3);padding:4px 2px 0}
+.c{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:11px 13px;display:flex;flex-direction:column;gap:5px}
+.c .t{font-size:12.5px;font-weight:600;line-height:1.35}
+.c .m{display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:9.5px;color:var(--text3)}
+.vchip{margin-left:auto;font-family:var(--mono);font-size:8.5px;padding:2px 7px;border-radius:10px;border:1px solid color-mix(in srgb,var(--green) 50%,transparent);color:var(--green)}
+.act{font-family:var(--mono);font-size:9.5px;padding:3px 10px;border-radius:10px;border:1px solid color-mix(in srgb,var(--green) 45%,transparent);color:var(--green);width:fit-content}
+</style></helmet>
+<div class="ph">
+  <div class="top"><div class="seg"><span>Room</span><span class="on">Work</span><span>Memory</span></div><div style="flex:1"></div><span class="chip ok" style="font-size:9px">1 for you</span></div>
+  <div class="list">
+    <div class="grp">NEEDS YOU</div>
+    <div class="c"><div class="t">Write the release notes</div><div class="m"><span class="dot a"></span>agent gone · worktree holds work</div><span class="act">Adopt</span></div>
+    <div class="grp">WORKING</div>
+    <div class="c"><div class="t">Merge-honesty guards</div><div class="m"><span class="dot g"></span>running npm test · 44m</div></div>
+    <div class="grp">DONE</div>
+    <div class="c"><div class="t">Kill the flicker</div><div class="m"><span class="dot g"></span>merged · 1h<span class="vchip">VERIFIED 6/6</span></div></div>
+    <div class="c"><div class="t">M4: benchmarks</div><div class="m"><span class="dot g"></span>merged · 2h<span class="vchip">VERIFIED 5/5</span></div></div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

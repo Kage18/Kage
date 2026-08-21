@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="./support.js"></script></head><body>
+<x-dc>
+<helmet><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"><style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.page{width:1280px;height:828px;background:var(--bg);display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-control)}
+.hd{padding:16px 24px 12px;display:flex;align-items:center;gap:12px}
+h1{font-family:var(--serif);font-weight:600;font-size:18px;margin:0}
+.banner{margin:0 24px 12px;background:color-mix(in srgb,var(--amber) 9%,var(--surface));border:1px solid color-mix(in srgb,var(--amber) 45%,transparent);border-radius:var(--r-card);padding:10px 16px;display:flex;align-items:center;gap:12px;font-size:12.5px;color:var(--amber)}
+.hb{margin-left:auto;font-family:var(--mono);font-size:11px;padding:6px 14px;border-radius:var(--r-panel);border:1px solid color-mix(in srgb,var(--amber) 50%,transparent);color:var(--amber)}
+.term{flex:1;margin:0 24px 20px;background:var(--code-bg);color:var(--code-text);border-radius:var(--r-control);font-family:var(--mono);font-size:12.5px;line-height:1.65;padding:18px 22px;display:flex;flex-direction:column}
+.dim{color:color-mix(in srgb,var(--code-text) 55%,transparent)}
+.grn{color:var(--green)}
+</style></helmet>
+<div class="page">
+  <div class="hd"><h1>Merge-honesty guards</h1><span class="chip warn">taken over</span><span class="chip">same session — your keyboard now</span></div>
+  <div class="banner">Supervision is paused while you drive. Kage is not recording checks until you hand back.<span class="hb">Hand Back</span></div>
+  <div class="term">
+    <div class="dim">— attached to the run's own claude session (context intact) —</div>
+    <div style="margin-top:8px"><span class="grn">›</span> why did you choose a Set for REQUIRES_CONTENT?</div>
+    <div style="margin-top:6px">Lookup is O(1) and the membership list is closed — feature, bugfix, refactor, migration. A chore may legitimately merge empty, so it stays out.</div>
+    <div style="margin-top:8px"><span class="grn">›</span> <span style="border-right:7px solid var(--code-text)">&nbsp;</span></div>
+    <div style="margin-top:auto;border-top:1px solid color-mix(in srgb,var(--code-text) 15%,transparent);padding-top:8px;font-size:11px" class="dim">hand back to resume supervision — the kernel re-runs every check before this can merge, no matter what happens here</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic { renderVals() { return {}; } }
+</script>
+</body></html>

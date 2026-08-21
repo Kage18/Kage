@@ -1,0 +1,430 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,700;1,9..144,900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+  <style>
+:root{color-scheme:dark;--bg:#0c0e0d;--surface:#1a1d1b;--surface2:#212522;--inset:#101312;--line:#242823;--line-strong:#3a3f39;--text:#edefe9;--text2:#a4aba1;--text3:#6d746b;--green:#43c98a;--green-strong:#5fdca0;--amber:#d9a93f;--red:#e05548;--red-soft:#b8443a;--paper:#e8e3d5;--paper-ink:#22261f;--paper-ink2:#5c6153;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--code-bg:#0e1110;--code-text:#cfe0d4}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.site{width:1280px;height:5520px;position:relative;overflow:hidden;background:
+  radial-gradient(1100px 500px at 75% -80px,rgba(224,85,72,.05),transparent 65%),var(--bg)}
+.spine{position:absolute;left:96px;top:900px;bottom:0;width:1px;background:linear-gradient(var(--line) 70%,transparent);z-index:0}
+.sc{position:relative;box-sizing:border-box;overflow:hidden}
+.kick{font-family:var(--mono);font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;color:var(--text3);margin:0 72px 0 152px;position:relative}
+.kick::before{content:"";position:absolute;left:-56px;top:7px;width:34px;height:1px;background:var(--line-strong)}
+.kick b{color:var(--red);font-weight:600}
+.kick .grn{color:var(--green)}
+.body-col{margin:0 72px 0 152px}
+/* ---------- scene 1 : the claim ---------- */
+.s1{height:900px}
+.nav{height:64px;display:flex;align-items:center;gap:26px;padding:0 56px;border-bottom:1px solid var(--line);box-sizing:border-box}
+.brand{font-family:var(--serif);font-weight:700;font-size:19px;display:flex;align-items:center;gap:10px;letter-spacing:.01em}
+.nav .links{margin-left:auto;display:flex;gap:26px;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em}
+.nav .links span{color:var(--text3)}
+.claimwrap{position:relative;margin:64px 72px 0 152px;width:660px}
+.msg-meta{font-family:var(--mono);font-size:10.5px;color:var(--text3);letter-spacing:.08em;margin-bottom:10px;display:flex;gap:8px;align-items:center}
+.msg-meta .av{width:8px;height:8px;border-radius:50%;background:#8f97a8}
+.msg{background:#1c201e;border:1px solid var(--line);border-radius:14px;padding:24px 28px;font-size:16.5px;line-height:1.68;color:#dde1da;max-width:620px}
+.msg .files{font-family:var(--mono);font-size:14px;color:#b9c4b6}
+.msg-sub{font-family:var(--mono);font-size:10.5px;color:var(--text3);margin-top:10px;letter-spacing:.06em}
+.bigstamp{position:absolute;right:-268px;top:34px;transform:rotate(-7deg);border:3px solid var(--red);outline:1.5px solid var(--red);outline-offset:4px;border-radius:6px;padding:16px 30px 14px;color:var(--red);text-align:center;background:rgba(12,14,13,.55);opacity:.96}
+.bigstamp .big{font-family:var(--serif);font-weight:900;font-size:46px;letter-spacing:.08em;text-transform:uppercase;line-height:1;white-space:nowrap}
+.bigstamp .sub{font-family:var(--mono);font-size:10px;letter-spacing:.14em;margin-top:9px;text-transform:uppercase}
+@keyframes slam{0%{opacity:0;transform:rotate(-7deg) scale(2.4)}62%{opacity:.96;transform:rotate(-7deg) scale(.94)}82%{transform:rotate(-7deg) scale(1.05)}100%{opacity:.96;transform:rotate(-7deg) scale(1)}}
+.bigstamp{animation:slam .42s cubic-bezier(.2,.85,.3,1.25) .75s both}
+@media (prefers-reduced-motion:reduce){.bigstamp{animation:none}}
+.thesis{margin:64px 72px 0 146px;font-family:var(--serif);font-weight:900;font-style:italic;font-size:172px;line-height:.95;letter-spacing:-.03em}
+.thesis .dotr{color:var(--red);font-style:normal}
+.thesis-sub{margin:26px 72px 0 152px;max-width:62ch;font-size:15.5px;line-height:1.7;color:var(--text2)}
+.thesis-sub b{color:var(--text);font-weight:600}
+/* ---------- scene 2 : the wall ---------- */
+.s2{height:340px;background:var(--inset);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.wall{padding-top:34px;display:flex;flex-direction:column;gap:14px}
+.wrow{font-family:var(--mono);font-size:20px;white-space:nowrap;color:#252a26;letter-spacing:.01em}
+.wrow .hot{color:#454c46}
+.wrow .tag{display:inline-block;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--red);border:1px solid rgba(224,85,72,.5);border-radius:3px;padding:1px 6px;margin:0 10px;transform:translateY(-4px)}
+@keyframes drift-l{from{transform:translateX(0)}to{transform:translateX(-60px)}}
+@keyframes drift-r{from{transform:translateX(-60px)}to{transform:translateX(0)}}
+.wrow.dl{animation:drift-l 46s linear infinite alternate}
+.wrow.dr{animation:drift-r 52s linear infinite alternate}
+@media (prefers-reduced-motion:reduce){.wrow{animation:none}}
+.wall-cap{margin:30px 72px 0 152px}
+.wall-cap .l1{font-family:var(--serif);font-weight:700;font-size:26px}
+.wall-cap .l2{font-size:14px;color:var(--text2);margin-top:6px}
+/* ---------- scene 3 : case 001 ---------- */
+.s3{height:620px;padding-top:56px}
+.case-grid{display:flex;gap:28px;align-items:flex-start;margin:30px 72px 0 152px}
+.q-obj{width:400px;background:#1c201e;border:1px solid var(--line);border-radius:14px;padding:20px 24px;font-size:14.5px;line-height:1.65;color:#d7dbd3}
+.q-obj .files{font-family:var(--mono);font-size:12.5px;color:#b9c4b6}
+.q-src{font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:.08em;margin-top:12px;text-transform:uppercase}
+.find{position:relative;flex:1;background:var(--code-bg);border:1px solid var(--line-strong);border-radius:4px;padding:22px 26px;font-family:var(--mono);font-size:13px;line-height:1.9;color:var(--code-text)}
+.find .p{color:var(--green)}
+.find .dim{color:rgba(207,224,212,.45)}
+.find .zero{color:var(--red);font-weight:700}
+.smallstamp{position:absolute;right:22px;bottom:20px;transform:rotate(-4deg);border:2.5px double var(--red);border-radius:4px;padding:7px 16px;color:var(--red);font-family:var(--serif);font-weight:900;font-size:19px;letter-spacing:.1em;text-transform:uppercase}
+.case-prose{margin:44px 72px 0 152px;max-width:62ch;font-family:var(--serif);font-weight:600;font-size:22px;line-height:1.55;color:var(--text)}
+.case-prose em{font-style:italic;color:var(--red)}
+.case-foot{margin:20px 72px 0 152px;font-family:var(--mono);font-size:11px;color:var(--text3);letter-spacing:.04em}
+/* ---------- scene 4 : the three artifacts ---------- */
+.s4{height:880px;padding-top:56px;border-top:1px solid var(--line)}
+.h2{margin:22px 72px 0 152px;font-family:var(--serif);font-weight:900;font-size:44px;letter-spacing:-.01em;line-height:1.1;text-wrap:balance}
+.lead{margin:16px 72px 0 152px;max-width:66ch;font-size:14.5px;line-height:1.7;color:var(--text2)}
+.objects{display:flex;gap:26px;align-items:flex-start;margin:46px 60px 0 118px}
+.obj{display:flex;flex-direction:column;gap:12px}
+.tag-ev{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--text3);display:flex;align-items:center;gap:8px}
+.tag-ev::before{content:"";width:7px;height:7px;border:1.5px solid var(--text3);border-radius:50%}
+.memo{width:320px;box-sizing:border-box;background:var(--paper);color:var(--paper-ink);border-radius:3px;padding:22px 24px;transform:rotate(-1.4deg);box-shadow:0 16px 40px rgba(0,0,0,.45)}
+.memo .lh{font-family:var(--mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--paper-ink2);border-bottom:1px solid rgba(34,38,31,.25);padding-bottom:9px;margin-bottom:12px;display:flex;justify-content:space-between}
+.memo h4{font-family:var(--serif);font-weight:700;font-size:17px;margin:0 0 12px}
+.memo .cite{font-family:var(--mono);font-size:10px;line-height:1.55;color:var(--paper-ink);padding:7px 0;border-top:1px dashed rgba(34,38,31,.22)}
+.memo .cite .who{color:var(--paper-ink2)}
+.memo .mf{font-family:var(--mono);font-size:9px;letter-spacing:.06em;color:var(--paper-ink2);margin-top:12px;border-top:1px solid rgba(34,38,31,.25);padding-top:9px}
+.term{width:340px;box-sizing:border-box;background:var(--code-bg);border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;box-shadow:0 16px 40px rgba(0,0,0,.45)}
+.term .bar{height:30px;background:#151816;display:flex;align-items:center;gap:6px;padding:0 12px}
+.term .bar i{width:9px;height:9px;border-radius:50%;background:#2c302c;display:block}
+.term pre{margin:0;padding:16px 18px 18px;font-family:var(--mono);font-size:11.5px;line-height:1.95;color:var(--code-text)}
+.term .p{color:var(--green)}
+.term .dim{color:rgba(207,224,212,.45)}
+.receipt{width:352px;box-sizing:border-box;background:var(--code-bg);color:var(--code-text);border-radius:2px;padding:26px 26px 22px;box-shadow:0 18px 44px rgba(0,0,0,.5);transform:rotate(.9deg);-webkit-mask:radial-gradient(circle 5px at 8px 0,transparent 98%,black) top left/16px 51% repeat-x,radial-gradient(circle 5px at 8px 16px,transparent 98%,black) bottom left/16px 50% repeat-x;mask:radial-gradient(circle 5px at 8px 0,transparent 98%,black) top left/16px 51% repeat-x,radial-gradient(circle 5px at 8px 16px,transparent 98%,black) bottom left/16px 50% repeat-x;display:flex;flex-direction:column}
+.stamp-g{display:inline-flex;align-items:baseline;gap:8px;padding:8px 18px;border:2.5px double var(--green);border-radius:3px;color:var(--green);font-family:var(--serif);font-weight:700;font-size:17px;letter-spacing:.12em;transform:rotate(-1.5deg);text-transform:uppercase;align-self:center;margin-bottom:9px}
+.stamp-g .c{font-family:var(--mono);font-size:12px;letter-spacing:0}
+.vsub{font-size:8.5px;font-weight:700;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase;border:1px solid rgba(207,224,212,.35);border-radius:20px;padding:3px 10px;align-self:center;margin-bottom:13px;text-align:center}
+.ck{display:grid;grid-template-columns:14px 104px 64px 1fr;gap:8px;align-items:baseline;padding:4.5px 0;font-size:10.5px;font-family:var(--mono);border-top:1px dashed rgba(207,224,212,.15)}
+.ck .m{color:var(--green);font-weight:700;text-align:center}
+.ck .reg{font-size:8px;text-transform:uppercase;letter-spacing:.08em;color:var(--green);font-weight:700}
+.ck .reg.insp{color:rgba(207,224,212,.45)}
+.ck .d{color:rgba(207,224,212,.6);font-size:9.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-tot{border-top:1px dashed rgba(207,224,212,.25);margin-top:8px;padding-top:9px;display:flex;gap:8px;font-family:var(--mono);font-size:10.5px;align-items:baseline}
+.rc-tot .lab{color:rgba(207,224,212,.6);text-transform:uppercase;font-size:8.5px;letter-spacing:.08em}
+.rc-tot .dots{flex:1;border-bottom:1px dotted rgba(207,224,212,.3);transform:translateY(-3px)}
+.loop-foot{margin:40px 72px 0 152px;font-family:var(--mono);font-size:11.5px;color:var(--text3);letter-spacing:.03em}
+.loop-foot b{color:var(--text2);font-weight:600}
+/* ---------- scene 4b : the memory ---------- */
+.smem{height:560px;padding-top:56px;border-top:1px solid var(--line)}
+.mem-grid{display:flex;gap:34px;margin:40px 72px 0 152px;align-items:flex-start}
+.packet{width:430px;box-sizing:border-box;background:var(--paper);color:var(--paper-ink);border-radius:3px;padding:20px 24px;transform:rotate(-.8deg);box-shadow:0 16px 40px rgba(0,0,0,.45);font-family:var(--mono)}
+.packet .ph{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--paper-ink2);display:flex;justify-content:space-between;border-bottom:1px solid rgba(34,38,31,.25);padding-bottom:8px;margin-bottom:11px}
+.packet .pt{font-family:var(--serif);font-weight:700;font-size:15.5px;line-height:1.4;margin-bottom:10px}
+.packet .pl{font-size:10px;line-height:1.7;color:var(--paper-ink)}
+.packet .pl .k{color:var(--paper-ink2)}
+.packet .pf{margin-top:11px;border-top:1px dashed rgba(34,38,31,.25);padding-top:9px;font-size:9.5px;color:var(--paper-ink2);display:flex;gap:12px}
+.packet .pf .fresh{color:#22713f;font-weight:700}
+.mem-right{flex:1}
+.mem-claim{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.5;color:var(--text);max-width:30ch}
+.mem-claim em{font-style:italic;color:var(--green)}
+.mem-stats{margin-top:24px;border-top:1px solid var(--line-strong)}
+.mrow{display:flex;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;color:var(--text2)}
+.mrow .dots{flex:1;border-bottom:1px dotted var(--line-strong);transform:translateY(-3px)}
+.mrow .v{font-family:var(--serif);font-weight:700;font-size:20px;color:var(--text);font-variant-numeric:tabular-nums}
+.mrow .est{font-family:var(--mono);font-size:9px;color:var(--text3);letter-spacing:.06em}
+.mem-foot{margin:26px 72px 0 152px;font-family:var(--mono);font-size:11px;color:var(--text3);line-height:1.7}
+/* ---------- scene 4c : while you were out ---------- */
+.sorch{height:560px;padding-top:56px;border-top:1px solid var(--line);background:var(--inset)}
+.orch-grid{display:flex;gap:34px;margin:38px 72px 0 152px;align-items:flex-start}
+.night{width:520px;box-sizing:border-box;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:6px 0}
+.nrow{display:flex;gap:14px;align-items:baseline;padding:11px 20px;border-bottom:1px solid var(--line)}
+.nrow:last-child{border-bottom:none}
+.nrow .tm{font-family:var(--mono);font-size:10px;color:var(--text3);width:44px;flex-shrink:0}
+.nrow .tx{font-size:12.5px;color:var(--text2);line-height:1.5}
+.nrow .tx b{color:var(--text);font-weight:600}
+.nrow .chip{margin-left:auto;flex-shrink:0}
+.orch-right{flex:1}
+.orch-claim{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.5;color:var(--text);max-width:28ch}
+.vocab{margin-top:22px;display:flex;flex-direction:column;gap:10px}
+.vrow{display:flex;gap:12px;align-items:baseline}
+.vrow .cmd{font-family:var(--mono);font-size:11.5px;color:var(--green);white-space:nowrap}
+.vrow .what{font-size:12px;color:var(--text3);line-height:1.5}
+/* ---------- scene 5 : exhibits ---------- */
+.s5{height:540px;padding-top:56px;border-top:1px solid var(--line);background:var(--inset)}
+.exhibits{display:flex;gap:30px;margin:38px 72px 0 152px;align-items:flex-start}
+.frame{border:1px solid var(--line-strong);background:var(--bg);padding:26px;position:relative;width:430px;box-sizing:border-box}
+.plate{margin-top:12px;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:var(--text3);text-transform:uppercase;line-height:1.7}
+.plate b{color:var(--text2)}
+.slop{width:100%;border-radius:14px;overflow:hidden;background:#f6f7fa;color:#292e39;font-family:var(--sans)}
+.slop .gh{height:52px;background:linear-gradient(135deg,#7b5bfa,#4f9cf7);display:flex;align-items:center;padding:0 18px;color:#fff;font-weight:700;font-size:14px}
+.slop .gb{padding:16px 18px 18px;font-size:13px;line-height:1.6}
+.slop .row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#5a6170}
+.slop .dot{width:8px;height:8px;border-radius:50%;background:#34c07c}
+.slop .btn{margin-top:12px;display:inline-block;background:#4f7df7;color:#fff;border-radius:9px;padding:8px 16px;font-weight:600;font-size:12.5px}
+.xmark{position:absolute;inset:26px 26px 60px;pointer-events:none}
+.xmark::before,.xmark::after{content:"";position:absolute;left:-4%;top:50%;width:108%;height:7px;background:var(--red);opacity:.82;border-radius:4px}
+.xmark::before{transform:rotate(16deg)}
+.xmark::after{transform:rotate(-16deg)}
+.kcard{width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.kcard .t{font-size:13.5px;font-weight:600;color:var(--text);line-height:1.35}
+.kcard .slug{font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:5px}
+.kcard .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.chip{font-family:var(--mono);font-size:10px;padding:3px 9px;border-radius:12px;border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:rgba(67,201,138,.45);background:rgba(67,201,138,.1)}
+.kcard .rerun{font-family:var(--mono);font-size:9.5px;color:var(--text3);margin-top:10px;letter-spacing:.04em}
+/* ---------- scene 6 : the ledger ---------- */
+.s6{height:620px;padding-top:56px;border-top:1px solid var(--line)}
+.strike-row{margin:24px 72px 0 152px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+.struck{font-family:var(--serif);font-weight:900;font-size:38px;letter-spacing:-.01em;color:var(--text3);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:4px}
+.struck-tag{transform:rotate(-3deg);border:2px solid var(--red);border-radius:4px;padding:5px 12px;color:var(--red);font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase}
+.measured{margin:10px 72px 0 152px;font-family:var(--serif);font-weight:900;font-size:38px;letter-spacing:-.01em}
+.ledger{margin:38px 72px 0 152px;border-top:1px solid var(--line-strong)}
+.lrow{display:flex;align-items:baseline;gap:14px;padding:15px 0;border-bottom:1px solid var(--line)}
+.lrow .name{font-size:14px;color:var(--text2);white-space:nowrap}
+.lrow .dots{flex:1;border-bottom:1px dotted var(--line-strong);transform:translateY(-4px)}
+.lrow .val{font-family:var(--serif);font-weight:700;font-size:27px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.lrow .meth{width:330px;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--text3);text-align:left}
+.lrow.miss .val{color:var(--amber)}
+.lrow.miss .meth{color:var(--amber)}
+.ledger-foot{margin:24px 72px 0 152px;font-family:var(--mono);font-size:11.5px;color:var(--text2)}
+.ledger-foot .p{color:var(--green)}
+/* ---------- scene 7 : the total ---------- */
+.s7{height:500px;padding-top:64px;border-top:1px solid var(--line);background:
+  radial-gradient(900px 320px at 50% 115%,rgba(67,201,138,.08),transparent 70%),var(--bg)}
+.finale{display:flex;flex-direction:column;align-items:center}
+.stamp-final{transform:rotate(-2.5deg);border:3px solid var(--green);outline:1.5px solid var(--green);outline-offset:4px;border-radius:6px;padding:12px 26px;color:var(--green);font-family:var(--serif);font-weight:900;font-size:30px;letter-spacing:.08em;text-transform:uppercase;text-align:center}
+.install{margin-top:34px;display:flex;align-items:center;gap:12px;background:var(--code-bg);border:1px solid rgba(67,201,138,.4);border-radius:10px;padding:16px 26px;font-family:var(--mono);font-size:16px;color:var(--code-text);box-shadow:0 12px 34px rgba(67,201,138,.14)}
+.install .d{color:var(--green)}
+.tot-rows{margin-top:24px;width:520px}
+.trow{display:flex;align-items:baseline;gap:10px;font-family:var(--mono);font-size:12px;color:var(--text2);padding:6px 0}
+.trow .dots{flex:1;border-bottom:1px dotted var(--line-strong);transform:translateY(-3px)}
+.trow .v{color:var(--text)}
+.barcode{margin-top:26px;width:150px;height:34px;background:repeating-linear-gradient(90deg,var(--text2) 0 2px,transparent 2px 5px,var(--text2) 5px 6px,transparent 6px 11px,var(--text2) 11px 14px,transparent 14px 17px);opacity:.75}
+.micro{margin-top:12px;font-family:var(--mono);font-size:8.5px;letter-spacing:.26em;color:var(--text3);text-transform:uppercase}
+.f-links{margin-top:14px;display:flex;gap:26px;font-family:var(--mono);font-size:11px;letter-spacing:.06em}
+.f-links span{color:var(--text3)}
+  </style>
+</helmet>
+<div class="site">
+  <div class="spine"></div>
+
+  <!-- scene 1 · the claim -->
+  <div class="sc s1">
+    <div class="nav">
+      <div class="brand"><svg width="22" height="15" viewBox="0 0 24 16" fill="none" stroke="#43c98a" stroke-width="1.6"><path d="M1 8c3.5-4.5 7-6.8 11-6.8S19.5 3.5 23 8c-3.5 4.5-7 6.8-11 6.8S4.5 12.5 1 8Z"></path><circle cx="12" cy="8" r="3"></circle></svg>Kage</div>
+      <div class="links"><span>how it works</span><span>benchmarks</span><span>github</span></div>
+    </div>
+    <div class="claimwrap">
+      <div class="msg-meta"><span class="av"></span><span>AGENT · FINAL MESSAGE · 16:32</span></div>
+      <div class="msg">Done! Implemented the review gate across <span class="files">contract.ts</span>, <span class="files">review.ts</span> and <span class="files">ratify.ts</span>. All 34 tests pass, typecheck is clean, lint is green — ready to merge. 🎉</div>
+      <div class="msg-sub">CLAIM RECEIVED · STATUS SELF-REPORTED: VERIFIED</div>
+      <div class="bigstamp">
+        <div class="big">Not verified</div>
+        <div class="sub">re-run by kage · 2 of 5 checks failed · exit 1</div>
+      </div>
+    </div>
+    <div class="thesis">Prove it<span class="dotr">.</span></div>
+    <div class="thesis-sub">Kage is the orchestrator that doesn&rsquo;t take the agent&rsquo;s word for it. Every &ldquo;done&rdquo; is a <b>claim</b> — re-checked by the kernel, in a clean worktree, before it can merge. Local. MIT. Your repo keeps the memory.</div>
+  </div>
+
+  <!-- scene 2 · the wall -->
+  <div class="sc s2">
+    <div class="wall">
+      <div class="wrow dl">&ldquo;tests pass&rdquo; · &ldquo;should work now&rdquo; · <span class="hot">&ldquo;I&rsquo;ve verified the fix&rdquo;</span><span class="tag">unproven</span>· &ldquo;all 34 green&rdquo; · &ldquo;confirmed working&rdquo; · &ldquo;lint is clean&rdquo; · &ldquo;tests pass&rdquo; · &ldquo;should work now&rdquo; · &ldquo;ready to merge&rdquo;</div>
+      <div class="wrow dr">&ldquo;everything builds&rdquo; · &ldquo;ready to merge&rdquo; · &ldquo;no regressions&rdquo; · <span class="hot">&ldquo;the suite is green&rdquo;</span><span class="tag">unproven</span>· &ldquo;typecheck is clean&rdquo; · &ldquo;everything builds&rdquo; · &ldquo;no regressions&rdquo; · &ldquo;done!&rdquo;</div>
+      <div class="wrow dl">&ldquo;done!&rdquo; · &ldquo;fixed and tested&rdquo; · &ldquo;works as expected&rdquo; · &ldquo;the feature is complete&rdquo; · <span class="hot">&ldquo;verified with npm test&rdquo;</span><span class="tag">unproven</span>· &ldquo;fixed and tested&rdquo; · &ldquo;works as expected&rdquo;</div>
+      <div class="wrow dr">&ldquo;all checks passing&rdquo; · &ldquo;implemented and verified&rdquo; · &ldquo;no breaking changes&rdquo; · &ldquo;the fix is in&rdquo; · &ldquo;all checks passing&rdquo; · &ldquo;ship it&rdquo; · &ldquo;implemented and verified&rdquo; · &ldquo;no breaking changes&rdquo;</div>
+    </div>
+    <div class="wall-cap">
+      <div class="l1">Every one of these ended a session.</div>
+      <div class="l2">None of them is evidence. A claim is where Kage starts — not where it stops.</div>
+    </div>
+  </div>
+
+  <!-- scene 3 · case 001 -->
+  <div class="sc s3">
+    <div class="kick"><b>CASE Nº 001</b> — THE EMPTY BRANCH · THIS REPO · 2026-08-20</div>
+    <div class="case-grid">
+      <div>
+        <div class="q-obj">Feature complete — review gate wired through <span class="files">contract.ts</span>, <span class="files">review.ts</span>, <span class="files">ratify.ts</span>. Verified and ready to merge.</div>
+        <div class="q-src">agent final message · wave 1 · verbatim shape</div>
+      </div>
+      <div class="find">
+        <div><span class="p">$</span> git log db368cd..HEAD</div>
+        <div class="zero">(empty)</div>
+        <div><span class="dim">commits on the branch</span> ·············· <span class="zero">0</span></div>
+        <div><span class="dim">files touched</span> ····················· <span class="zero">0</span></div>
+        <div><span class="dim">paths cited in the claim</span> ·········· 4</div>
+        <div><span class="dim">of those that actually changed</span> ···· <span class="zero">0</span></div>
+        <div class="smallstamp">Merge refused</div>
+      </div>
+    </div>
+    <div class="case-prose">It happened here, in the repo Kage builds itself. The summary was fluent, specific and <em>false</em> — the branch had no commits. The refusal became law the same week: an empty feature diff cannot merge. Not here, not anywhere Kage runs.</div>
+    <div class="case-foot">shipped as the merge-honesty guard — mergeRun() refuses zero-commit feature branches, and never deletes the worktree on refusal</div>
+  </div>
+
+  <!-- scene 4 · the three artifacts -->
+  <div class="sc s4">
+    <div class="kick"><span class="grn">№ 002</span> — THE LOOP</div>
+    <div class="h2">One loop. Three artifacts. Zero trust.</div>
+    <p class="lead">State an intent. Kage compiles a brief from your repo&rsquo;s verified memory, hires an agent into a clean worktree, and re-runs every check itself when the agent claims done. Merging is one act: land the code, ratify what the run learned.</p>
+    <div class="objects">
+      <div class="obj" style="margin-top:14px">
+        <div class="tag-ev">Artifact 01 — the brief</div>
+        <div class="memo">
+          <div class="lh"><span>Kage · brief</span><span>from repo memory</span></div>
+          <h4>Add a review gate to the merge path</h4>
+          <div class="cite">⚑ convention — the app renderer is CommonJS; no import.meta, no top-level await <span class="who">· 2026-08-12, kushal</span></div>
+          <div class="cite">⚑ gotcha — escapes are doubled inside the template literals; a single \n ships a real newline <span class="who">· 2026-08-14, kage</span></div>
+          <div class="cite">⚑ decision — verdicts are derived at read time, never persisted <span class="who">· 2026-08-16, kushal</span></div>
+          <div class="mf">621 packets on file · 3 carried · every line has an author and a date</div>
+        </div>
+      </div>
+      <div class="obj">
+        <div class="tag-ev">Artifact 02 — the run</div>
+        <div class="term">
+          <div class="bar"><i></i><i></i><i></i></div>
+          <pre><span class="p">$</span> worktree .kage/wt-a41f created
+<span class="p">$</span> claude -p --output-format stream-json
+<span class="dim">  … 134 tool calls · 16.6 min</span>
+<span class="dim">  claim received — kage-claim-v1</span>
+<span class="p">→</span> checks handed to the kernel
+<span class="dim">  the agent&rsquo;s word ends here</span></pre>
+        </div>
+      </div>
+      <div class="obj" style="margin-top:26px">
+        <div class="tag-ev">Artifact 03 — the receipt</div>
+        <div class="receipt">
+          <div class="stamp-g">Verified <span class="c">5/5</span></div>
+          <div class="vsub">Independently checked by Kage — not the agent&rsquo;s self-report</div>
+          <div>
+            <div class="ck"><span class="m">✓</span><span>tests</span><span class="reg">ran</span><span class="d">npm test --prefix mcp → exit 0</span></div>
+            <div class="ck"><span class="m">✓</span><span>typecheck</span><span class="reg">ran</span><span class="d">npx tsc --noEmit → exit 0</span></div>
+            <div class="ck"><span class="m">✓</span><span>app-parse</span><span class="reg">ran</span><span class="d">composed page parses → exit 0</span></div>
+            <div class="ck"><span class="m">✓</span><span>diff-size</span><span class="reg insp">inspected</span><span class="d">362 lines · budget 800</span></div>
+            <div class="ck"><span class="m">✓</span><span>citations</span><span class="reg insp">inspected</span><span class="d">every cited path exists</span></div>
+          </div>
+          <div class="rc-tot"><span class="lab">touched</span><span class="dots"></span><span>7 files · 362 lines</span></div>
+          <div class="rc-tot"><span class="lab">cost</span><span class="dots"></span><span>$6.49 · 16.6 min</span></div>
+          <div class="rc-tot"><span class="lab">memory</span><span class="dots"></span><span>5 learnings ratified on merge</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="loop-foot">the brief teaches → the run works → the receipt proves → <b>the merge teaches back.</b> the next brief — yours or a teammate&rsquo;s — already knows what this one had to discover.</div>
+  </div>
+
+  <!-- scene 4b · the memory -->
+  <div class="sc smem">
+    <div class="kick"><span class="grn">№ 003</span> — THE MEMORY</div>
+    <div class="h2">The receipt expires. The memory compounds.</div>
+    <div class="mem-grid">
+      <div class="packet">
+        <div class="ph"><span>packet · gotcha</span><span>.agent_memory/packets/ · plain markdown</span></div>
+        <div class="pt">A packaged feature can pass every source-checkout test and still be 404-broken from npm</div>
+        <div class="pl"><span class="k">cites</span> mcp/viewer/serve.ts · package.json <span class="k">files</span></div>
+        <div class="pl"><span class="k">evidence</span> reproduced on v4.0.0, fixed and re-verified on v4.0.1</div>
+        <div class="pl"><span class="k">carried into</span> 14 briefs since — nobody rediscovers this</div>
+        <div class="pf"><span class="fresh">grounding: fingerprint fresh</span><span>helpful · wrong · stale</span></div>
+      </div>
+      <div class="mem-right">
+        <div class="mem-claim">Every merged run writes what it learned into the repo. The next brief — yours or a teammate&rsquo;s — <em>already knows.</em></div>
+        <div class="mem-stats">
+          <div class="mrow"><span>packets on file, committed through git</span><span class="dots"></span><span class="v">621</span></div>
+          <div class="mrow"><span>recalls served into briefs</span><span class="dots"></span><span class="v">301</span></div>
+          <div class="mrow"><span>stale memories caught before they could mislead</span><span class="dots"></span><span class="v">2,771</span></div>
+          <div class="mrow"><span>tokens not re-spent on rediscovery</span><span class="dots"></span><span class="v">~19M</span><span class="est">ESTIMATE — LABELLED</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="mem-foot">memory is checked like code: every packet cites real paths, gets fingerprinted against the tree, and is withheld the moment it goes stale. OKF-conformant markdown — readable by anything, locked into nothing.</div>
+  </div>
+
+  <!-- scene 4c · while you were out -->
+  <div class="sc sorch">
+    <div class="kick"><span class="grn">№ 004</span> — WHILE YOU WERE OUT</div>
+    <div class="h2">Dispatch a goal. Go to sleep.</div>
+    <div class="orch-grid">
+      <div class="night">
+        <div class="nrow"><span class="tm">23:41</span><span class="tx"><b>goal dispatched</b> — &ldquo;ship the review gate&rdquo; · 2 waves planned</span></div>
+        <div class="nrow"><span class="tm">00:19</span><span class="tx">wave 1 · 3 runs claimed done — kernel re-ran every check</span><span class="chip ok">VERIFIED</span></div>
+        <div class="nrow"><span class="tm">00:20</span><span class="tx">wave 1 merged · 5 learnings ratified into memory</span></div>
+        <div class="nrow"><span class="tm">03:12</span><span class="tx"><b>wave 2 dispatched itself</b> — its briefs already carry wave 1&rsquo;s learnings</span></div>
+        <div class="nrow"><span class="tm">03:58</span><span class="tx">one worker crashed — run kept, worktree kept, nothing lost</span><span class="chip">RECOVERABLE</span></div>
+        <div class="nrow"><span class="tm">08:04</span><span class="tx">you&rsquo;re back. one decision is waiting, with its receipt</span></div>
+      </div>
+      <div class="orch-right">
+        <div class="orch-claim">Runs survive the app, the daemon, even the machine — and recovered work is still <b>unverified</b> work until the kernel re-checks it.</div>
+        <div class="vocab">
+          <div class="vrow"><span class="cmd">kage resume-run --budget-usd 12</span><span class="what">continue a stalled run, with a hard spend ceiling</span></div>
+          <div class="vrow"><span class="cmd">kage adopt</span><span class="what">claim work found in an orphan worktree — stated honestly as a claim nobody wrote</span></div>
+          <div class="vrow"><span class="cmd">close as landed</span><span class="what">only when the branch truly carries commits beyond the merge-base</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- scene 5 · exhibits -->
+  <div class="sc s5">
+    <div class="kick"><b>№ 005</b> — EXHIBITS</div>
+    <div class="h2">Two boards, one lie.</div>
+    <div class="exhibits">
+      <div>
+        <div class="frame">
+          <div class="slop">
+            <div class="gh">✨ Agent finished</div>
+            <div class="gb">Task completed successfully! All tests passing ✅
+              <div class="row"><span class="dot"></span>Done · 2m ago</div>
+              <div class="btn">Merge now</div>
+            </div>
+          </div>
+          <div class="xmark"></div>
+          <div class="plate"><b>Exhibit A</b> — a board that believes the agent.<br>collected 2026 · various vendors</div>
+        </div>
+      </div>
+      <div>
+        <div class="frame">
+          <div class="kcard">
+            <div class="t">Harden steer delivery vocabulary</div>
+            <div class="slug">run-steer-vocab-260818 · worktree wt-a41f</div>
+            <div class="row"><span class="chip ok">VERIFIED 5/5</span><span class="chip">$6.49 · 36m</span><span class="chip">+362 −41</span></div>
+            <div class="rerun">checks re-run 09:14 — a stale pass is never shown as fresh</div>
+          </div>
+          <div class="plate"><b>Exhibit B</b> — a board that re-ran the checks itself.<br>the chip is an exit code, not a feeling</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- scene 6 · the ledger -->
+  <div class="sc s6">
+    <div class="kick"><b>№ 006</b> — THE LEDGER</div>
+    <div class="strike-row">
+      <div class="struck">The fastest agent memory ever built.</div>
+      <div class="struck-tag">struck — unverifiable</div>
+    </div>
+    <div class="measured">We publish what we measured.</div>
+    <div class="ledger">
+      <div class="lrow"><span class="name">cold index · 10,000 files</span><span class="dots"></span><span class="val">8.3s</span><span class="meth">measured 2026-08-20 · kage benchmark --files 10000 · both backends</span></div>
+      <div class="lrow"><span class="name">recall query · 1,000 files</span><span class="dots"></span><span class="val">76ms</span><span class="meth">node:sqlite backend · zero new dependencies</span></div>
+      <div class="lrow miss"><span class="name">warm re-index · 10,000 files</span><span class="dots"></span><span class="val">15.9s</span><span class="meth">target was 10s. not met — shipping the number anyway.</span></div>
+      <div class="lrow"><span class="name">tests on this repo</span><span class="dots"></span><span class="val">1,113 + 12</span><span class="meth">unit + dogfood · every merge independently verified</span></div>
+      <div class="lrow"><span class="name">tokens saved this quarter</span><span class="dots"></span><span class="val">~19M</span><span class="meth">an estimate — and labelled as one, like every estimate in the product</span></div>
+    </div>
+    <div class="ledger-foot"><span class="p">$</span> kage benchmark — run every number yourself</div>
+  </div>
+
+  <!-- scene 7 · the total -->
+  <div class="sc s7">
+    <div class="finale">
+      <div class="stamp-final">Verified — check it yourself</div>
+      <div class="install"><span class="d">$</span> npx -y @kage-core/kage-graph-mcp install</div>
+      <div class="tot-rows">
+        <div class="trow"><span>price</span><span class="dots"></span><span class="v">MIT · free</span></div>
+        <div class="trow"><span>dependencies</span><span class="dots"></span><span class="v">4</span></div>
+        <div class="trow"><span>accounts · servers · telemetry</span><span class="dots"></span><span class="v">none — local-first</span></div>
+        <div class="trow"><span>your repo</span><span class="dots"></span><span class="v">stays yours</span></div>
+      </div>
+      <div class="barcode"></div>
+      <div class="micro">Kage · manages your memory and agents · built with Kage · verified by Kage</div>
+      <div class="f-links"><span>github</span><span>docs</span><span>benchmarks</span><span>MIT license</span></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

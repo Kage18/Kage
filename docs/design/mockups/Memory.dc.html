@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+  <style>
+:root{color-scheme:dark;--bg:#121413;--surface:#1a1d1b;--surface2:#212522;--inset:#0e1110;--line:#2c302c;--line2:#242a25;--line-strong:#41463f;--text:#edefe9;--text2:#a4aba1;--text3:#767d74;--chrome:#171a18;--green:#43c98a;--green-strong:#5fdca0;--green-soft:rgba(67,201,138,.12);--code:#6fb4e8;--memory:#b095e8;--amber:#d9a93f;--crimson:#e07a8c;--sans:Inter,ui-sans-serif,system-ui,sans-serif;--serif:"Fraunces","Iowan Old Style",Palatino,Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--r-control:10px;--r-panel:14px;--r-card:16px;--r-hero:22px;--code-bg:#0e1110;--code-text:#cfe0d4;--shadow-sm:0 1px 2px rgba(0,0,0,.2),0 6px 18px rgba(0,0,0,.22);--shadow-md:0 1px 2px rgba(0,0,0,.2),0 14px 36px rgba(0,0,0,.3);--glow-green:0 10px 28px rgba(67,201,138,.22)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--green)}a:hover{color:var(--green-strong)}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--r-panel);border:1px solid var(--line);color:var(--text2);background:var(--surface2);white-space:nowrap}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:var(--green-soft)}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.m{background:var(--text3)}.dot.p{background:var(--memory)}
+.seclabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)}
+.page{width:1280px;height:828px;overflow:hidden;padding:26px 34px;display:flex;flex-direction:column;gap:18px;border-radius:var(--r-control);background:var(--bg)}
+.hero{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-hero);padding:24px 28px;box-shadow:var(--shadow-sm)}
+.hero .lb{font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--text3);text-transform:uppercase;margin-bottom:14px}
+.heronums{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:22px}
+.hn .v{font-family:var(--serif);font-weight:600;font-size:38px;line-height:1;color:var(--green)}
+.hn.amber .v{color:var(--amber)}
+.hn .k{font-size:12.5px;color:var(--text);margin-top:6px}
+.hn .s{font-size:11px;color:var(--text3)}
+.saved{border-top:1px dashed var(--line-strong);margin-top:18px;padding-top:14px;display:flex;align-items:baseline;gap:12px}
+.saved .v{font-family:var(--serif);font-weight:600;font-size:24px}
+.saved .s{font-size:11.5px;color:var(--text3)}
+.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
+.mc{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:14px 16px}
+.mc .v{font-family:var(--serif);font-weight:600;font-size:22px}
+.mc .k{font-size:10.5px;color:var(--text3);margin-top:3px;line-height:1.35}
+.mc.stale{border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+.mc.stale .v{color:var(--amber)}
+.search{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:13px 16px;color:var(--text3);font-size:13.5px}
+.types{display:flex;gap:8px;flex-wrap:wrap}
+.trow{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:13px 16px;display:flex;flex-direction:column;gap:5px}
+.trow .t{font-weight:600;font-size:13.5px}
+.trow .b{font-size:12px;color:var(--text2);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.trow .meta{display:flex;gap:10px;font-family:var(--mono);font-size:10px;color:var(--text3)}
+.trow .meta .ok{color:var(--green)}
+  </style>
+</helmet>
+<div class="page">
+  <div class="hero">
+    <div class="lb">What Kage has done here</div>
+    <div class="heronums">
+      <div class="hn"><div class="v">621</div><div class="k">memories written</div><div class="s">verified against the repo</div></div>
+      <div class="hn"><div class="v">301</div><div class="k">recalls served</div><div class="s">answered from memory</div></div>
+      <div class="hn amber"><div class="v">2,771</div><div class="k">stale memories caught</div><div class="s">before they misled an agent</div></div>
+      <div class="hn amber"><div class="v">30,069</div><div class="k">stale recalls withheld</div><div class="s">all-time, from the value ledger</div></div>
+    </div>
+    <div class="saved"><div class="v">~19M</div><div class="s">tokens saved — an estimate, from replaying memory instead of re-reading source</div></div>
+  </div>
+  <div class="cards">
+    <div class="mc"><div class="v">394</div><div class="k">active</div></div>
+    <div class="mc stale"><div class="v">227</div><div class="k">stale (as of last refresh)</div></div>
+    <div class="mc"><div class="v">94%</div><div class="k">avg quality</div></div>
+    <div class="mc"><div class="v">100%</div><div class="k">evidence-backed</div></div>
+    <div class="mc"><div class="v">146</div><div class="k">used recently</div></div>
+    <div class="mc"><div class="v">275</div><div class="k">never recalled</div></div>
+  </div>
+  <div class="search">Search what this repo has learned…</div>
+  <div class="types">
+    <span class="chip ok">all</span><span class="chip">decision 274</span><span class="chip">bug_fix 136</span><span class="chip">workflow 99</span><span class="chip">gotcha 41</span><span class="chip">negative_result 23</span><span class="chip">runbook 19</span><span class="chip">convention 8</span>
+  </div>
+  <div class="trow">
+    <div class="t">A run can merge VERIFIED with an empty diff</div>
+    <div class="b">Verification proves the tree is green, not that promised content exists — a feature branch whose tip sits at the merge-base fast-forwards nothing while every check passes honestly.</div>
+    <div class="meta"><span>gotcha</span><span>today</span><span>3 files</span><span class="ok">approved</span></div>
+  </div>
+  <div class="trow">
+    <div class="t">The app's template-literal escaping bug class</div>
+    <div class="b">An under-escaped \n kills the whole client script and is invisible to a text/regex read of the composed page — the parse gate exists because of this.</div>
+    <div class="meta"><span>bug_fix</span><span>2d ago</span><span>2 files</span><span class="ok">approved</span></div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
