@@ -60,6 +60,7 @@ import { currentBranch, diffFileTree, git, type DiffFileEntry } from "./git.js";
 import { worktreePath } from "./worktree.js";
 import { askManager, EMPTY_REPLY_RETRY_NUDGE } from "./manager-client.js";
 import { appendRoomTurn, readRoomHistory, type RoomHistoryTurn } from "./room-history.js";
+import { parseKageActionsReply, type RoomActions } from "./room-actions.js";
 import {
   askRoomSupervisor,
   detectPermissionStuckMention,
@@ -310,6 +311,11 @@ export interface DelegationApiContext {
   askManagerFn?: typeof askManager;
   /** Test seam: replace the whole live-supervisor-or-fallback orchestration below. */
   askRoomFn?: (message: string, history: RoomHistoryTurn[], onEvent: (event: { kind: string; text: string }) => void) => Promise<{ text: string; tools: string[]; corrections?: string[] }>;
+  /** Test seam: replace the held headless supervisor's own ask (askRoomSupervisor,
+   * room-supervisor.ts) so a test can exercise the empty-reply retry (below) — and the
+   * kage-actions parsing that rides the same leg — without spawning a real `claude`
+   * process or a real control socket. Production always uses the real askRoomSupervisor. */
+  askRoomSupervisorFn?: typeof askRoomSupervisor;
   /** Test seam: replace real pty spawning/attaching entirely. */
   ensurePtyAttachedFn?: (ctx: DelegationApiContext) => Promise<RoomPtyAttachment | null>;
   /** Test seam: replace the real reply-wait poller, so a pty-ask-timeout test can force
@@ -448,6 +454,10 @@ interface RoomReply {
    * own prose. Propagated straight onto the persisted turn (RoomHistoryTurn.failed) so
    * the renderer can style it as a visible failure instead of an ordinary reply. */
   failed?: boolean;
+  /** Parsed from a trailing kage-actions fence (room-actions.ts) on the headless
+   * supervisor and askManager legs — see resolveRoomReply. Undefined when the reply
+   * carried no valid block, or on the pty leg, which is not parsed for this protocol. */
+  actions?: RoomActions;
 }
 
 /**
@@ -587,21 +597,39 @@ export async function resolveRoomReply(
       ptyState.attachment = null;
       ptyState.scrollback = "";
     }
-    let live: RoomStreamEvent | null = await askRoomSupervisor(projectDir, message, onDelta, key);
+    const askSupervisor = ctx.askRoomSupervisorFn ?? askRoomSupervisor;
+    let live: RoomStreamEvent | null = await askSupervisor(projectDir, message, onDelta, key);
     if (!live) {
       dispatchRoomSupervisor(projectDir, key);
       const deadline = Date.now() + ROOM_SUPERVISOR_STARTUP_TIMEOUT_MS;
       while (Date.now() < deadline && !(await isRoomSupervisorLive(projectDir, key))) {
         await new Promise((pause) => setTimeout(pause, 200));
       }
-      live = await askRoomSupervisor(projectDir, message, onDelta, key);
+      live = await askSupervisor(projectDir, message, onDelta, key);
     }
     if (live?.kind === "final") {
+      if (live.ok === false) {
+        // Same bounded retry as the askManager leg below, through the same seam this
+        // leg already asks its questions through — never a loop, never a second retry.
+        const retryLive = await askSupervisor(projectDir, EMPTY_REPLY_RETRY_NUDGE, onDelta, key);
+        if (retryLive?.kind === "final" && retryLive.ok !== false) {
+          live = retryLive;
+        } else {
+          return {
+            text: "The manager returned an empty reply twice in a row (returned empty twice) — nothing to show for this turn.",
+            tools: live.tools,
+            manager: "headless",
+            failed: true,
+          };
+        }
+      }
+      const parsed = parseKageActionsReply(live.text);
       return {
-        text: live.text,
+        text: parsed.text,
         tools: live.tools,
         ...(live.corrections?.length ? { corrections: live.corrections } : {}),
         manager: "headless",
+        ...(parsed.actions ? { actions: parsed.actions } : {}),
       };
     }
     // live?.kind === "error", or still null after the startup wait — fall through.
@@ -630,7 +658,14 @@ export async function resolveRoomReply(
       failed: true,
     };
   }
-  return { text: reply.text, tools: reply.tools, ...(reply.corrections?.length ? { corrections: reply.corrections } : {}), manager: "headless" };
+  const parsed = parseKageActionsReply(reply.text);
+  return {
+    text: parsed.text,
+    tools: reply.tools,
+    ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
+    manager: "headless",
+    ...(parsed.actions ? { actions: parsed.actions } : {}),
+  };
 }
 
 /**
@@ -659,14 +694,17 @@ function queueRoomTurn(
       // instead of the failure it was. Every leg that KNOWS why it's empty (the pty
       // timeout/startup-race branches above) already sets failed:true with an honest
       // explanation; this only fires for a leg that slips through with blank text some
-      // other way.
-      const blank = !reply.text || !reply.text.trim();
+      // other way. A reply carrying valid kage-actions but no other prose (a bare
+      // clarifying question rendered entirely as chips) is not blank — actions ARE the
+      // content of that turn.
+      const blank = (!reply.text || !reply.text.trim()) && !reply.actions;
       appendRoomTurn(projectDir, {
         role: "kage",
         text: blank ? "The manager returned an empty reply — nothing to show for this turn." : reply.text,
         tools: reply.tools,
         ...(reply.corrections?.length ? { corrections: reply.corrections } : {}),
         ...(reply.manager ? { manager: reply.manager } : {}),
+        ...(reply.actions ? { actions: reply.actions } : {}),
         ...(blank || reply.failed ? { failed: true } : {}),
       }, key);
     } catch (error) {

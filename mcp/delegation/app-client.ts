@@ -1154,6 +1154,11 @@ function turnDispatched(turn) {
 // arrival is trustworthy — after a reload there's no way to know which old turn
 // caused which old run.
 var roomLinkedRuns = {};
+// Which turns' kage-actions question chips have already been clicked, keyed by turn
+// index (same scheme as roomLinkedRuns) — a full re-render must still show that row as
+// answered, not reset it back to clickable, or a second click could send the option a
+// second time.
+var roomAnsweredActions = {};
 // How many turns have ever been painted, and a cheap fingerprint of what was last
 // painted — see renderRoom for why both exist (defect: continuous shimmer).
 var roomPaintedCount = 0;
@@ -1321,6 +1326,96 @@ function turnMetaLine(atIso, toolCount) {
   return atIso ? ageSpan("meta2", atIso, "done · ", suffix) : h("div", "meta2", "done" + suffix);
 }
 
+// Fills the room composer with the given text and sends it exactly the way a typed
+// message would — a chip click is a shortcut for typing, never a second delivery path.
+function sendRoomActionMessage(text) {
+  var input = document.getElementById("room-input");
+  input.value = text;
+  sendRoomMessage();
+}
+// kage-actions (room-actions.ts): renders a kage turn's own clickable follow-up — a
+// clarifying question's options, a proposed run's Dispatch card, or a run/goal
+// shortcut — appended after everything else the turn already renders. index is the
+// turn's position in the currently-painted list (roomLinkedRuns' own scheme), used to
+// remember which question row was already answered across a full re-render.
+function renderTurnActions(turn, index, wrap) {
+  var actions = turn.actions;
+  if (!actions) return;
+  var box = h("div", "turn-actions");
+  if (actions.question && actions.options && actions.options.length) {
+    box.appendChild(h("div", "turn-actions-q", actions.question));
+    var row = h("div", "chiprow");
+    var answered = Boolean(roomAnsweredActions[index]);
+    actions.options.forEach(function (opt) {
+      var chip = h("button", "chip action-chip", opt.label);
+      chip.disabled = answered;
+      chip.onclick = function () {
+        if (roomAnsweredActions[index]) return;
+        roomAnsweredActions[index] = true;
+        Array.prototype.forEach.call(row.querySelectorAll(".chip"), function (c) { c.disabled = true; });
+        sendRoomActionMessage(opt.send);
+      };
+      row.appendChild(chip);
+    });
+    box.appendChild(row);
+  }
+  (actions.proposals || []).forEach(function (p) {
+    var card = h("div", "turn-proposal");
+    card.appendChild(h("div", "turn-proposal-intent", p.intent));
+    var prow = h("div", "turn-proposal-row");
+    prow.appendChild(h("span", "chip", p.type));
+    var dispatchBtn = h("button", "btn primary sm", "Dispatch");
+    dispatchBtn.onclick = function () {
+      dispatchBtn.disabled = true;
+      dispatchBtn.textContent = "dispatching…";
+      api("/runs", { method: "POST", body: { intent: p.intent, agent: composerPrefs.agent, type: p.type } }).then(function (out) {
+        if (!out.ok) { dispatchBtn.disabled = false; dispatchBtn.textContent = "Dispatch"; showError(out.error || "dispatch failed"); return; }
+        dispatchBtn.textContent = "dispatched";
+        flash("dispatched — watch the rail above");
+        refresh();
+      });
+    };
+    prow.appendChild(dispatchBtn);
+    card.appendChild(prow);
+    box.appendChild(card);
+  });
+  if (actions.actions && actions.actions.length) {
+    var arow = h("div", "chiprow");
+    actions.actions.forEach(function (a) {
+      var chip = h("button", "chip action-chip", a.label);
+      chip.onclick = function () {
+        var payload = a.payload || {};
+        if (a.kind === "open_run") {
+          if (payload.run_id) openRun(payload.run_id);
+          return;
+        }
+        if (a.kind === "dispatch") {
+          if (!payload.intent) return;
+          chip.disabled = true;
+          api("/runs", { method: "POST", body: { intent: payload.intent, agent: composerPrefs.agent, type: payload.type || composerPrefs.type } }).then(function (out) {
+            if (!out.ok) { chip.disabled = false; showError(out.error || "dispatch failed"); return; }
+            flash("dispatched — watch the rail above");
+            refresh();
+          });
+          return;
+        }
+        if (a.kind === "create_goal") {
+          if (!payload.intent) return;
+          chip.disabled = true;
+          api("/goals", { method: "POST", body: { intent: payload.intent, session: state.session } }).then(function (out) {
+            if (!out.ok) { chip.disabled = false; showError(out.error || "could not create the goal"); return; }
+            flash("goal created");
+            refresh();
+          });
+        }
+      };
+      arow.appendChild(chip);
+    });
+    box.appendChild(arow);
+  }
+  if (box.children.length) wrap.appendChild(box);
+}
+
 // The Room's history register (docs/design/SESSIONS_SURFACE.md §2) — the manager's OWN
 // paraphrase of what happened, from GET /room. This is what Chat falls back to when
 // /room/transcript carries nothing yet (a thread the pty has never answered): a
@@ -1377,6 +1472,7 @@ function renderHistoryTurns(turnsEl, turns) {
     if (turn.role === "kage") {
       runsMentionedIn(turn.text).forEach(function (run) { wrap.appendChild(turnRunCard(run)); });
     }
+    if (turn.role === "kage" && turn.actions) renderTurnActions(turn, index, wrap);
     turnsEl.appendChild(wrap);
   });
 }

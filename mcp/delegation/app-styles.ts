@@ -487,6 +487,19 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
     font-size:12px; cursor:pointer; }
   .turn .opened:hover { border-color:var(--seal); }
   .turn .opened .arrow { color:var(--seal); font-family:var(--mono); }
+  /* kage-actions (room-actions.ts): a reply's own clickable follow-up — a clarifying
+     question's options, a proposed run's Dispatch card, or a run/goal shortcut — so the
+     user can act with one click instead of always typing back into the composer. */
+  .turn-actions { display:flex; flex-direction:column; gap:8px; margin-top:6px; max-width:68ch; }
+  .turn-actions-q { font-size:13px; color:var(--text2); }
+  .chiprow { display:flex; flex-wrap:wrap; gap:7px; }
+  .chip.action-chip { cursor:pointer; }
+  .chip.action-chip:hover:not(:disabled) { color:var(--seal); border-color:var(--seal); }
+  .chip.action-chip:disabled { opacity:.45; cursor:default; }
+  .turn-proposal { display:flex; flex-direction:column; gap:8px; padding:10px 12px;
+    border:1px solid var(--line); border-radius:var(--r-card); background:var(--surface2); }
+  .turn-proposal-intent { font-size:12.5px; color:var(--text2); }
+  .turn-proposal-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .typing { display:flex; align-items:center; gap:7px; align-self:flex-start; padding:0 3px;
     font-family:var(--mono); font-size:11px; color:var(--text3); }
   .typing .dots { display:inline-flex; gap:3px; }
