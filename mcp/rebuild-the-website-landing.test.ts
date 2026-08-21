@@ -92,7 +92,9 @@ test("docs/index.html reproduces the case-file scenes in order with the mockup's
 test("docs/index.html finale ships the install command and the honest bill, and keeps required nav links working", () => {
   const html = readIndex();
   assert.match(html, /npx -y @kage-core\/kage-graph-mcp install/);
-  assert.match(html, /MIT · free/);
+  assert.match(html, /GPL-3\.0 · free/);
+  assert.match(html, /<span class="v">6<\/span>/);
+  assert.ok(!html.includes("MIT"), "expected no MIT-license claim now that the repo is GPL-3.0-only");
   assert.match(html, /none — local-first/);
 
   for (const href of ['href="guide.html"', 'href="benchmarks.html"', 'href="releases.html"', 'href="https://github.com/kage-core/Kage"']) {
