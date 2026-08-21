@@ -435,6 +435,10 @@ export const APP_STYLES = `  /* ── Kage tokens, taken from the site (docs/as
      answering gets no such mention, since it IS the session (docs/design/
      SESSIONS_SURFACE.md §2). */
   .turn .who-sub { margin-left:7px; text-transform:none; letter-spacing:0; opacity:.7; }
+  /* Kage's own honest report of a failure (RoomHistoryTurn.failed) — never the
+     manager's prose, so it reads as a failure at a glance, not as an ordinary reply. */
+  .turn .who-fail { margin-left:7px; text-transform:none; letter-spacing:0; color:var(--crimson); }
+  .turn.turn-failed .bubble2 { color:var(--crimson); border-left:3px solid var(--crimson); padding-left:14px; }
   /* Tool calls collapsed into one expandable group line, in the Chat register. */
   .toolgroup { margin-top:2px; }
   .toolgrouplist { margin-top:4px; padding-left:18px; display:flex; flex-direction:column; gap:3px; }

@@ -1265,7 +1265,8 @@ function renderHistoryTurns(turnsEl, turns) {
     }
     // The entry animation is for turns arriving right now — replaying it on turns
     // that were already on screen is exactly what made the thread shimmer.
-    var wrap = h("div", "turn " + turn.role + (index >= roomPaintedCount ? " turn-new" : ""));
+    var isFailedTurn = turn.role === "kage" && Boolean(turn.failed);
+    var wrap = h("div", "turn " + turn.role + (isFailedTurn ? " turn-failed" : "") + (index >= roomPaintedCount ? " turn-new" : ""));
     // Say who is speaking. Alignment alone carried it before, which meant a transcript
     // you had to decode rather than read.
     var who = h("div", "who", turn.role === "you" ? "You" : "Kage");
@@ -1273,6 +1274,10 @@ function renderHistoryTurns(turnsEl, turns) {
     // headless fallback's own label is shown quietly, next to "Kage" — the API already
     // reports which one answered (RoomHistoryTurn.manager, room-history.ts).
     if (turn.role === "kage" && turn.manager === "headless") who.appendChild(h("span", "who-sub", "headless"));
+    // Kage's own honest report of a failure (an ask that timed out, an empty reply, an
+    // unhandled error) must read as a failure at a glance, not as ordinary prose the
+    // manager said — this is the only signal RoomHistoryTurn.failed exists to carry.
+    if (isFailedTurn) who.appendChild(h("span", "who-fail", "failed"));
     wrap.appendChild(who);
     wrap.appendChild(turn.role === "kage" ? renderTurnBubble(turn.text) : h("div", "bubble2", turn.text));
     if (turn.role === "kage" && turn.tools && turn.tools.length) {
