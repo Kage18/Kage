@@ -47,3 +47,13 @@ kage-mcp-key.pem
 .agent_memory/review/
 .agent_memory/pending/
 .agent_memory/goals/
+.agent_memory/store/
+.agent_memory/branches/
+.agent_memory/daemon/
+.agent_memory/marketplace/
+.agent_memory/observations/
+.agent_memory/public-bundle/
+.agent_memory/public-candidates/
+.agent_memory/slots/
+.agent_memory/global-cdn/
+.agent_memory/metrics.json

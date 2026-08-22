@@ -11,6 +11,8 @@ import {
   type BenchmarkReport,
   type CodingMemoryQualityBenchmarkReport,
   type MemoryScaleBenchmarkReport,
+  buildCodeGraph,
+  buildKnowledgeGraph,
   capture,
   deleteContextSlot,
   distillSession,
@@ -1160,6 +1162,19 @@ export function generateViewerReports(projectDir: string): void {
     } catch {
       // Missing directory just means "no inputs seen here".
     }
+  }
+  // graph/graph.json and code_graph/graph.json are gitignored local build output (never
+  // committed), so a fresh checkout or worktree starts without them. They persist
+  // themselves to disk as a side effect of buildKnowledgeGraph/buildCodeGraph in a
+  // compact artifact format the generic "write JSON.stringify(compute())" loop below
+  // would clobber, so rebuild them here directly instead of listing them as steps —
+  // this is the same self-heal path buildCodeGraph/buildKnowledgeGraph already give
+  // every other reader (kage_context, recall, pr check).
+  if (!existsSync(reports.code)) {
+    try { buildCodeGraph(projectDir); } catch { /* best effort */ }
+  }
+  if (!existsSync(reports.graph)) {
+    try { buildKnowledgeGraph(projectDir); } catch { /* best effort */ }
   }
   const steps: Array<[string, () => unknown]> = [
     ["metrics", () => kageMetrics(projectDir)],

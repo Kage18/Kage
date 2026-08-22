@@ -2298,6 +2298,7 @@ export interface PrCheckResult {
   memory_packet_changes: string[];
   code_graph_current: boolean;
   memory_graph_current: boolean;
+  graph_artifacts_rebuilt: boolean;
   errors: string[];
   warnings: string[];
   required_actions: string[];
@@ -19476,6 +19477,30 @@ export function prCheck(projectDir: string): PrCheckResult {
   const rawStatus = readGit(projectDir, ["status", "--porcelain", "-uall"]) ?? "";
   const validation = validateProject(projectDir);
   const tree = gitTree(projectDir);
+  // Graph artifacts are gitignored local build output, not committed state — a fresh
+  // checkout or worktree legitimately starts without them, and without the structural
+  // index they're derived from either (also gitignored). That absence alone must not
+  // block a merge, so rebuild them here (the same rebuild `kage refresh` uses) BEFORE
+  // computing the expected input hash below — currentCodeGraphInputHash reads whichever
+  // structural index is on disk, so hashing first and rebuilding after would compare the
+  // fresh artifact against a hash taken from a since-replaced (or absent) structural
+  // index and spuriously read as stale. This gate only ever compares against local
+  // artifacts this process itself produced, never anything git-tracked. A file that
+  // EXISTS but is stale (source edited after the last refresh) is a different, real
+  // signal — the working tree has drifted from its own last-known graph — and still
+  // fails so an author is told to re-run refresh, not silently healed.
+  const codeGraphPath = join(projectDir, ".agent_memory/code_graph/graph.json");
+  const memoryGraphPath = join(projectDir, ".agent_memory/graph/graph.json");
+  let graphArtifactsRebuilt = false;
+  if (!existsSync(codeGraphPath) || !existsSync(memoryGraphPath)) {
+    try {
+      const codeGraph = buildCodeGraph(projectDir);
+      buildKnowledgeGraph(projectDir, codeGraph);
+      graphArtifactsRebuilt = true;
+    } catch {
+      // Fall through; the freshness checks below still report honestly on what's there.
+    }
+  }
   const codeInputHash = currentCodeGraphInputHash(projectDir);
   const memoryInputHash = knowledgeGraphInputHash(projectDir, codeInputHash);
   const fpCache = new Map<string, MemoryPathFingerprint | null>();
@@ -19520,8 +19545,11 @@ export function prCheck(projectDir: string): PrCheckResult {
   if (conflicts.count > 0) {
     warnings.push(`${conflicts.count} memory contradiction pair(s) unresolved — run kage conflicts, then kage supersede the wrong one (not blocking).`);
   }
+  if (graphArtifactsRebuilt && codeGraphCurrent && memoryGraphCurrent) {
+    warnings.push("Graph artifacts were missing locally (gitignored, never committed) and were rebuilt automatically for this check.");
+  }
   if (!codeGraphCurrent || !memoryGraphCurrent) {
-    errors.push("Generated graph artifacts are missing or not current for this working tree content.");
+    errors.push("Generated graph artifacts are missing or not current for this working tree content, and an automatic local rebuild did not resolve it.");
     requiredActions.push("Run kage refresh --project <dir> before merge.");
   }
   const distillableSessions = sessions.sessions.filter((session) => session.durable_observations > 0);
@@ -19544,6 +19572,7 @@ export function prCheck(projectDir: string): PrCheckResult {
     memory_packet_changes: memoryPacketChanges,
     code_graph_current: codeGraphCurrent,
     memory_graph_current: memoryGraphCurrent,
+    graph_artifacts_rebuilt: graphArtifactsRebuilt,
     memory_reconciliation: reconciliation,
     errors,
     warnings,

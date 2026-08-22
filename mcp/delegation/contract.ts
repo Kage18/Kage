@@ -470,6 +470,16 @@ export function ensureDelegationIgnores(projectDir: string): void {
     ".agent_memory/structural/",
     ".agent_memory/review/",
     ".agent_memory/pending/",
+    ".agent_memory/store/",
+    ".agent_memory/branches/",
+    ".agent_memory/daemon/",
+    ".agent_memory/marketplace/",
+    ".agent_memory/observations/",
+    ".agent_memory/public-bundle/",
+    ".agent_memory/public-candidates/",
+    ".agent_memory/slots/",
+    ".agent_memory/global-cdn/",
+    ".agent_memory/metrics.json",
   ];
   const existing = existsSync(ignorePath) ? readFileSync(ignorePath, "utf8") : "";
   const lines = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
