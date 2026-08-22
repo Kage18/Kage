@@ -131,3 +131,81 @@ breakage: decommit derived dirs + append-only status journal with read-time over
 P2 = law 3 (memory branch migration + tooling). P3 = law 4 (store-as-source flip).
 P4 = beliefs + sleep cycle (the consolidation layer above). Each phase lands as
 kernel-verified runs; nothing here is built until its phase's goal runs.
+
+### P2 — the memory branch (built 2026-08-22)
+
+Law 3 as shipped: **opt-in, one resolver seam, reversible.** Nothing about the
+default layout changes until an operator explicitly runs `kage memory-branch
+migrate` — every reader/writer of packets or the journal (kernel.ts's
+`packetsDir`, `store/journal.ts`'s `journalDir`, the app's `readMemoryPacket`)
+goes through `resolveMemoryLayout` (`mcp/store/memory-layout.ts`), the one
+function that decides which of the two on-disk layouts is active by checking
+whether a real git worktree checkout of `kage/memory` exists at
+`.agent_memory/.branch-worktree`. Nothing else — no config flag, no env var —
+is consulted, so the answer can never drift from what `git worktree list`
+would say.
+
+**What migration actually does** (`migrateToMemoryBranch`): refuses a dirty
+tree (a plain message, not a stack trace); builds the `kage/memory` branch's
+first commit as an **orphan commit from today's `.agent_memory/packets` and
+`.agent_memory/journal` content** via git plumbing (`write-tree` against a
+scratch index rooted at `.agent_memory`, `commit-tree` with no parent) rather
+than `git filter-branch`/`subtree split` — this is why "old paths left in
+code-branch history untouched" holds exactly: not one existing commit on the
+code branch is rewritten, the new branch just starts fresh from the current
+state; checks out that branch as a worktree at the hidden path; then, as a
+**separate, ordinary commit on the code branch**, removes `packets/` and
+`journal/` from the code branch's own tracked tree (`git rm`). That last step
+is what makes law 4 literally true afterward — a merge can only conflict on
+paths a branch tracks, and after migration the code branch tracks neither.
+Idempotent: calling it again once migrated reports the already-active layout
+and does nothing.
+
+**Sync semantics.** The same commit call sites that write memory today keep
+writing memory — `kage_learn`/`capture()`, and delegation's ratify flow
+(`mcp/delegation/ratify.ts`) — but their git `add`/`commit` now runs with the
+memory worktree as `cwd` instead of the project root whenever
+`resolveMemoryLayout` reports `branch` mode (git refuses to `add` a path
+outside the current worktree's root, so this isn't optional bookkeeping — it's
+required for the commit to succeed at all). `kage-sync.yml` gained the same
+branch check (`kage memory-branch status --json`) and commits/pushes against
+`kage/memory` instead of the code branch's `.agent_memory/packets/` when
+migrated.
+
+**Tradeoffs, named rather than hidden:**
+
+- **Shared-branch contention.** Every machine writing memory now commits onto
+  one branch (`kage/memory`) instead of spreading writes across however many
+  code branches were in flight. That branch sees more commit *volume*, but not
+  more commit *conflict* — every writer here still only appends (new packet
+  files, journal event lines), the exact shape P1's journal already made
+  cheap to reconcile. The two-machine story: `git fetch` + `rebase` (the same
+  retry loop `kage-sync.yml` already used for `.agent_memory/packets/`,
+  copied onto the new branch) resolves cleanly because two machines' appends
+  almost never touch the same *line* of the same file, and when a packet's
+  own status changes (supersede/stale/reverify), P1b's journal overlay — not
+  a frontmatter rewrite — is what lands, so even that case is two independent
+  appended lines, not a content conflict.
+- **This does not remove the last rewrite class.** `pending → approved` at
+  ratification (`setPacketStatus` in ratify.ts) still rewrites a packet
+  file's frontmatter in place — out of scope for this phase (P1b explicitly
+  scoped to supersede/stale/reverify/gc-deprecate); it is now a rewrite on
+  `kage/memory` instead of on a code branch, which shrinks its blast radius
+  (only other memory-branch writers can collide with it) but does not
+  eliminate it.
+- **Known gap:** a hired agent's *drafted* (pending) packets during a run —
+  written via `draftLearnings` while the run's own isolated code worktree is
+  still open — are redirected straight to the shared `kage/memory` worktree in
+  branch mode instead of riding the run's branch for "reviewed in the same
+  diff" (the default-layout behavior, unchanged). This means a run's pending
+  learnings are no longer visible in the code review diff itself when
+  migrated; they are visible in `kage/memory`'s own history instead. Multiple
+  concurrent runs also now write into the *same* shared worktree rather than
+  isolated ones — safe today because each write is a new, uniquely-named file,
+  but a future phase should give the memory worktree its own write
+  serialization if concurrent-run volume ever makes that assumption strained.
+- **Single point of failure, mitigated the same way git always mitigates it:**
+  losing the memory worktree checkout is not losing memory — `kage/memory` is
+  a normal branch; `git worktree add` recreates the checkout from it, and
+  `migrateToMemoryBranch` re-running against an existing remote branch tracks
+  it rather than reseeding a divergent one (the two-machine convergence path).

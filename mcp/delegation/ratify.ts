@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from
 import { join } from "node:path";
 import { capture, packetsDir, refreshProject } from "../kernel.js";
 import { okfConceptToPacket, packetToOkfConcept } from "../okf.js";
+import { resolveMemoryLayout } from "../store/memory-layout.js";
 import { KERNEL_APPENDED_CHECK_IDS, runAllChecks } from "./checks.js";
 import {
   type CheckSpec,
@@ -80,11 +81,20 @@ export function draftLearnings(
 ): DraftedLearning[] {
   const worktree = worktreePath(projectDir, task.id);
   if (!existsSync(worktree) || !claim.learnings.length) return [];
+  // Default layout: the packet rides the run's own branch so it is reviewed in the
+  // same diff as the code that taught it, same as always. Migrated (branch) layout:
+  // packets no longer live in the code tree at all, so there is no code-branch diff
+  // to ride — draft straight into the shared memory branch worktree instead, which
+  // resolveMemoryLayout(projectDir) (the MAIN project, not this run's isolated
+  // worktree) resolves to. capture() only uses projectDir to compute .agent_memory
+  // paths, so pointing it at the main project here is safe even though the run's
+  // code changes themselves still live in `worktree`.
+  const memoryTarget = resolveMemoryLayout(projectDir).mode === "branch" ? projectDir : worktree;
   const drafted: DraftedLearning[] = [];
   for (const learning of claim.learnings.slice(0, 3)) {
     const title = learning.length > 90 ? `${learning.slice(0, 87)}...` : learning;
     const result = capture({
-      projectDir: worktree,
+      projectDir: memoryTarget,
       title,
       body: `${learning}\n\nLearned while delivering: ${task.intent}\nVerified by: ${claim.checks
         .filter((check) => check.result === "pass")
@@ -208,10 +218,17 @@ export function mergeRun(projectDir: string, runId: string, actor: RunActor = "u
 
   // Ratification: the packets that rode the branch become team memory now, because you
   // merged. Committed as their own step so the promotion is visible in history.
+  //
+  // Migrated (branch) layout: packetFilesForRun already resolved these paths inside the
+  // kage/memory worktree, not projectDir's own tree — `git add`/`commit` must run with
+  // that worktree as cwd (git refuses a path outside the current worktree's root), which
+  // is also exactly what keeps this commit OFF the code branch that `merge --no-ff` above
+  // just landed on.
   const ratifiedFiles = packetFilesForRun(projectDir, runId).filter((path) => setPacketStatus(path, "approved"));
   if (ratifiedFiles.length) {
-    git(projectDir, ["add", ...ratifiedFiles]);
-    git(projectDir, [...commitIdentityArgs(projectDir), "commit", "-m", `kage: ratify ${ratifiedFiles.length} learning(s) from ${runId}`]);
+    const memoryCwd = resolveMemoryLayout(projectDir).mode === "branch" ? resolveMemoryLayout(projectDir).root : projectDir;
+    git(memoryCwd, ["add", ...ratifiedFiles]);
+    git(memoryCwd, [...commitIdentityArgs(memoryCwd), "commit", "-m", `kage: ratify ${ratifiedFiles.length} learning(s) from ${runId}`]);
   }
 
   // A chore/investigation run was allowed to merge with no commits above — a legitimate
