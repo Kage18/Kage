@@ -250,6 +250,19 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+// A belief document under .agent_memory/beliefs/ (docs/design/BELIEF_MEMORY.md):
+// consolidated, per-domain understanding, cited to the episode packets that support
+// it. Recall serves these as primary context, packets as drill-down evidence.
+export interface BeliefRecallEntry {
+  id: string;
+  title: string;
+  confidence: string;
+  summary: string;
+  path: string;
+  cited_packets: string[];
+  why_matched: string[];
+}
+
 export interface RecallResult {
   query: string;
   context_block: string;
@@ -261,6 +274,13 @@ export interface RecallResult {
   }>;
   explanations?: RecallExplanation[];
   suppressed?: Array<{ id: string; title: string; reason: string }>;
+  // Beliefs-first recall (docs/design/BELIEF_MEMORY.md "the retrieval flip"): matching,
+  // non-stale beliefs, ranked above `results`. Empty when no belief matches the query
+  // (or none exist yet) — callers fall back to episode-only recall unchanged.
+  beliefs?: BeliefRecallEntry[];
+  // Beliefs withheld because a cited packet is itself stale or missing — the same
+  // citation-fingerprint gate `suppressed` applies to packets, one hop up.
+  beliefs_withheld?: Array<{ id: string; title: string; reason: string }>;
   // Value receipt for this recall: tokens the agent avoided spending by not
   // re-reading the cited source files (or, when larger, the knowledge-replay value
   // of the served packets' discovery_tokens), plus how many stale packets were
@@ -2531,6 +2551,14 @@ export function packetsDir(projectDir: string): string {
 
 export function pendingDir(projectDir: string): string {
   return join(memoryRoot(projectDir), "pending");
+}
+
+// Beliefs are the sleep cycle's consolidated documents (docs/design/BELIEF_MEMORY.md) —
+// rewritten in place, git history IS their evolution. Unlike packets they are NOT
+// routed through resolveMemoryLayout: the design doc scopes law 3 (memory leaves the
+// code tree) to episodes/journal only, beliefs stay committed on the code branch.
+export function beliefsDir(projectDir: string): string {
+  return join(memoryRoot(projectDir), "beliefs");
 }
 
 export function publicCandidatesDir(projectDir: string): string {
@@ -4829,6 +4857,160 @@ function recallablePendingPackets(projectDir: string): MemoryPacket[] {
   return loadPendingPackets(projectDir).filter(
     (packet) => !packet.tags.includes("diff-proposal") && !packet.tags.includes(AUTO_DISTILL_TAG)
   );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// § BELIEFS (docs/design/BELIEF_MEMORY.md)
+// ══════════════════════════════════════════════════════════════════════════
+
+interface BeliefDoc {
+  id: string;
+  title: string;
+  tags: string[];
+  confidence: string;
+  body: string;
+  path: string;
+  citedPacketPaths: string[];
+}
+
+const BELIEF_PACKET_CITATION = /\.agent_memory\/packets\/[\w.\-]+\.md/g;
+const BELIEF_CONFIDENCE_LINE = /\*\*Confidence:\*\*\s*(settled|firm|provisional)/i;
+
+function parseBeliefFrontmatterField(frontmatter: string, key: string): string | null {
+  const match = frontmatter.match(new RegExp(`^${key}:\\s*"(.*)"\\s*$`, "m"));
+  return match ? match[1] : null;
+}
+
+// Beliefs are OKF-conformant markdown (frontmatter + prose), not JSON like packets —
+// hand-parsed here rather than reusing readPacketFromDisk/okfConceptToPacket, since a
+// belief is deliberately NOT a MemoryPacket (no MEMORY_TYPES entry, no per-packet
+// freshness fingerprint of its own — its staleness derives from the packets it cites;
+// see beliefStaleReason below).
+function parseBeliefFile(absolutePath: string, relativePath: string): BeliefDoc | null {
+  let raw: string;
+  try {
+    raw = readFileSync(absolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  const frontmatterMatch = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!frontmatterMatch) return null;
+  const frontmatter = frontmatterMatch[1];
+  if (parseBeliefFrontmatterField(frontmatter, "type") !== "belief") return null;
+  const body = raw.slice(frontmatterMatch[0].length);
+  const tagsMatch = frontmatter.match(/^tags:\s*\[(.*)\]\s*$/m);
+  const tags = tagsMatch
+    ? tagsMatch[1].split(",").map((tag) => tag.trim().replace(/^"|"$/g, "")).filter(Boolean)
+    : [];
+  const confidenceMatch = body.match(BELIEF_CONFIDENCE_LINE);
+  const id = basename(relativePath, ".md");
+  return {
+    id,
+    title: parseBeliefFrontmatterField(frontmatter, "title") ?? id,
+    tags,
+    confidence: confidenceMatch ? confidenceMatch[1].toLowerCase() : "",
+    body,
+    path: relativePath,
+    citedPacketPaths: unique([...body.matchAll(BELIEF_PACKET_CITATION)].map((match) => match[0])),
+  };
+}
+
+function loadBeliefs(projectDir: string): BeliefDoc[] {
+  const dir = beliefsDir(projectDir);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.toLowerCase().endsWith(".md") && name.toLowerCase() !== "readme.md")
+    .sort()
+    .flatMap((name) => {
+      const belief = parseBeliefFile(join(dir, name), `.agent_memory/beliefs/${name}`);
+      return belief ? [belief] : [];
+    });
+}
+
+// "A belief that cites moved code goes stale like any packet" (docs/design/BELIEF_MEMORY.md
+// "What stays true"). A belief cites packets, not code directly, so the check is one hop:
+// run the SAME recallStaleReason gate packets already pass on every packet the belief
+// cites (catching that packet's own cited code having moved), plus the packet-citation
+// analogue of "all referenced paths are missing" — every cited packet deleted outright.
+// Any single stale or deleted-out-from-under-it citation withholds the whole belief:
+// unlike a packet's own soft/hard split, a belief is one holistic claim built on its
+// citations, so a single broken one is enough to stop serving it as settled.
+function beliefStaleReason(projectDir: string, belief: BeliefDoc, cache?: Map<string, MemoryPathFingerprint | null>): string | null {
+  if (!belief.citedPacketPaths.length) return null;
+  const missing: string[] = [];
+  for (const packetPath of belief.citedPacketPaths) {
+    const absolutePath = join(projectDir, packetPath);
+    if (!existsSync(absolutePath)) {
+      missing.push(packetPath);
+      continue;
+    }
+    const packet = tryReadPacket(absolutePath);
+    if (!packet) continue;
+    const reason = recallStaleReason(projectDir, packet, cache);
+    if (reason) return `cited packet ${packetPath} is stale: ${reason}`;
+  }
+  if (missing.length && missing.length === belief.citedPacketPaths.length) {
+    return `all cited packets deleted since drafting: ${missing.slice(0, 4).join(", ")}`;
+  }
+  return null;
+}
+
+// First real paragraph of a belief's body, heading and confidence line stripped — a
+// short felt summary for the context block, not the whole domain essay.
+function beliefSummary(body: string): string {
+  const withoutHeading = body.replace(/^#\s.*\n+/, "");
+  const withoutConfidence = withoutHeading.replace(BELIEF_CONFIDENCE_LINE, "").replace(/^[^\n]*\n+/, "");
+  const firstParagraph = withoutConfidence.split(/\n\s*\n/)[0] ?? "";
+  return clampInline(firstParagraph, 400);
+}
+
+interface BeliefMatch {
+  belief: BeliefDoc;
+  score: number;
+}
+
+function scoreBeliefs(terms: string[], beliefs: BeliefDoc[]): BeliefMatch[] {
+  if (!terms.length) return [];
+  return beliefs
+    .map((belief) => ({
+      belief,
+      score: scoreText(terms, [belief.title, belief.tags.join(" "), belief.body].join("\n"), [belief.title, ...belief.tags]),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.belief.title.localeCompare(b.belief.title));
+}
+
+// Ranks all beliefs against the query, then filters out stale ones in ranked order so a
+// stale top match never silently crowds out the next-best live belief — mirrors how
+// recallWithVectorScores filters approvedPackets before ranking, just in the other order
+// (beliefs are few enough, ~60, that ranking first and gating after is cheap either way).
+function recallBeliefs(
+  projectDir: string,
+  terms: string[],
+  limit: number,
+  cache?: Map<string, MemoryPathFingerprint | null>
+): { matched: BeliefRecallEntry[]; withheld: Array<{ id: string; title: string; reason: string }> } {
+  const candidates = scoreBeliefs(terms, loadBeliefs(projectDir));
+  const matched: BeliefRecallEntry[] = [];
+  const withheld: Array<{ id: string; title: string; reason: string }> = [];
+  for (const { belief } of candidates) {
+    const reason = beliefStaleReason(projectDir, belief, cache);
+    if (reason) {
+      withheld.push({ id: belief.id, title: belief.title, reason });
+      continue;
+    }
+    matched.push({
+      id: belief.id,
+      title: belief.title,
+      confidence: belief.confidence || "unstated",
+      summary: beliefSummary(belief.body),
+      path: belief.path,
+      cited_packets: belief.citedPacketPaths,
+      why_matched: [`belief-match:${belief.id}`],
+    });
+    if (matched.length >= limit) break;
+  }
+  return { matched, withheld };
 }
 
 function writePacket(projectDir: string, packet: MemoryPacket, statusDir: "packets" | "pending"): string {
@@ -11062,6 +11244,12 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
   const allApprovedPackets = loadApprovedPackets(projectDir);
   const includeStale = inputs.includeStale === true;
   const staleFingerprintCache = new Map<string, MemoryPathFingerprint | null>();
+  // Beliefs-first (docs/design/BELIEF_MEMORY.md "the retrieval flip"): ranked and
+  // stale-gated before packets, sharing the same fingerprint cache since a belief's
+  // staleness check re-walks its cited packets' own code citations.
+  const { matched: matchedBeliefs, withheld: beliefsWithheld } = includeStale
+    ? { matched: [], withheld: [] }
+    : recallBeliefs(projectDir, terms, limit, staleFingerprintCache);
   const suppressed: Array<{ id: string; title: string; reason: string }> = [];
   // Just-in-time staleness gate: hard-stale memory (deleted citations, expired ttl,
   // reported stale) is excluded from the recall payload so the agent never sees it
@@ -11163,6 +11351,19 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
     `Query: ${query}`,
     "",
     ...(pinnedContext ? [pinnedContext, ""] : []),
+    ...(matchedBeliefs.length
+      ? [
+          "## Team Beliefs (consolidated understanding — primary context)",
+          "_Episode packets below are drill-down evidence for these beliefs, not the primary payload._",
+          ...matchedBeliefs.flatMap((entry, index) => [
+            "",
+            `${index + 1}. Belief: ${entry.title} (confidence: ${entry.confidence})`,
+            `   ${entry.summary}`,
+            `   (${entry.cited_packets.length} cited packet(s) · ${entry.path})`,
+          ]),
+          "",
+        ]
+      : []),
     codeContext.symbols.length || codeContext.routes.length || codeContext.tests.length || codeContext.files.length ? "## Relevant Code Graph" : "",
     ...codeContext.routes.slice(0, 3).map((route, index) => `${index + 1}. [route] ${route.method} ${route.path} -> ${route.file_path}:${route.line}`),
     ...codeContext.symbols.slice(0, 5).map((symbol, index) => `${index + 1}. [symbol] ${symbol.kind} ${symbol.name} in ${symbol.path}:${symbol.line}`),
@@ -11172,7 +11373,9 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
     ...(blastRadius.length
       ? [`## Structural Blast Radius (${structuralHops}-hop)`, ...blastRadius.map((path, index) => `${index + 1}. ${path}`), ""]
       : []),
-    scored.length ? "## Relevant Memory" : "No relevant repo memory found.",
+    scored.length
+      ? (matchedBeliefs.length ? "## Supporting Episode Packets (drill-down evidence)" : "## Relevant Memory")
+      : (matchedBeliefs.length ? "" : "No relevant repo memory found."),
     ...scored.flatMap((entry, index) => {
       const contradicts = ((entry.packet.quality ?? {}) as Record<string, unknown>).contradicts;
       const contested = Array.isArray(contradicts) && contradicts.length > 0;
@@ -11216,6 +11419,14 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
           ...suppressed.slice(0, 5).map((s) => `- ${s.title} — ${s.reason} (kage reverify --packet ${s.id})`),
         ]
       : []),
+    ...(beliefsWithheld.length
+      ? [
+          "",
+          "## Withheld Beliefs (stale — not served)",
+          `_${beliefsWithheld.length} belief(s) excluded because a cited packet moved or went stale under them. Never silently served — reverify the cited packet(s) to restore._`,
+          ...beliefsWithheld.slice(0, 5).map((b) => `- ${b.title} — ${b.reason}`),
+        ]
+      : []),
     ...(personalEntries.length
       ? [
           "",
@@ -11238,6 +11449,8 @@ function recallWithVectorScores(projectDir: string, query: string, limit = 5, ex
     context_block: inputs.maxContextTokens ? boundContextBlock(assembledBlock, inputs.maxContextTokens) : assembledBlock,
     results: scored,
     suppressed: suppressed.length ? suppressed : undefined,
+    beliefs: matchedBeliefs.length ? matchedBeliefs : undefined,
+    beliefs_withheld: beliefsWithheld.length ? beliefsWithheld : undefined,
     personal: personalEntries.length ? personalEntries : undefined,
     explanations: explain
       ? scored.map((entry) => ({
