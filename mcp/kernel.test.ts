@@ -3665,13 +3665,13 @@ test("gc deprecates stale packets by exact packet file path", () => {
 
   const dryRun = gcProject(project, { dryRun: true });
   assert.equal(dryRun.deprecated.length, 1);
-  let packet = parsePacket(result.path!);
-  assert.equal(packet.status, "approved");
+  assert.equal(parsePacket(result.path!).status, "approved");
 
   const gc = gcProject(project);
   assert.equal(gc.deprecated.length, 1);
-  packet = parsePacket(result.path!);
-  assert.equal(packet.status, "deprecated");
+  // gc records the deprecation as an append-only journal event — the packet file
+  // itself stays byte-identical, and the overlay is what shows it as deprecated.
+  assert.equal(parsePacket(result.path!).status, "approved");
   assert.equal(loadApprovedPackets(project).some((candidate) => candidate.id === result.packet!.id), false);
 });
 
@@ -5446,7 +5446,7 @@ function seedGitProjectWithPacket(branch: string): { project: string; packetPath
   return { project, packetPath: captured.path!, packetId: captured.packet!.id };
 }
 
-test("refresh on a non-default branch skips metadata-only packet rewrites but still reports staleness", () => {
+test("refresh on a non-default branch reports staleness through the journal, packet file stays byte-identical", () => {
   const { project, packetPath, packetId } = seedGitProjectWithPacket("main");
   execFileSync("git", ["checkout", "-b", "feature/quiet"], { cwd: project, stdio: "ignore" });
   // Invalidate the packet's citation so staleness must be detected.
@@ -5457,25 +5457,29 @@ test("refresh on a non-default branch skips metadata-only packet rewrites but st
   assert.equal(result.quiet_refresh, true);
   // Staleness still computed (recall withholding keeps working on branches)...
   assert.equal(result.stale_packets.some((finding) => finding.id === packetId), true);
-  // ...but the packet file stays byte-identical: no cosmetic rewrite on a branch.
+  // ...and visible through the journal overlay...
+  assert.equal(loadApprovedPackets(project).find((p) => p.id === packetId)?.quality.stale, true);
+  // ...but the packet file itself stays byte-identical: stale flips are append-only
+  // journal events, never a rewrite of the packet, on any branch.
   assert.equal(readFileSync(packetPath, "utf8"), before);
 
-  // --force persists the stale flag even on a non-default branch.
+  // --force no longer changes this: the packet file stays byte-identical either way.
   const forced = refreshProject(project, { force: true });
   assert.equal(forced.quiet_refresh, false);
-  const rewritten = parsePacket(packetPath);
-  assert.equal(rewritten.quality.stale, true);
+  assert.equal(readFileSync(packetPath, "utf8"), before);
+  assert.equal(loadApprovedPackets(project).find((p) => p.id === packetId)?.quality.stale, true);
 });
 
-test("refresh on the default branch persists stale metadata to disk", () => {
+test("refresh on the default branch reports staleness through the journal, packet file stays byte-identical", () => {
   const { project, packetPath, packetId } = seedGitProjectWithPacket("main");
   writeFileSync(join(project, "src", "server.ts"), "export function createApp() { return { changed: true }; }\n", "utf8");
+  const before = readFileSync(packetPath, "utf8");
 
   const result = refreshProject(project);
   assert.equal(result.quiet_refresh, false);
   assert.equal(result.stale_packets.some((finding) => finding.id === packetId), true);
-  const rewritten = parsePacket(packetPath);
-  assert.equal(rewritten.quality.stale, true);
+  assert.equal(loadApprovedPackets(project).find((p) => p.id === packetId)?.quality.stale, true);
+  assert.equal(readFileSync(packetPath, "utf8"), before, "stale flip lands in the status journal, not the packet file");
 });
 
 test("merge-packet keeps the newest side whole-file and rejects garbage", () => {
@@ -5825,7 +5829,7 @@ test("doc-lie check resolves links relative to the doc's directory, not just rep
   assert.equal(lies.some((t) => t.includes("real.md")), false, JSON.stringify(lies));
 });
 
-test("reverify refreshes grounding in place and clears stale flags", () => {
+test("reverify refreshes grounding through the journal, clears stale flags, and leaves the packet file untouched", () => {
   const project = tempProject();
   writeFileSync(join(project, "lib.ts"), "export const v = 1;\n", "utf8");
   const captured = learn({ projectDir: project, learning: "lib.ts holds the version constant.", paths: ["lib.ts"], type: "reference", allowLowQuality: true });
@@ -5835,20 +5839,24 @@ test("reverify refreshes grounding in place and clears stale flags", () => {
     const name = readdirSync(packetsDir(project)).filter((f) => f.endsWith(".md") || f.endsWith(".json")).find((f) => parsePacket(join(packetsDir(project), f))?.id === id)!;
     return join(packetsDir(project), name);
   };
-  // mutate the cited file, then let refresh mark the packet stale (default branch persists flags)
+  // mutate the cited file, then let refresh mark the packet stale (as a journal event)
   writeFileSync(join(project, "lib.ts"), "export const v = 2;\n", "utf8");
   refreshProject(project);
-  const before = parsePacket(packetFile());
+  const rawBefore = readFileSync(packetFile(), "utf8");
+  const before = loadApprovedPackets(project).find((p) => p.id === id)!;
+  assert.equal(before.quality?.stale, true);
   const result = reverifyMemory(project, id);
   assert.equal(result.ok, true, JSON.stringify(result.errors));
   assert.equal(result.refreshed_paths.includes("lib.ts"), true);
   assert.equal(result.was_stale, before.quality?.stale === true);
-  const after = parsePacket(packetFile());
+  // reverify is append-only: the packet file itself never changes.
+  assert.equal(readFileSync(packetFile(), "utf8"), rawBefore);
+  const after = loadApprovedPackets(project).find((p) => p.id === id)!;
   assert.equal(after.quality?.stale === true, false);
   assert.equal(typeof after.quality?.reverified_at, "string");
   // fingerprints now match current content — a fresh refresh re-marks nothing
   refreshProject(project);
-  const settled = parsePacket(packetFile());
+  const settled = loadApprovedPackets(project).find((p) => p.id === id)!;
   assert.equal(settled.quality?.stale === true, false);
 });
 

@@ -17,6 +17,7 @@ import {
   compactProject,
   generateSkills,
 } from "./kernel.js";
+import { applyJournalOverlay, loadJournalEvents } from "./store/journal.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Black-box lifecycle ("trajectory" + "Markov chain") tests for Kage memory.
@@ -76,16 +77,21 @@ function captureRunbook(project: string, opts: { pending?: boolean; type?: "runb
   return { id: res.packet!.id, token, file, query: token };
 }
 
+// Supersede/deprecate now travel through the append-only status journal (see
+// mcp/store/journal.ts) instead of rewriting the packet file, so the packet's
+// raw on-disk status can lag behind reality — this applies the same overlay a
+// real reader (recall, kage_memory_lineage, ...) applies at load time.
 function diskStatus(project: string, id: string): string | null {
   const dir = join(project, ".agent_memory", "packets");
   if (!existsSync(dir)) return null;
+  const events = loadJournalEvents(project);
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".md") && !f.endsWith(".json")) continue;
     try {
       const p = f.endsWith(".md")
         ? okfConceptToPacket(readFileSync(join(dir, f), "utf8"))
         : JSON.parse(readFileSync(join(dir, f), "utf8"));
-      if (p && p.id === id) return p.status;
+      if (p && p.id === id) return applyJournalOverlay([p], events)[0].status;
     } catch { /* skip unreadable */ }
   }
   return null;
