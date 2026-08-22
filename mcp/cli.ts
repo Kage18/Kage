@@ -148,6 +148,7 @@ import { readKnownProjects, rememberProject } from "./delegation/projects.js";
 import { addProject, installedAgents } from "./delegation/add-project.js";
 import { steerRun } from "./delegation/steer.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
+import { stopRun } from "./delegation/control.js";
 import { ADAPTER_NAMES, adapterByName, detectAgent } from "./delegation/adapters/index.js";
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
 import { renderClaimCard } from "./delegation/verify.js";
@@ -3036,8 +3037,9 @@ async function main(): Promise<void> {
   if (command === "stop") {
     const runId = firstPositional(args);
     if (!runId) usage();
-    const task = transitionRun(projectArg(args), runId, "stopped", "user", "stopped by user");
-    console.log(`${renderRunLine(task)}\nState is preserved — resume with: kage retry ${runId}`);
+    const reason = firstPositional(args.filter((arg) => arg !== runId));
+    const { run, outcome } = await stopRun(projectArg(args), runId, "user", reason || "stopped by user");
+    console.log(`${renderRunLine(run)}\n(${outcome.note})\nState is preserved — resume with: kage retry ${runId}`);
     return;
   }
 

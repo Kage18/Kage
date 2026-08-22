@@ -46,7 +46,7 @@ import {
 import { compileBrief, renderBrief } from "./brief.js";
 import { normalizeRunType, preflightForecast } from "./preflight.js";
 import { deleteQueuedSteer, editQueuedSteer, reorderQueuedSteers, steerRun, type SteerQueueResult } from "./steer.js";
-import { sendControl, isRunLive } from "./control.js";
+import { sendControl, isRunLive, stopRun } from "./control.js";
 import { handBack, takeOverRun, type RunPtyAttachment } from "./run-pty.js";
 import { mergeRun, rejectRun } from "./ratify.js";
 import { readAgentReview, type AgentReviewRecord } from "./review.js";
@@ -1876,29 +1876,16 @@ export async function handleDelegationRoute(
       return true;
     }
     if (action === "stop") {
-      const reply = await sendControl(projectDir, runId, { op: "stop" });
-      let detail = reply?.detail;
-      if (!reply?.ok) {
-        // No live supervisor answered. For most states that just means "nothing to
-        // stop" — but a BLOCKED run has no other way forward: nothing is waiting on
-        // it, stop can never succeed, and reject refuses blocked states because it
-        // assumes an agent might still answer. If the supervisor is confirmed dead,
-        // persist that reality so the run can actually be rejected or retried instead
-        // of being stuck forever.
-        const current = readRun(projectDir, runId);
-        if (current.state === "blocked" && !(await isRunLive(projectDir, runId))) {
-          transitionRun(projectDir, runId, "stopped", "user", "supervisor gone; nothing was waiting");
-          detail = "supervisor gone; nothing was waiting — marked stopped";
-        }
-      }
+      const body = await readJsonBody(req);
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      // A BLOCKED run with a dead supervisor has no other way forward — nothing is
+      // waiting on it, stop can never otherwise succeed, and reject refuses blocked
+      // states because it assumes an agent might still answer. stopRun's own fallback
+      // transition (writing "stopped" when the supervisor never could) covers exactly
+      // this, so there is no special case left to hand-roll here.
+      const { run, outcome } = await stopRun(projectDir, runId, "user", reason || undefined);
       feed.notify(runId);
-      const run = readRun(projectDir, runId);
-      json(res, 200, {
-        ok: true,
-        stopped: reply?.ok === true || run.state === "stopped",
-        detail: detail ?? "no live supervisor — nothing to stop",
-        run,
-      });
+      json(res, 200, { ok: true, stopped: run.state === "stopped", detail: outcome.note, run });
       return true;
     }
     if (action === "interrupt") {

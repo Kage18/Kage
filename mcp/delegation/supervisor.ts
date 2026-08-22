@@ -37,6 +37,7 @@ import {
   readBrief,
   readRun,
   runDir,
+  type RunActor,
   runSupervisorLogPath,
   runTranscriptPath,
   runWorkDir,
@@ -74,7 +75,12 @@ export function supervisorRecordPath(projectDir: string, runId: string): string 
 export type ControlOp =
   | { op: "tell"; message: string; steerId?: string }
   | { op: "interrupt" }
-  | { op: "stop" }
+  // reason/actor are OPTIONAL — most stop calls in this codebase (handBack, takeOverRun's
+  // own handoff, older tests) never had a reason to give and must keep working exactly as
+  // before; a caller that DOES have one (control.ts's stopAndConfirm) threads it through so
+  // the eventual `stopped` transition below carries the real requester and why, instead of
+  // the generic "stopped by request" every stop used to collapse into.
+  | { op: "stop"; reason?: string; actor?: RunActor }
   | { op: "status" };
 
 export interface ControlReply {
@@ -269,6 +275,13 @@ interface SupervisorState {
   sessionId?: string;
   finalMessage: string;
   stopped: boolean;
+  /** The reason a caller gave on the `stop` control op, if any — carried into the final
+   * `stopped` transition's note so a manager/API stop reads as WHY, not a bare "stopped
+   * by request". Undefined for a stop op that gave none (back-compat callers). */
+  stopReason?: string;
+  /** Who actually requested the stop (control.ts's stopAndConfirm threads the real
+   * actor through) — falls back to "user" below when a caller never said. */
+  stopActor?: RunActor;
   /**
    * Set instead of a generic "stopped by request" note when the kernel itself halted
    * the run for crossing its budget — names the limit and the actual figure so the
@@ -521,6 +534,8 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     }
     if (op.op === "stop") {
       state.stopped = true;
+      state.stopReason = op.reason;
+      state.stopActor = op.actor;
       // Best-effort for a non-claude agent: there is no live process handle to kill,
       // only an in-flight Adapter.run() promise with no cancellation of its own — the
       // run will still be marked stopped once it returns, same honesty the fake
@@ -771,7 +786,7 @@ export async function superviseRun(projectDir: string, runId: string, adapterOve
     // one. budgetHalted and stallHalted are mutually exclusive (whichever check fires
     // first sets state.stopped, and both checks bail out once it's already true).
     const haltNote = state.budgetHalted ?? state.stallHalted;
-    transitionRun(projectDir, runId, "stopped", haltNote ? "kernel" : "user", haltNote ?? "stopped by request");
+    transitionRun(projectDir, runId, "stopped", haltNote ? "kernel" : (state.stopActor ?? "user"), haltNote ?? state.stopReason ?? "stopped by request");
     return;
   }
 

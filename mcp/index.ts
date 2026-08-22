@@ -88,6 +88,7 @@ import { buildGraphRegistryManifest } from "./graph-registry.js";
 import { capCollection, capFields, responseCapLimit } from "./response-cap.js";
 import { RUN_TYPES, type RunType, listRuns, readClaim, readRun, renderRunCard, renderRunLine, transitionRun } from "./delegation/contract.js";
 import { dispatchDetached, dispatchRun, executeRun, INLINE_RUN_WARNING } from "./delegation/dispatch.js";
+import { stopRun } from "./delegation/control.js";
 import { steerRun } from "./delegation/steer.js";
 import { adapterByName, detectAgent } from "./delegation/adapters/index.js";
 import { compileBrief, renderBriefCard } from "./delegation/brief.js";
@@ -1315,11 +1316,16 @@ const DELEGATION_TOOLS = [
   },
   {
     name: "kage_stop",
-    description: "Halt a run now. State is preserved and the run is resumable.",
+    description:
+      "Halt a run now. State is preserved and the run is resumable. Delivers the stop to the run's live supervisor and confirms the process actually exits before returning — never just records an intent. reason is required and is kept as part of the run's activity, so whoever looks at it later knows why, not just that it happened.",
     inputSchema: {
       type: "object",
-      properties: { project_dir: { type: "string" }, run_id: { type: "string" } },
-      required: ["project_dir", "run_id"],
+      properties: {
+        project_dir: { type: "string" },
+        run_id: { type: "string" },
+        reason: { type: "string", description: "Why this run is being stopped — required, recorded on the run." },
+      },
+      required: ["project_dir", "run_id", "reason"],
     },
   },
   {
@@ -1658,7 +1664,10 @@ async function runDelegationTool(
     return text(`${result.message}\n(delivery: ${result.delivery})`);
   }
   if (name === "kage_stop") {
-    return text(renderRunLine(transitionRun(projectDir, runId, "stopped", "manager", "stopped from the room")));
+    const reason = String(args?.reason ?? "").trim();
+    if (!reason) return text("kage_stop needs a reason — it is kept as part of the run's activity, not left for someone else to guess.");
+    const { run, outcome } = await stopRun(projectDir, runId, "manager", reason);
+    return text(`${renderRunLine(run)}\n(${outcome.note})`);
   }
   if (name === "kage_review_run") {
     const verdict = String(args?.verdict ?? "").trim();

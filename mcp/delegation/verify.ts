@@ -73,7 +73,12 @@ function sleepSync(ms: number): void {
 // `detached: true` on the spawnSync call below is what makes a real sweep possible: it
 // makes the child its own process group leader, so `-pid` here reaches the whole tree that
 // grew under it, not just the one pid Node itself was watching.
-function sweepProcessGroup(pid: number, graceMs: number): void {
+//
+// Exported so control.ts's stop-confirmation path (a run's supervisor is ALSO spawned
+// `detached: true` — dispatch.ts's dispatchDetached) can force a stop through the exact
+// same primitive rather than a second hand-rolled SIGTERM/grace/SIGKILL sweep that could
+// drift from this one, same reasoning as writeEvidence's export above.
+export function sweepProcessGroup(pid: number, graceMs: number): void {
   try {
     process.kill(-pid, "SIGTERM");
   } catch {

@@ -1504,7 +1504,7 @@ test("stop on a blocked run with a DEAD supervisor transitions it to stopped, an
     const stopBody = await stop.json() as { ok: boolean; stopped: boolean; detail: string; run: { state: string } };
     assert.equal(stopBody.ok, true);
     assert.equal(stopBody.stopped, true, "the outcome IS stopped, even though no live socket answered");
-    assert.match(stopBody.detail, /supervisor gone/);
+    assert.match(stopBody.detail, /no live supervisor/);
     assert.equal(stopBody.run.state, "stopped");
     assert.equal(readRun(project, run.id).state, "stopped", "the transition was persisted, not just reported");
 
