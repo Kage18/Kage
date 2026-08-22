@@ -53,6 +53,7 @@ import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgR
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
 import { openStore } from "./store/manifest.js";
 import { appendJournalEvent, applyJournalOverlay, loadJournalEvents, type JournalEvent } from "./store/journal.js";
+import { resolveMemoryLayout } from "./store/memory-layout.js";
 import type {
   CallEdgeRow,
   DocsFtsDoc,
@@ -2518,8 +2519,14 @@ export function memoryRoot(projectDir: string): string {
   return join(projectDir, ".agent_memory");
 }
 
+// Routes through resolveMemoryLayout (store/memory-layout.ts) — the ONE seam
+// that decides whether packets live under the project's own .agent_memory/
+// (default) or under a checked-out kage/memory branch worktree (after `kage
+// memory-branch migrate`). Every caller in this file goes through this
+// function rather than joining memoryRoot(projectDir) itself, so the branch
+// migration is transparent to all of them.
 export function packetsDir(projectDir: string): string {
-  return join(memoryRoot(projectDir), "packets");
+  return join(resolveMemoryLayout(projectDir).root, "packets");
 }
 
 export function pendingDir(projectDir: string): string {

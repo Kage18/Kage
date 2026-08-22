@@ -15,6 +15,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { RUN_TAG_PREFIX, type RunView, listRuns, runTag } from "./contract.js";
+import { resolveMemoryLayout } from "../store/memory-layout.js";
 
 function readJson<T>(path: string, fallback: T): T {
   try {
@@ -191,7 +192,7 @@ export function readMemoryPacket(
   const match = (catalog.packets ?? []).find((entry) => String(entry.id) === id);
   if (!match) return { ok: false, id, error: "no such memory in this repo" };
 
-  const packetsDir = join(memoryDir(projectDir), "packets");
+  const packetsDir = join(resolveMemoryLayout(projectDir).root, "packets");
   const file = findPacketFile(packetsDir, id);
   if (!file) return { ok: false, id, error: "the catalog lists this memory but its file is missing — run kage refresh" };
 

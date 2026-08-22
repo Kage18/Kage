@@ -42,18 +42,34 @@ jobs:
         run: node mcp/dist/cli.js propose --project . --from-diff --json
         continue-on-error: true
 
+      - name: Determine memory layout
+        id: memory-layout
+        run: |
+          node mcp/dist/cli.js memory-branch status --project . --json > /tmp/memory-layout.json
+          cat /tmp/memory-layout.json
+          MODE=$(node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/memory-layout.json','utf8')).mode)")
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      # Fetch kage/memory unconditionally, before it matters whether the local layout is
+      # already migrated — a runner's clone may not have migrated its own worktree yet even
+      # when the repo (some other machine) already has, and `git worktree add` below needs
+      # the ref to exist locally to check it out.
+      - name: Fetch the memory branch, if it exists
+        run: git fetch origin kage/memory || echo "no kage/memory branch on origin yet"
+
       - name: Auto-deprecate stale packets
         run: |
           node -e "
-            const { qualityReport } = require('./mcp/dist/kernel.js');
+            const { qualityReport, packetsDir } = require('./mcp/dist/kernel.js');
             const { readFileSync, writeFileSync, readdirSync } = require('fs');
             const report = qualityReport('.');
             const stale = report.packets.filter(p => p.classification === 'stale');
+            const dir = packetsDir('.');
             for (const s of stale) {
               const shortId = s.id.split(':').pop();
-              const files = readdirSync('.agent_memory/packets').filter(f => f.includes(shortId));
+              const files = readdirSync(dir).filter(f => f.includes(shortId));
               for (const f of files) {
-                const path = \`.agent_memory/packets/\${f}\`;
+                const path = \`\${dir}/\${f}\`;
                 const packet = JSON.parse(readFileSync(path, 'utf8'));
                 const votes = packet.quality?.votes_up ?? 0;
                 if (!votes) {
@@ -67,7 +83,9 @@ jobs:
           "
         continue-on-error: true
 
-      - name: Commit updated memory artifacts
+      # Default layout: packets/ is committed on the code branch itself, same as always.
+      - name: Commit updated memory artifacts (default layout)
+        if: steps.memory-layout.outputs.mode == 'default'
         run: |
           git config user.name "kage-bot"
           git config user.email "kage-bot@users.noreply.github.com"
@@ -96,4 +114,32 @@ jobs:
             sleep $((attempt * 2))
           done
           echo "::warning::kage sync could not push after 5 retries; the next sync run will reconcile"
+          exit 0
+
+      # Migrated layout: packets/journal live on kage/memory, checked out at
+      # .agent_memory/.branch-worktree — commit and push there instead. This is why the
+      # migration matters for CI specifically: this job can no longer produce a commit on
+      # master/main that touches memory, so two sync runs (or a sync run racing a human
+      # push) can never conflict on memory again — only on kage/memory, whose append-only
+      # journal makes concurrent appends trivial to reconcile (see
+      # docs/design/BELIEF_MEMORY.md's storage section).
+      - name: Commit updated memory artifacts (memory branch)
+        if: steps.memory-layout.outputs.mode == 'branch'
+        run: |
+          cd .agent_memory/.branch-worktree
+          git config user.name "kage-bot"
+          git config user.email "kage-bot@users.noreply.github.com"
+          git add packets/ journal/
+          if git diff --cached --quiet; then
+            echo "No memory changes to commit"; exit 0
+          fi
+          git commit -m "chore: kage sync — rebuild graphs and update memory [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:kage/memory; then exit 0; fi
+            echo "push rejected (concurrent push) — reconciling, retry ${attempt}/5"
+            git fetch origin kage/memory
+            git rebase origin/kage/memory
+            sleep $((attempt * 2))
+          done
+          echo "::warning::kage sync could not push kage/memory after 5 retries; the next sync run will reconcile"
           exit 0

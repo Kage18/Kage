@@ -11,6 +11,7 @@ import { rebuildStore } from "./store/rebuild.js";
 import { detect as detectSqliteStore, sqliteStorePath, SCHEMA_VERSION as SQLITE_STORE_SCHEMA_VERSION } from "./store/sqlite.js";
 import { SCHEMA_VERSION as JSON_STORE_SCHEMA_VERSION } from "./store/json.js";
 import type { BackendKind } from "./store/types.js";
+import { MEMORY_BRANCH_NAME, memoryBranchStatus, migrateToMemoryBranch } from "./store/memory-layout.js";
 import {
   SETUP_AGENTS,
   auditClaudeMemStore,
@@ -224,6 +225,8 @@ Usage:
   kage refresh --project <dir> [--full] [--force] [--json]
   kage store status --project <dir> [--json]
   kage store rebuild --project <dir> [--backend json|sqlite] [--json]
+  kage memory-branch migrate --project <dir> [--json]   one-time, opt-in move of packets+journal onto kage/memory
+  kage memory-branch status --project <dir> [--json]    which layout (default or branch) is active
   kage merge-packet <ours> <base> <theirs>      git merge driver for .agent_memory/packets/*.md
   kage gc --project <dir> [--dry-run] [--force] [--json]
   kage compact --project <dir> [--dry-run] [--json]
@@ -1336,6 +1339,39 @@ async function main(): Promise<void> {
       console.log(`Regenerated:`);
       for (const [table, count] of Object.entries(result.counts).sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${table}: ${count}`);
       console.log(`Rebuilt at: ${result.rebuiltAt}`);
+      return;
+    }
+
+    usage();
+  }
+
+  if (command === "memory-branch") {
+    const action = args[1];
+    const projectDir = projectArg(args);
+
+    if (action === "migrate") {
+      const result = migrateToMemoryBranch(projectDir);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(result.message);
+      }
+      if (!result.ok) process.exit(1);
+      return;
+    }
+
+    if (action === "status") {
+      const status = memoryBranchStatus(projectDir);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+      console.log(`Memory layout for ${projectDir}`);
+      console.log(`Mode: ${status.mode}`);
+      console.log(`Branch: ${status.branch} (${status.branch_exists ? "exists" : "not created"})`);
+      console.log(`Worktree: ${status.worktree ?? "(none — memory lives in the code working tree)"}`);
+      console.log(`Packets: ${status.packets_root}`);
+      console.log(`Journal: ${status.journal_root}`);
       return;
     }
 

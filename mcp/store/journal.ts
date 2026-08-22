@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryPacket, MemoryStatus } from "../kernel.js";
+import { resolveMemoryLayout } from "./memory-layout.js";
 
 export type JournalEventKind = "superseded" | "deprecated" | "stale" | "restored" | "reverified" | "pruned";
 
@@ -41,8 +42,11 @@ export interface JournalEvent {
   removed_paths?: string[];
 }
 
+// Routes through resolveMemoryLayout (memory-layout.ts) the same way
+// kernel.ts's packetsDir does, so a migrated project's journal follows
+// packets onto the kage/memory branch worktree automatically.
 export function journalDir(projectDir: string): string {
-  return join(projectDir, ".agent_memory", "journal");
+  return join(resolveMemoryLayout(projectDir).root, "journal");
 }
 
 function monthBucket(at: string): string {
