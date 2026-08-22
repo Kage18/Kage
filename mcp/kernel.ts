@@ -4935,6 +4935,15 @@ function loadBeliefs(projectDir: string): BeliefDoc[] {
 // Any single stale or deleted-out-from-under-it citation withholds the whole belief:
 // unlike a packet's own soft/hard split, a belief is one holistic claim built on its
 // citations, so a single broken one is enough to stop serving it as settled.
+//
+// EXCEPT lineage status: a belief is a synthesis that deliberately cites historical
+// episodes, including ones later deprecated or superseded by newer packets -- citing
+// retired evidence is normal consolidation, not a sign the belief's claim is wrong.
+// recallStaleReason's terminal "packet status is deprecated/superseded" reason must
+// not withhold a belief the way it withholds the packet itself from recall. Force
+// the citation's status non-terminal before running the check, so the exact same
+// gate still catches a REAL grounding failure underneath (reports-stale flags,
+// expired freshness ttl, or the cited packet's own code having moved or been deleted).
 function beliefStaleReason(projectDir: string, belief: BeliefDoc, cache?: Map<string, MemoryPathFingerprint | null>): string | null {
   if (!belief.citedPacketPaths.length) return null;
   const missing: string[] = [];
@@ -4946,7 +4955,10 @@ function beliefStaleReason(projectDir: string, belief: BeliefDoc, cache?: Map<st
     }
     const packet = tryReadPacket(absolutePath);
     if (!packet) continue;
-    const reason = recallStaleReason(projectDir, packet, cache);
+    const groundingPacket = (packet.status === "deprecated" || packet.status === "superseded")
+      ? { ...packet, status: "approved" as const }
+      : packet;
+    const reason = recallStaleReason(projectDir, groundingPacket, cache);
     if (reason) return `cited packet ${packetPath} is stale: ${reason}`;
   }
   if (missing.length && missing.length === belief.citedPacketPaths.length) {
