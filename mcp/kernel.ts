@@ -10052,6 +10052,9 @@ export interface CompactResult {
 //  1. prune dead citations from packets and refresh their path fingerprints,
 //  2. deprecate hard-stale packets (delegating to the same severity rules as recall/gc),
 //  3. surface near-duplicate clusters for an agent to merge via kage_supersede.
+// Both transitions are append-only journal events (kinds "deprecated" / "pruned"),
+// never a rewrite of the packet file — the same journal that supersede, stale
+// marking, reverify, and gc already go through. See mcp/store/journal.ts.
 export function compactProject(projectDir: string, options: { dryRun?: boolean } = {}): CompactResult {
   ensureMemoryDirs(projectDir);
   const dryRun = options.dryRun === true;
@@ -10060,12 +10063,14 @@ export function compactProject(projectDir: string, options: { dryRun?: boolean }
   const deprecated: CompactResult["deprecated"] = [];
   const cache = new Map<string, MemoryPathFingerprint | null>();
 
-  for (const { path, packet } of entries) {
+  for (const { packet } of entries) {
     if (packet.status === "deprecated" || packet.status === "superseded") continue;
     const hardReason = recallHardStaleReason(projectDir, packet, cache);
     if (hardReason) {
       deprecated.push({ id: packet.id, title: packet.title, reason: hardReason });
-      if (!dryRun) writePacketToDisk(path, { ...packet, status: "deprecated" as const, updated_at: nowIso() });
+      if (!dryRun) {
+        appendJournalEvent(projectDir, { at: nowIso(), packet_id: packet.id, kind: "deprecated", reason: hardReason });
+      }
       continue;
     }
     const meaningful = packet.paths.filter((p) => meaningfulMemoryPath(p) && !shouldSkipRepoMemoryPath(p));
@@ -10074,15 +10079,13 @@ export function compactProject(projectDir: string, options: { dryRun?: boolean }
       const keptPaths = packet.paths.filter((p) => !missing.includes(p));
       prunedCitations.push({ id: packet.id, title: packet.title, removed_paths: missing });
       if (!dryRun) {
-        writeJson(path, {
-          ...packet,
-          paths: keptPaths,
-          freshness: {
-            ...(packet.freshness ?? {}),
-            path_fingerprints: memoryPathFingerprints(projectDir, keptPaths, `${packet.title}\n${packet.summary}\n${packet.body}`),
-            last_verified_at: nowIso(),
-          },
-          updated_at: nowIso(),
+        appendJournalEvent(projectDir, {
+          at: nowIso(),
+          packet_id: packet.id,
+          kind: "pruned",
+          refreshed_paths: keptPaths,
+          removed_paths: missing,
+          path_fingerprints: memoryPathFingerprints(projectDir, keptPaths, `${packet.title}\n${packet.summary}\n${packet.body}`),
         });
       }
     }
