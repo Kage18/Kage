@@ -1,0 +1,26 @@
+---
+type: "belief"
+title: "Code Graph Language and Framework Coverage"
+tags: ["code-graph", "multi-language", "frameworks", "routes", "confidence"]
+---
+
+# Code Graph Language and Framework Coverage
+
+**Confidence:** firm — each extension is a small, additive, verified decision, and none contradicts another; long-term robustness of the framework-specific route patterns against real-world code is not independently re-verified here.
+
+Kage's code graph is not TypeScript-only, and its non-TypeScript support was built up in deliberate, additive layers rather than a single design. Extraction runs as a tiered pipeline: TypeScript/JS files get the real TypeScript compiler AST (highest confidence, 0.9); Python, Go, Rust, Java, and Ruby get a middle tier via `web-tree-sitter` (pure WASM, no `node-gyp`) with prebuilt grammars from `tree-sitter-wasms`; and everything else — plus any file whose grammar fails to load — falls back to a generic-static indexer (`extractGenericSymbols`/`extractGenericCalls`) that works without SCIP, LSP, or tree-sitter and covers Python, Go, Rust, Ruby, PHP, Java, Kotlin, C#, C++, and Swift, extracting bounded call edges and marking test functions so those languages get more than just symbols and imports even without a language server or grammar. Because `web-tree-sitter` initializes asynchronously while the index-building functions stay synchronous, grammars are loaded once per process before any file loop begins. The tree-sitter dependency has two sharp edges worth remembering: `web-tree-sitter` must stay pinned at `^0.24.7`, because 0.25+/0.26 cannot load grammars built with the older `tree-sitter-cli` that `tree-sitter-wasms` ships; and the library mutates its own CommonJS export during `Parser.init()`, so a second `require("web-tree-sitter")` returns a broken object — the pre-init `Parser` class must be cached once and reused for every subsequent `Language.load`. Per-language native grammar packages were deliberately rejected because they run `node-gyp-build` on install, which would break the zero-friction `npx` install story.
+
+On top of that three-tier extraction layer, framework-aware route extraction was added in two passes: first for Python web frameworks (FastAPI/`APIRouter` decorators, Flask `@app.route` method lists, Django `path`/`re_path` declarations), normalizing route parameters to a `:param` form so route facts compare consistently across frameworks; then, in a second pass, for a wider mixed-language set — Rails, Laravel, Spring, Go routers, Rust routers, and ASP.NET — alongside the pre-existing Node/Express/Next and Python support, using bounded static patterns inside `extractRoutes` so large-repo indexing stays lightweight even as language coverage grows. Because extraction method genuinely varies in reliability by language, call edges carry explicit confidence/resolution metadata rather than presenting every edge as equally certain: TS-AST sits at 0.9, the tree-sitter tier at roughly 0.8/0.75 depending on how the call target resolved, and generic-static/regex resolution scores lower still (around 0.7, with weaker resolutions down at 0.55/0.32); edges resolved against an external index are marked `external_index`. Older graph artifacts without this field are hydrated with conservative confidence defaults on load, and both the code-graph query context and the viewer surface that confidence so a weak generic-language call edge is visibly less certain than a parser-backed TypeScript one.
+
+## Supporting evidence
+
+- `.agent_memory/packets/decision-generic-code-graph-calls-cover-non-typescript-repos-d48ba385.md` — base generic-static call/test extraction for ten non-TypeScript languages.
+- `.agent_memory/packets/decision-python-framework-routes-in-code-graph-d95e4d76.md` — first framework-route pass: FastAPI, Flask, Django, with normalized `:param` route params.
+- `.agent_memory/packets/decision-mixed-language-framework-routes-in-code-graph-f80a59d6.md` — second pass: Rails, Laravel, Spring, Go/Rust routers, ASP.NET, bounded via `extractRoutes`.
+- `.agent_memory/packets/decision-code-graph-calls-carry-confidence-31c3b0f2.md` — confidence/resolution metadata distinguishing AST, generic-static, and external-index call edges.
+- `.agent_memory/packets/decision-tree-sitter-tier-sits-between-ts-ast-and-regex-extraction-c31c8f33.md` — the three-tier extraction design (TS-AST / tree-sitter / regex), the async-grammar-loading-before-sync-indexing constraint, and the resolution-confidence weighting per tier.
+- `.agent_memory/packets/gotcha-web-tree-sitter-must-pair-0-24-x-with-tree-sitter-wasms-and-init-once-b77339a8.md` — the `^0.24.7` version-pin requirement and the mutated-CommonJS-export-on-init trap that forces a cached singleton `Parser`.
+
+## Contradictions / open questions
+
+None found in the cited evidence — the six decisions build on each other in a consistent order (generic call coverage → tree-sitter middle tier for five languages → Python routes → mixed-language routes → confidence metadata to communicate the resulting mix of extraction quality) without reversing one another.

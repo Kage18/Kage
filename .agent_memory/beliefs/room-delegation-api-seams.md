@@ -1,0 +1,22 @@
+---
+type: "belief"
+title: "Room Delegation-API Seams"
+tags: ["room", "delegation-api", "dependency-injection", "testing", "seams"]
+---
+
+# Room Delegation-API Seams
+
+**Confidence:** provisional — the evidence consistently shows the seam surface growing reactively, one gap at a time, as each new behavior needs to be tested without touching a real CLI; it is not clear from these packets whether the seam design has a stable target shape or will keep growing ad hoc.
+
+`DelegationApiContext` (`mcp/delegation/api.ts`) is the dependency-injection surface that lets tests exercise Room and run behavior without shelling out to a real `claude`/`codex` CLI — it started as a small set of overridable functions (`askManagerFn`, `askRoomFn` as a full pipeline override, `ensurePtyAttachedFn`, plus a few pty/run seams) and has been extended piecemeal every time a new code path needed to be testable in isolation. This matters because the gap between "has a seam" and "doesn't" directly determines what tests actually cover: room tests that only override `askManagerFn` were, for a long stretch, only ever exercising the untested `askManager` one-shot fallback leg, never the live held-session leg that production traffic actually uses (see the supervisor-lifecycle belief) — the seam existing for one leg created a false sense that the other leg was covered too. The pattern repeats at smaller scale: `resolveRoomReply`'s pty-routing test never calls `writeRoomSessionMeta`, so any change to the identity-missing fallback path needs its own `waitForRoomSessionIdentityFn` stub injected there, or the test silently eats a real multi-second wait instead of failing fast. As of the most recent packet in this set, `askRoomSupervisor` itself — the function that talks to the held, resumable headless session — still has no injectable seam of its own; fixing its empty-reply handling requires either adding a new seam or shifting to injecting the underlying child-process spawn instead. A second, related seam gap is at the data layer rather than the process layer: the context's test double has no built-in way to attach a run to a room thread's session — the real linkage runs through `room-sessions.ts`'s `active_goal_id` (a thread's active goal) plus `goal.ts`'s `attachRunToGoal`, which populates `plan.waves[].run_ids`; `GET /room`'s `suggested_next` field only reads through that chain via a purpose-built `roomSuggestedNext()` helper in `api.ts`, not through any general-purpose seam. Test authors working against this surface follow a consistent convention rather than writing task.json by hand: helpers like `settleRun`/`tempProject`/`inRoom` (seen in `manager-orchestration.test.ts`) construct a fabricated run lifecycle correctly — `createRun` requires an `agent` field, and `transitionRun` must walk the legal state chain (`briefed → dispatched → running → verifying → ready`) rather than mutating state directly — which is the expected model for any new test file that exercises `callTool()` against a fabricated run.
+
+## Supporting evidence
+
+- `.agent_memory/packets/bug_fix-delegationapicontext-mcp-delegation-api-ts-has-no-injectable-seam-for-askroomsup-d4b9a082.md` — the current seam roster on DelegationApiContext and the explicit statement that askRoomSupervisor has no seam of its own yet.
+- `.agent_memory/packets/bug_fix-existing-test-mcp-room-unified-session-test-tss-resolveroomreply-routes-a-messag-7ba291b7.md` — the pty-routing test's missing `writeRoomSessionMeta` call and the `waitForRoomSessionIdentityFn` stub gap it creates.
+- `.agent_memory/packets/decision-mcp-delegation-api-test-tss-delegationapicontext-test-seam-has-no-built-in-way-t-7c6ad5ca.md` — the seam gap for attaching a run to a room thread's session, and the `roomSuggestedNext()` helper built to work around it.
+- `.agent_memory/packets/decision-manager-orchestration-test-tss-settlerun-tempproject-inroom-helpers-are-the-righ-50c67b58.md` — the settleRun/tempProject/inRoom convention for building fabricated run lifecycles correctly against this API surface.
+
+## Contradictions / open questions
+
+- None of the cited packets contradict each other, but the pattern itself is an open question: every packet here describes a seam gap being discovered and patched reactively (usually after a related bug already shipped), never a seam being added ahead of a known future need. Whether `DelegationApiContext` will eventually get a more systematic seam (e.g. one factory function instead of a growing list of named overrides) is not addressed by any packet in this set.
