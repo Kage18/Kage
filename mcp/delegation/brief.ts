@@ -27,9 +27,22 @@ export interface BriefMemory {
   paths: string[];
 }
 
+// Beliefs-first (docs/design/BELIEF_MEMORY.md "the retrieval flip"): consolidated,
+// per-domain understanding recall ranks above episode packets. Empty when no belief
+// matches the intent — the brief falls back to `memories` as primary context, unchanged.
+export interface BriefBelief {
+  id: string;
+  title: string;
+  confidence: string;
+  summary: string;
+  path: string;
+  evidence: string[];
+}
+
 export interface BriefPlan {
   intent: string;
   type: RunType;
+  beliefs: BriefBelief[];
   memories: BriefMemory[];
   touches: string[];
   /**
@@ -177,13 +190,23 @@ function pathCorrelates(path: string, terms: string[]): boolean {
 export function compileBrief(projectDir: string, intent: string, type: RunType, limit = 5): BriefPlan {
   const notes: string[] = [];
 
-  // 1. Memory. recall() already withholds stale packets, so a brief can never carry a
-  // claim the code has moved past.
+  // 1. Memory. recall() already withholds stale packets and stale beliefs, so a brief
+  // can never carry a claim the code has moved past. Beliefs (consolidated understanding)
+  // come first; episode packets ride along as their drill-down evidence.
+  let beliefs: BriefBelief[] = [];
   let memories: BriefMemory[] = [];
   try {
     const recalled = recall(projectDir, intent, limit);
     // Provenance comes from one cached git pass, not a spawn per packet.
     const { authorById } = packetProvenance(projectDir);
+    beliefs = (recalled.beliefs ?? []).map((belief) => ({
+      id: belief.id,
+      title: belief.title,
+      confidence: belief.confidence,
+      summary: belief.summary,
+      path: belief.path,
+      evidence: belief.cited_packets,
+    }));
     memories = recalled.results.map((entry) => ({
       id: entry.packet.id,
       title: entry.packet.title,
@@ -194,6 +217,9 @@ export function compileBrief(projectDir: string, intent: string, type: RunType, 
     }));
     if (recalled.suppressed?.length) {
       notes.push(`${recalled.suppressed.length} memory item(s) withheld as stale — not included in this brief.`);
+    }
+    if (recalled.beliefs_withheld?.length) {
+      notes.push(`${recalled.beliefs_withheld.length} belief(s) withheld as stale — not included in this brief.`);
     }
   } catch {
     notes.push("Memory recall unavailable (no index yet) — briefing without repo memory.");
@@ -262,6 +288,7 @@ export function compileBrief(projectDir: string, intent: string, type: RunType, 
   return {
     intent,
     type,
+    beliefs,
     memories,
     touches: [...touches].slice(0, TOUCH_CAP),
     evidenceTouches: [...evidence],
@@ -304,7 +331,17 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
     "## What this repo already knows",
     "",
   ];
+  if (plan.beliefs.length) {
+    lines.push("_Consolidated understanding — episode packets below are drill-down evidence for these, not the primary claim._", "");
+    for (const belief of plan.beliefs) {
+      lines.push(`- **${belief.title}** (confidence: ${belief.confidence})`);
+      lines.push(`  ${belief.summary}`);
+      lines.push(`  evidenced by ${belief.evidence.length} packet(s), e.g. ${belief.evidence.slice(0, 2).join(", ") || "none cited"} · ${belief.path}`);
+    }
+    lines.push("");
+  }
   if (plan.memories.length) {
+    if (plan.beliefs.length) lines.push("_Supporting episode packets:_", "");
     for (const memory of plan.memories) {
       const who = memory.author ? `${memory.author}, ` : "";
       lines.push(`- **${memory.title}** (${who}${memory.noted_at})`);
@@ -312,7 +349,7 @@ export function renderBrief(task: TaskRecord, plan: BriefPlan, steers: string[] 
       if (memory.paths.length) lines.push(`  cites: ${memory.paths.slice(0, 4).join(", ")}`);
     }
     lines.push("", "Treat these as verified repo knowledge — they were checked against the current code. If you find one is wrong, say so in your claim.");
-  } else {
+  } else if (!plan.beliefs.length) {
     lines.push("_Nothing relevant in repo memory yet — you are the first to work here._");
   }
 
