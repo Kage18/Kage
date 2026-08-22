@@ -320,19 +320,23 @@ test("MCP kage_supersede writes memory lineage", async () => {
   // was capped) - it returns titles for confirmation, so verify the on-disk mutation
   // directly instead of trusting a wholesale echo.
   assert.equal(result.old_packet_title, "Old retry note");
-  const rereadPackets = readdirSync(join(project, ".agent_memory", "packets"))
+  // The status transition is an append-only journal event now (see mcp/store/journal.ts)
+  // — the old packet's own file stays byte-identical, so "superseded" only shows up
+  // through a reader that applies the journal overlay, e.g. kage_memory_lineage below.
+  const rereadOld = readdirSync(join(project, ".agent_memory", "packets"))
     .filter((name) => name.endsWith(".md") || name.endsWith(".json"))
     .map((name) => {
       const p = join(project, ".agent_memory", "packets", name);
       return name.endsWith(".md") ? okfConceptToPacket(readFileSync(p, "utf8")) : JSON.parse(readFileSync(p, "utf8"));
-    });
-  const rereadOld = rereadPackets.find((packet) => packet.id === oldPacket.id);
-  assert.equal(rereadOld?.status, "superseded");
+    })
+    .find((packet) => packet.id === oldPacket.id);
+  assert.equal(rereadOld?.status, "approved", "the packet file itself is never rewritten for a status transition");
 
   const lineage = await callTool("kage_memory_lineage", { project_dir: project });
   const lineageJson = JSON.parse(textContent(lineage));
   assert.equal(lineageJson.totals.chains, 1);
   assert.equal(lineageJson.chains[0].current_packet_id, replacement.id);
+  assert.ok(lineageJson.chains[0].superseded_packet_ids.includes(oldPacket.id), "lineage (journal-overlay-aware) reports the supersede");
 });
 
 test("MCP kage_graph returns evidence-backed graph facts", async () => {

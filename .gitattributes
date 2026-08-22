@@ -1,2 +1,3 @@
 .agent_memory/packets/*.md merge=kage-packet
 .agent_memory/packets/*.json merge=kage-packet
+.agent_memory/journal/*.jsonl merge=union

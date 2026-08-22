@@ -52,6 +52,7 @@ import * as ts from "typescript";
 import { createPublicCandidateBundleManifest, createSignedManifest, generateOrgRegistryManifest } from "./registry/index.js";
 import { okfConceptToPacket, packetToOkfConcept } from "./okf.js";
 import { openStore } from "./store/manifest.js";
+import { appendJournalEvent, applyJournalOverlay, loadJournalEvents, type JournalEvent } from "./store/journal.js";
 import type {
   CallEdgeRow,
   DocsFtsDoc,
@@ -4750,7 +4751,7 @@ function tryReadPacket(path: string): MemoryPacket | null {
   }
 }
 
-function loadPacketsFromDir(dir: string): MemoryPacket[] {
+function loadPacketsFromDirRaw(dir: string): MemoryPacket[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter(isPacketFile)
@@ -4761,7 +4762,7 @@ function loadPacketsFromDir(dir: string): MemoryPacket[] {
     });
 }
 
-function loadPacketEntriesFromDir(dir: string): Array<{ path: string; packet: MemoryPacket }> {
+function loadPacketEntriesFromDirRaw(dir: string): Array<{ path: string; packet: MemoryPacket }> {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter(isPacketFile)
@@ -4771,6 +4772,38 @@ function loadPacketEntriesFromDir(dir: string): Array<{ path: string; packet: Me
       const packet = tryReadPacket(path);
       return packet ? [{ path, packet }] : [];
     });
+}
+
+// Only the true packets/ dir (not pending/, org packets, personal packets, or
+// public-candidates) carries status-journal events — those other dirs hold
+// packets no supersede/stale/reverify/gc call ever targets.
+function projectDirForPacketsDir(dir: string): string | null {
+  if (basename(dir) !== "packets" || basename(dirname(dir)) !== ".agent_memory") return null;
+  return dirname(dirname(dir));
+}
+
+function overlayPacketsForDir(dir: string, packets: MemoryPacket[]): MemoryPacket[] {
+  const projectDir = projectDirForPacketsDir(dir);
+  if (!projectDir) return packets;
+  const events = loadJournalEvents(projectDir);
+  return applyJournalOverlay(packets, events);
+}
+
+// The shared loader every reader (recall staleness, gc, stale triage, pr
+// check, the viewer, OKF export) goes through. It transparently applies the
+// status journal overlay on top of each packet's on-disk baseline, so none of
+// those callers need their own overlay step. Code that MUTATES packets (the
+// supersede/stale/reverify/gc write paths themselves) must use the *Raw
+// variants above instead, so it never re-persists overlay-derived state back
+// into a packet file.
+function loadPacketsFromDir(dir: string): MemoryPacket[] {
+  return overlayPacketsForDir(dir, loadPacketsFromDirRaw(dir));
+}
+
+function loadPacketEntriesFromDir(dir: string): Array<{ path: string; packet: MemoryPacket }> {
+  const raw = loadPacketEntriesFromDirRaw(dir);
+  const overlaid = overlayPacketsForDir(dir, raw.map((entry) => entry.packet));
+  return raw.map((entry, index) => ({ path: entry.path, packet: overlaid[index] }));
 }
 
 export function loadApprovedPackets(projectDir: string): MemoryPacket[] {
@@ -9584,54 +9617,64 @@ function staleFinding(packet: MemoryPacket, reasons: string[]): StaleMemoryFindi
   };
 }
 
-// quiet: compute staleness fully (findings still drive recall withholding) but
-// skip pure-metadata rewrites (stale flags / updated_at recomputation) on disk.
-// Used on non-default git branches so concurrent branches stop conflicting on
-// cosmetic packet churn. Content changes (pruned grounding paths, i.e. the
-// citation set changed) are still persisted even in quiet mode.
-function refreshPacketStaleness(projectDir: string, options: { quiet?: boolean } = {}): { findings: StaleMemoryFinding[]; updated: number } {
+// Stale flips are recorded as append-only journal events (kind "stale" / "restored"),
+// never as a rewrite of the packet file — this is what lets refresh run on any branch
+// without generating the packet-merge conflicts a direct frontmatter rewrite used to.
+// Grounding-path pruning (dropping .kageignore'd citations) is unrelated citation
+// content, not a status flag, so it stays a direct write as before.
+function refreshPacketStaleness(projectDir: string): { findings: StaleMemoryFinding[]; updated: number } {
   const findings: StaleMemoryFinding[] = [];
   let updated = 0;
   const fingerprintCache = new Map<string, MemoryPathFingerprint | null>();
   const ignorePatterns = readKageIgnore(projectDir);
-  for (const entry of loadPacketEntriesFromDir(packetsDir(projectDir))) {
-    // Deprecated/superseded packets are end-state, not actionable — flagging "packet status
-    // is deprecated" as a stale FINDING just restates their own status and dominated the
-    // stale list (292 of 695 in the audit that prompted this). `kage gc` is where their
-    // lifecycle is handled; skip them here so the stale surface only shows things a human
-    // can still act on.
-    if (entry.packet.status === "deprecated" || entry.packet.status === "superseded") continue;
-    // Drop any .kageignore'd grounding (presentation layers etc.) from the stored packet
-    // so memory is never anchored to non-knowledge files.
+  const journalEvents = loadJournalEvents(projectDir);
+  for (const entry of loadPacketEntriesFromDirRaw(packetsDir(projectDir))) {
+    // Pruning operates on the RAW baseline packet (never the overlaid one), so the write
+    // below can never bake journal-derived quality/freshness fields into the packet file.
     const pruned = prunePacketGroundingPaths(entry.packet, ignorePatterns);
-    const packet = pruned ?? entry.packet;
+    // Staleness must be judged against the OVERLAID packet — a prior "reverified" event
+    // refreshed this packet's fingerprints in the journal, not on disk, so checking the
+    // raw baseline's (now-stale-by-definition) fingerprints would immediately re-flag a
+    // just-reverified packet stale on the very next refresh.
+    const packet = applyJournalOverlay([pruned ?? entry.packet], journalEvents)[0];
+    // Deprecated/superseded packets (status set by an earlier journal event counts too)
+    // are end-state, not actionable — flagging "packet status is deprecated" as a stale
+    // FINDING just restates their own status and dominated the stale list (292 of 695 in
+    // the audit that prompted this). `kage gc` is where their lifecycle is handled; skip
+    // them here so the stale surface only shows things a human can still act on.
+    if (packet.status === "deprecated" || packet.status === "superseded") continue;
     const reasons = staleMemoryReasons(projectDir, packet, fingerprintCache);
-    const oldQuality = (packet.quality ?? {}) as Record<string, unknown>;
-    const oldFreshness = (packet.freshness ?? {}) as Record<string, unknown>;
-    let nextQuality: Record<string, unknown>;
+    const overlaidQuality = packet.quality as Record<string, unknown>;
+    const currentlyStale = overlaidQuality.stale === true;
+    const currentReasons = Array.isArray(overlaidQuality.stale_reasons) ? (overlaidQuality.stale_reasons as string[]) : [];
+
     if (reasons.length) {
       const finding = staleFinding(packet, reasons);
       findings.push(finding);
-      nextQuality = {
-        ...oldQuality,
-        stale: true,
-        stale_reasons: reasons,
-        suggested_action: finding.suggested_action,
-      };
-    } else {
-      const { stale: _stale, stale_reasons: _staleReasons, suggested_action: _suggestedAction, ...rest } = oldQuality;
-      nextQuality = rest;
+      const unchanged = currentlyStale
+        && currentReasons.length === reasons.length
+        && currentReasons.every((reason, index) => reason === reasons[index]);
+      if (!unchanged) {
+        appendJournalEvent(projectDir, {
+          at: nowIso(),
+          packet_id: packet.id,
+          kind: "stale",
+          stale_reasons: reasons,
+          suggested_action: finding.suggested_action,
+        });
+        updated += 1;
+      }
+    } else if (currentlyStale) {
+      appendJournalEvent(projectDir, { at: nowIso(), packet_id: packet.id, kind: "restored" });
+      updated += 1;
     }
-    const nextFreshness = oldFreshness;
-    const contentChanged = pruned !== null;
-    const changed = contentChanged
-      || JSON.stringify(oldQuality) !== JSON.stringify(nextQuality)
-      || JSON.stringify(oldFreshness) !== JSON.stringify(nextFreshness);
-    if (changed && (!options.quiet || contentChanged)) {
+
+    if (pruned !== null) {
       writeJson(entry.path, {
-        ...packet,
-        freshness: nextFreshness,
-        quality: nextQuality,
+        ...entry.packet,
+        paths: pruned.paths,
+        source_refs: pruned.source_refs,
+        freshness: pruned.freshness,
         updated_at: nowIso(),
       });
       updated += 1;
@@ -9644,14 +9687,17 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   // Quiet-refresh on non-default branches: staleness is still computed (and
   // recall withholding still works — it recomputes staleness in memory), but
   // metadata-only packet rewrites are not persisted, so concurrent branches
-  // stop generating merge conflicts on .agent_memory/packets/*.json.
-  // --force restores full rewrites anywhere.
+  // stop generating merge conflicts on .agent_memory/packets/*.json. Stale flips
+  // now travel through the append-only status journal (refreshPacketStaleness),
+  // which is merge-safe on any branch, so `quiet` no longer changes what that
+  // pass persists — the flag is kept only for the reported quiet_refresh field
+  // and for `onNonDefaultBranch` callers elsewhere that still branch on it.
   const quiet = !options.force && onNonDefaultBranch(projectDir);
   const detailedIndex = indexProjectDetailed(projectDir, { full: options.full });
   const index = detailedIndex.result;
   let codeGraph = detailedIndex.codeGraph;
   let knowledgeGraph = detailedIndex.knowledgeGraph;
-  const stale = refreshPacketStaleness(projectDir, { quiet });
+  const stale = refreshPacketStaleness(projectDir);
   let indexes = index.indexes;
   if (stale.updated > 0) {
     const rebuilt = buildGraphIndexes(projectDir, { forceCodeGraph: options.full });
@@ -9684,9 +9730,6 @@ export function refreshProject(projectDir: string, options: { full?: boolean; fo
   writeJson(join(reportsDir(projectDir), "context-slots.json"), kageContextSlots(projectDir));
   writeJson(join(reportsDir(projectDir), "handoff.json"), kageMemoryHandoff(projectDir));
   const nextActions: string[] = [];
-  if (quiet && stale.findings.length) {
-    nextActions.push("Quiet refresh (non-default branch): stale flags were computed in memory but not written to packet files. Run `kage refresh --force` to persist them.");
-  }
   if (stale.findings.length) nextActions.push("Update, verify, or supersede stale repo memories before relying on them.");
   if (!validation.ok) nextActions.push("Fix validation errors before merging or sharing memory.");
   if (validation.warnings.length) nextActions.push("Review validation warnings for grounding, indexes, or generated artifacts.");
@@ -9818,8 +9861,9 @@ export function gcProject(projectDir: string, options: { dryRun?: boolean; force
       deleted.push({ id: packet.id, title: packet.title });
     } else {
       if (!options.dryRun) {
-        const updated = { ...packet, status: "deprecated" as const, updated_at: nowIso() };
-        writeJson(path, updated);
+        // Append-only: gc records the deprecation as a journal event instead of
+        // rewriting the packet file — see mcp/store/journal.ts.
+        appendJournalEvent(projectDir, { at: nowIso(), packet_id: packet.id, kind: "deprecated", reason: reasons[0] });
       }
       deprecated.push({ id: packet.id, title: packet.title, reason: reasons[0] });
     }
@@ -20074,6 +20118,7 @@ export function initProject(
     installClaudeSettings(projectDir);
   }
   const gitAttributes = ensurePacketMergeAttributes(projectDir);
+  ensureJournalMergeAttributes(projectDir);
   const index = indexProject(projectDir, { graphs: false });
   const validation = validateProject(projectDir);
   const sampleRecall = recallFromPackets("how do I run tests", loadApprovedPackets(projectDir), 5, "Repo Memory");
@@ -20266,6 +20311,36 @@ export function ensurePacketMergeAttributes(projectDir: string): { path: string;
   }
   const prefix = existing.length ? (existing.endsWith("\n") ? existing : `${existing}\n`) : "";
   writeFileSync(path, `${prefix}${PACKET_MERGE_ATTRIBUTE_LINE}\n`, "utf8");
+  return { path, changed: true };
+}
+
+// git's default line-based merge treats two branches each appending one line
+// at end-of-file as an *ambiguous* insertion point (both hunks anchor to the
+// same last line of the common ancestor) and conflicts rather than combining
+// them — confirmed empirically, not just theory: two branches independently
+// appending one JSONL line each to the same seeded events-*.jsonl file produce
+// a real CONFLICT under git's default strategy. `merge=union` is a low-level
+// merge driver built into git itself (no `git config` registration needed,
+// unlike kage-packet above) that takes the union of both sides' lines instead,
+// which is exactly what an append-only journal needs.
+export const JOURNAL_MERGE_ATTRIBUTE_LINE = ".agent_memory/journal/*.jsonl merge=union";
+
+// Idempotently wire .gitattributes so the append-only status journal uses
+// git's built-in union merge driver. Mirrors ensurePacketMergeAttributes.
+export function ensureJournalMergeAttributes(projectDir: string): { path: string; changed: boolean } {
+  const path = join(projectDir, ".gitattributes");
+  const existing = safeReadText(path) ?? "";
+  const lines = existing.split(/\r?\n/);
+  const pattern = /^\.agent_memory\/journal\/\*\.jsonl\s+merge=/;
+  const index = lines.findIndex((line) => pattern.test(line.trim()));
+  if (index !== -1) {
+    if (lines[index].trim() === JOURNAL_MERGE_ATTRIBUTE_LINE) return { path, changed: false };
+    lines[index] = JOURNAL_MERGE_ATTRIBUTE_LINE;
+    writeFileSync(path, `${lines.join("\n").replace(/\n+$/, "")}\n`, "utf8");
+    return { path, changed: true };
+  }
+  const prefix = existing.length ? (existing.endsWith("\n") ? existing : `${existing}\n`) : "";
+  writeFileSync(path, `${prefix}${JOURNAL_MERGE_ATTRIBUTE_LINE}\n`, "utf8");
   return { path, changed: true };
 }
 
@@ -20847,16 +20922,18 @@ export function reverifyMemory(projectDir: string, packetId: string): ReverifyMe
   }
   const presentPaths = citedPaths.filter((path) => !result.missing_paths.includes(path));
   const now = nowIso();
-  const freshness = { ...(packet.freshness ?? {}) } as Record<string, unknown>;
-  freshness.path_fingerprints = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
-  freshness.last_verified_at = now;
-  const { stale: _stale, stale_reasons: _staleReasons, suggested_action: _suggestedAction, ...nextQuality } = quality;
-  writeJson(entry.path, {
-    ...packet,
-    paths: presentPaths.length ? presentPaths : packet.paths,
-    freshness,
-    quality: { ...nextQuality, reverified_at: now },
-    updated_at: now,
+  const pathFingerprints = memoryPathFingerprints(projectDir, presentPaths, `${packet.title}\n${packet.summary}\n${packet.body}`);
+  // Append-only: reverify records a "reverified" journal event instead of
+  // rewriting the packet file. Readers reconstruct the refreshed paths,
+  // fingerprints, and cleared stale flags via the journal overlay applied at
+  // load time (applyJournalOverlay) — see mcp/store/journal.ts.
+  appendJournalEvent(projectDir, {
+    at: now,
+    packet_id: packet.id,
+    kind: "reverified",
+    refreshed_paths: presentPaths.length ? presentPaths : packet.paths,
+    missing_paths: result.missing_paths,
+    path_fingerprints: pathFingerprints,
   });
   result.refreshed_paths = presentPaths;
   result.ok = true;
@@ -20879,7 +20956,12 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     };
   }
 
-  const entries = loadPacketEntriesFromDir(packetsDir(projectDir));
+  // Raw (never overlaid): the whole point of this function is that superseding
+  // never rewrites oldPacket's or replacementPacket's file again — it appends one
+  // journal event instead. Loading the overlaid view here would risk re-persisting
+  // some OTHER packet's journal-derived fields the moment a contradiction-clearing
+  // write below touches it.
+  const entries = loadPacketEntriesFromDirRaw(packetsDir(projectDir));
   const oldEntry = entries.find((entry) => entry.packet.id === oldPacketId);
   const replacementEntry = entries.find((entry) => entry.packet.id === replacementPacketId);
   const errors: string[] = [];
@@ -20903,27 +20985,46 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     warnings.push(`Replacement packet status is ${replacementPacket.status}; approved replacements are safest for recall.`);
   }
   const at = nowIso();
-  oldPacket.status = "superseded";
-  oldPacket.updated_at = at;
-  oldPacket.quality = {
-    ...oldPacket.quality,
-    superseded_by: replacementPacket.id,
-    superseded_reason: trimmedReason,
-  };
-  oldPacket.freshness = {
-    ...oldPacket.freshness,
-    superseded_at: at,
-    superseded_by: replacementPacket.id,
-    superseded_reason: trimmedReason,
-  };
-  upsertPacketEdge(oldPacket, "superseded_by", replacementPacket.id, trimmedReason, at);
+  // Append-only: the supersede transition is one journal event on the old packet.
+  // Neither packet file is rewritten for it — readers reconstruct status,
+  // quality.superseded_by, and freshness.superseded_* via the journal overlay.
+  appendJournalEvent(projectDir, {
+    at,
+    packet_id: oldPacket.id,
+    kind: "superseded",
+    replacement_packet_id: replacementPacket.id,
+    reason: trimmedReason,
+  });
 
-  replacementPacket.updated_at = at;
-  upsertPacketEdge(replacementPacket, "supersedes", oldPacket.id, trimmedReason, at);
+  // In-memory-only overlaid copies for the return value and audit record — never
+  // written back to oldEntry.path or replacementEntry.path.
+  const overlaidOld: MemoryPacket = {
+    ...oldPacket,
+    status: "superseded",
+    updated_at: at,
+    quality: { ...oldPacket.quality, superseded_by: replacementPacket.id, superseded_reason: trimmedReason },
+    freshness: {
+      ...oldPacket.freshness,
+      superseded_at: at,
+      superseded_by: replacementPacket.id,
+      superseded_reason: trimmedReason,
+    },
+    edges: [...oldPacket.edges],
+  };
+  const overlaidReplacement: MemoryPacket = {
+    ...replacementPacket,
+    updated_at: at,
+    quality: { ...replacementPacket.quality },
+    freshness: { ...replacementPacket.freshness },
+    edges: [...replacementPacket.edges],
+  };
+  upsertPacketEdge(overlaidReplacement, "supersedes", oldPacket.id, trimmedReason, at);
 
-  // Superseding resolves any recorded contradiction involving the retired
-  // packet: drop the old id from every other packet's quality.contradicts, and
-  // clear the old packet's own contradicts list (it is no longer live memory).
+  // Superseding resolves any recorded contradiction involving the retired packet:
+  // drop the old id from every other packet's quality.contradicts. This is
+  // contradiction bookkeeping, not the supersede status itself, so it stays a
+  // direct write (it never touches the OLD packet's own file, which stays
+  // byte-identical — the old packet is retired memory, kept only as history).
   const clearContradiction = (packet: MemoryPacket): boolean => {
     const quality = (packet.quality ?? {}) as Record<string, unknown>;
     const existing = Array.isArray(quality.contradicts) ? (quality.contradicts as string[]) : [];
@@ -20936,16 +21037,12 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     packet.updated_at = at;
     return true;
   };
-  clearContradiction(oldPacket);
-  clearContradiction(replacementPacket);
-
-  writeJson(oldEntry!.path, oldPacket);
-  writeJson(replacementEntry!.path, replacementPacket);
+  if (clearContradiction(replacementPacket)) writeJson(replacementEntry!.path, replacementPacket);
   for (const entry of entries) {
     if (entry.packet.id === oldPacket.id || entry.packet.id === replacementPacket.id) continue;
     if (clearContradiction(entry.packet)) writeJson(entry.path, entry.packet);
   }
-  recordMemoryAudit(projectDir, "supersede", [oldPacket, replacementPacket], {
+  recordMemoryAudit(projectDir, "supersede", [overlaidOld, overlaidReplacement], {
     old_packet_id: oldPacket.id,
     replacement_packet_id: replacementPacket.id,
     reason: trimmedReason,
@@ -20960,8 +21057,8 @@ export function supersedeMemory(projectDir: string, oldPacketId: string, replace
     old_packet_id: oldPacket.id,
     replacement_packet_id: replacementPacket.id,
     reason: trimmedReason,
-    old_packet: oldPacket,
-    replacement_packet: replacementPacket,
+    old_packet: overlaidOld,
+    replacement_packet: overlaidReplacement,
     old_path: oldEntry!.path,
     replacement_path: replacementEntry!.path,
     errors: [],
