@@ -1,11 +1,12 @@
 // Append-only status journal for packet lifecycle transitions.
 //
-// Supersede, stale marking, reverify, and gc's deprecation used to rewrite a
-// packet's frontmatter in place — the rewrite class that turns every one of
-// those calls into a merge conflict the moment two branches touch the same
-// packet. This module replaces the rewrite with an append: each transition
-// becomes one JSONL line in a per-month file under `.agent_memory/journal/`,
-// and the packet file itself is never touched for these transitions.
+// Supersede, stale marking, reverify, gc's deprecation, and compact's
+// hard-stale deprecation / dead-citation pruning used to rewrite a packet's
+// frontmatter in place — the rewrite class that turns every one of those
+// calls into a merge conflict the moment two branches touch the same packet.
+// This module replaces the rewrite with an append: each transition becomes
+// one JSONL line in a per-month file under `.agent_memory/journal/`, and the
+// packet file itself is never touched for these transitions.
 //
 // Readers reconstruct the current status by folding a packet's events onto
 // its on-disk baseline at load time (applyJournalOverlay) — the packet file
@@ -19,7 +20,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from "node:path";
 import type { MemoryPacket, MemoryStatus } from "../kernel.js";
 
-export type JournalEventKind = "superseded" | "deprecated" | "stale" | "restored" | "reverified";
+export type JournalEventKind = "superseded" | "deprecated" | "stale" | "restored" | "reverified" | "pruned";
 
 export interface JournalEvent {
   id: string;
@@ -32,10 +33,12 @@ export interface JournalEvent {
   // stale
   stale_reasons?: string[];
   suggested_action?: string;
-  // reverified
+  // reverified / pruned
   refreshed_paths?: string[];
   missing_paths?: string[];
   path_fingerprints?: unknown[];
+  // pruned
+  removed_paths?: string[];
 }
 
 export function journalDir(projectDir: string): string {
@@ -160,6 +163,21 @@ function foldEvent(packet: MemoryPacket, event: JournalEvent): MemoryPacket {
         },
       };
     }
+    case "pruned":
+      // Unlike "reverified" (which only widens/refreshes an agent-confirmed citation
+      // set and therefore never intentionally empties it), compact's dead-citation
+      // pruning can legitimately drop every path a packet cited -- so an empty
+      // refreshed_paths must still win over the baseline, not fall back to it.
+      return {
+        ...packet,
+        updated_at,
+        paths: event.refreshed_paths !== undefined ? event.refreshed_paths : packet.paths,
+        freshness: {
+          ...packet.freshness,
+          last_verified_at: event.at,
+          ...(event.path_fingerprints ? { path_fingerprints: event.path_fingerprints } : {}),
+        },
+      };
     default:
       return packet;
   }
