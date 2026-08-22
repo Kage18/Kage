@@ -98,3 +98,36 @@ feel like a person who knows the repo: it answers from its model, not its diary.
 - Does the sleep run nightly, on merge-count thresholds, or manually at first?
 - Do beliefs ship to the public OKF bundle (they are the most shareable artifact —
   but also the most opinionated)?
+
+---
+
+## Storage architecture — the scale layer (added 2026-08-22, owner: "not scalable")
+
+The failure evidence (2026-08-22): a master merge hit 127 conflicts, all memory files —
+a sync bot's wholesale index/metadata rewrites against a working branch's verified
+packets. Diagnosis: git-as-the-only-database plus derived state in the working tree
+plus in-place rewrites. The kernel and OKF are substrate-independent and stay.
+
+**Laws of the scalable store:**
+
+1. **Episodes are append-only, forever.** Status changes (supersede, stale, reverified
+   grounding) append event records to a journal; packet files are write-once. Appends
+   with unique ids cannot conflict; rewrites are what conflicted.
+2. **Derived state is never committed.** Indexes, code graph, knowledge graph, metrics
+   are local artifacts, rebuilt from the ledger on demand (`kage store rebuild` is the
+   existing mechanism). The repo carries knowledge, not caches of knowledge.
+3. **Memory leaves the code's working tree** once (a dedicated memory branch or side
+   repo): code history stays code; memory churn localizes; OKF export remains the
+   portable audit trail.
+4. **The sqlite store is the working source** behind the existing StoreBackend seam;
+   the markdown ledger is its durable, reviewable journal — not the other way around.
+5. **Beliefs are the only rewritten documents** (owned by the sleep cycle), so rewrite
+   conflicts become rare and meaningful.
+6. **Team scale beyond git is a sync service** — the paid tier, not the wedge. Solo and
+   small teams stay local-first, no accounts.
+
+**Phasing:** P1 = laws 1–2 (kills the observed conflict class outright, no install
+breakage: decommit derived dirs + append-only status journal with read-time overlay).
+P2 = law 3 (memory branch migration + tooling). P3 = law 4 (store-as-source flip).
+P4 = beliefs + sleep cycle (the consolidation layer above). Each phase lands as
+kernel-verified runs; nothing here is built until its phase's goal runs.
