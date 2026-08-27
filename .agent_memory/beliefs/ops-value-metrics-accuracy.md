@@ -2,6 +2,8 @@
 type: "belief"
 title: "Honest value and cost accounting in Kage's self-reported metrics"
 tags: ["metrics", "cost", "value-ledger", "pricing", "gains", "honesty", "KAGE_USD_PER_MTOK"]
+snapshot_at: "2026-08-27T16:13:28.417Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-savings-estimate-3-1m-sonnet-default-was-15-opus-5x-overstated-kage-usd-per-mtok-85a1d77f.md","sha256":"c950f13d7bb5558406671474d6a149f64aefb39dc895806026c4edffe8e676b1","size":8480},{"path":".agent_memory/packets/bug_fix-metrics-json-the-file-the-memory-tabs-health-strip-reads-was-previously-written--86a4c8eb.md","sha256":"e986c82a095ea609d8cb33c5848a73644c5453404be9082a1f888b297c5c33b7","size":18442}]
 ---
 
 # Honest value and cost accounting in Kage's self-reported metrics

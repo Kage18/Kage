@@ -2,6 +2,8 @@
 type: "belief"
 title: "Liveness Tracking Under Parallel Dispatch"
 tags: ["verification", "liveness", "supervisor_pid", "parallel-dispatch", "git-worktree", "honesty"]
+snapshot_at: "2026-08-27T16:13:28.469Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-every-verifying-run-falsely-displays-as-dropped-livestate-checks-the-agent-pid-b-94df3da3.md","sha256":"192ff428adc3289dfe9abe8e62a9d49024b17f615c5e70471625d96c4c7d56db","size":10884},{"path":".agent_memory/packets/bug_fix-dispatchrun-executes-a-runs-entire-life-agent-work-verification-before-returning-d9ac46c8.md","sha256":"ed57121e24c347e6ef67fcf95202b35cedd499fcb06a76a350943a6208816612","size":14096},{"path":".agent_memory/packets/bug_fix-livestates-inflight-check-running-dispatched-verifying-must-never-rely-on-agent--4b117b72.md","sha256":"9b06931a1c90eecb3a9c3a8382bdfe8674ce248188109d4208ad4322a23543fa","size":15110},{"path":".agent_memory/packets/bug_fix-parallel-dispatch-exposed-two-honesty-gaps-transient-git-failure-silently-sandbo-73279ec2.md","sha256":"7fcd73516ec058a1ea724d285fb7bbd8ffc27d09c4ad218afdcdc19d9f1825ca","size":13619}]
 ---
 
 # Liveness Tracking Under Parallel Dispatch

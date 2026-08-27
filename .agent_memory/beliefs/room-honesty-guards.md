@@ -2,6 +2,8 @@
 type: "belief"
 title: "Room Honesty Guards"
 tags: ["room", "honesty", "liveness", "timeout", "verification"]
+snapshot_at: "2026-08-27T16:13:28.447Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-isroomptylives-own-status-probe-room-pty-ts-only-checks-that-the-pty-process-soc-56a945a8.md","sha256":"1c1e74b03e858d56b4db4d0f3c6826f13a219e50067fd780424e0bcfb0ba56d9","size":11792},{"path":".agent_memory/packets/bug_fix-superviserooms-firstturnpending-room-supervisor-ts-was-previously-tied-to-digest-84719acd.md","sha256":"d5da718660c4597d49aa12b4737e3653d344fb3327d1cf385de36bad506cdcc8","size":12503},{"path":".agent_memory/packets/gotcha-delegation-api-test-tss-room-queue-race-test-can-fail-under-full-suite-load-but--cc0cb237.md","sha256":"1a97e2184e9fdec9aa2cfb462a9ec2afaa8852e70f07d35577180e0a6ee55462","size":7288},{"path":".agent_memory/packets/bug_fix-the-room-never-dispatched-until-now-headless-managers-need-allowedtools-reaprun--3126bffa.md","sha256":"6723e3e473623565bc12d4d3cbdc37c504d4cc9971e3c857abc02eb6251119ec","size":12704}]
 ---
 
 # Room Honesty Guards

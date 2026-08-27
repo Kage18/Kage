@@ -2,6 +2,8 @@
 type: "belief"
 title: "Process Liveness and Kill Semantics"
 tags: ["process", "spawn", "tree-kill", "liveness", "supervisor", "pty"]
+snapshot_at: "2026-08-27T16:13:28.397Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-process-kill-pgid-0-signal-0-to-a-negative-pid-is-the-correct-liveness-probe-for-d7493a43.md","sha256":"6d199eb7771bc905a18936c8bc373e843bf3cd46146bb40ed86a1746467e4247","size":11539},{"path":".agent_memory/packets/bug_fix-spawnsyncs-own-timeout-killsignal-mechanism-only-ever-signals-the-single-pid-it--3253a869.md","sha256":"0e225bbda596d86c41f9d52848d2e4783ef1b0d6342a51894a92a2ffbac2b505","size":12096},{"path":".agent_memory/packets/bug_fix-spawnwithtreekills-spawnoptions-object-previously-had-no-explicit-env-key-at-all-7e1b9fd5.md","sha256":"ebfa7da36702c7fb9bca42ecf9b5464501811e79e75841fc45fa5f93970e4057","size":9915},{"path":".agent_memory/packets/bug_fix-the-reported-6-minute-timeout-blank-turn-bug-is-in-mcp-delegation-api-tss-resolv-11f82b98.md","sha256":"cda410b813128e6d4db93917cdb325c9d26b78c952c33de7b9fba7b7b6256a77","size":12671},{"path":".agent_memory/packets/decision-run-pty-tss-take-over-pty-runs-directly-in-the-calling-daemon-process-unlike-roo-8c63353d.md","sha256":"20db7a02faab79812345517d19be9ddd2ae881d8e600ba4f611b53132866633b","size":13988},{"path":".agent_memory/packets/negative_result-rejected-approach-fix-project-switching-in-the-app-it-fails-with-the-daemon-did--d53b6300.md","sha256":"e08356fb9ce0aa199cad2786a241c15c915b8a58e03946b319505fcc20596cbc","size":8820}]
 ---
 
 # Process Liveness and Kill Semantics

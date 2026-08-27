@@ -2,6 +2,8 @@
 type: "belief"
 title: "Chat/Session Continuity: Resume the Real Session, Never Restart"
 tags: ["session-continuity", "sessionId", "resume", "steer", "adapter", "supervisor"]
+snapshot_at: "2026-08-27T16:13:28.461Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-steering-must-resume-the-same-agent-session-not-restart-a-new-one-184320ba.md","sha256":"a0f5214c5a120b5684b0037120e49213c38674a48d9fe8c0c3ae6815ce857c49","size":12527},{"path":".agent_memory/packets/bug_fix-adapterliveinputs-sessionid-start-fresh-under-a-chosen-id-and-resumesessionid-r-f5454e15.md","sha256":"a116a299ae1c5dbbd54cafa828fe05a51307a258121cac1a07411ba452b88e9a","size":14151},{"path":".agent_memory/packets/decision-agent-session-id-is-now-patched-to-disk-the-moment-sessionidfrom-line-first-reso-584c14c1.md","sha256":"d05c7104d4bafca25382dec9029bb55f53265d256b3f5ba774fdd49b78596976","size":11968},{"path":".agent_memory/packets/decision-mcp-delegation-api-tss-resolveroomreply-only-tries-a-live-held-open-session-with-a02bd27d.md","sha256":"6aac1434055a1263012ecf4dea30cb59ab70527ae193d9ff254ea50c08332586","size":19659}]
 ---
 
 # Chat/Session Continuity: Resume the Real Session, Never Restart

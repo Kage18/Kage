@@ -76,8 +76,20 @@ feel like a person who knows the repo: it answers from its model, not its diary.
   vendor-neutral, markdown-directory-as-graph) validates repo-committed files; the
   team-share and no-lock-in promises survive intact.
 - **The store (node:sqlite) stays the index** — beliefs get indexed like packets.
-- **Verification stays the law** — a belief that cites moved code goes stale like
-  any packet; the sleep cycle is itself a verified run.
+- **Verification stays the law, judged against a snapshot** — a belief's staleness
+  is compared against citation fingerprints the belief itself captured at its own
+  draft/revision time, not re-derived live from each cited packet's own current
+  citations on every recall (a live two-hop check cascaded false-positive staleness
+  from monolithic hot files like `kernel.ts`, which nearly every merge touches
+  somewhere, regardless of whether the belief's specific claim was still true).
+  The tradeoff, named plainly: a belief only goes stale when one of its own cited
+  packets is deleted, or that packet's own file content changes since the snapshot
+  (e.g. it was re-verified or edited) — never from an edit to code the packet cites
+  downstream, however and wherever that edit lands. Staleness is therefore tied to
+  belief revision cadence, not to what changed in the repo since the last recall:
+  the comparison baseline only moves when the belief is next (re)snapshotted. The
+  sleep cycle is itself a verified run, and re-snapshotting on every draft/revision
+  is what keeps that cadence from drifting too far behind reality.
 - **RAG is explicitly rejected** as the primary memory: retrieval is not memory,
   and embeddings over sediment amplify noise. (Embedding recall may still assist
   *inside* layers as an index detail.)

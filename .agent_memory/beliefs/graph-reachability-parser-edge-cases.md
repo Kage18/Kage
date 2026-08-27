@@ -2,6 +2,8 @@
 type: "belief"
 title: "Reachability Checker Parser Edge Cases"
 tags: ["reachability", "delegation", "static-analysis", "parser", "false-positives"]
+snapshot_at: "2026-08-27T16:13:28.391Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-reachability-tss-analyze-previously-had-no-concept-of-module-level-reachability--258007c4.md","sha256":"9ac6f97248e74e37b5f3adf2ba10f5b7c8dbf8369e1cad41cc0b85b60f079632","size":15286},{"path":".agent_memory/packets/bug_fix-the-import-graph-resolution-added-to-reachability-ts-parsedfile-importedfiles-re-2d586c68.md","sha256":"78d5057c4e4287cc724d52e2b47bbb3d87a77493203dd79eb4f3b0df6e169896","size":14322},{"path":".agent_memory/packets/bug_fix-reachability-tss-declaration-header-line-skip-used-to-be-a-set-string-of-file-426fafdf.md","sha256":"98127dba41c40a60b5e299bdf4eb3d03105cb7967fc545d8529dac1319966134","size":16873},{"path":".agent_memory/packets/bug_fix-reachability-tss-stripforbracecounting-had-a-real-bug-pairing-backticks-naively--5e0fc641.md","sha256":"dc3852c83a2329bdd06713a2277d65b1a985cb17e65daf0ddcb48fce0ff80786","size":16994},{"path":".agent_memory/packets/bug_fix-reachability-tss-write-colon-literal-regex-bname-s-matched-a-ternary-conditio-3a3f5c45.md","sha256":"c7685f4f528bef2033c16a2f3cbc9f903ce9a51c6e36eea5abd7b369c0c3a079","size":15595}]
 ---
 
 # Reachability Checker Parser Edge Cases

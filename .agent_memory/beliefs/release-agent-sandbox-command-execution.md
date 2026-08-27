@@ -2,6 +2,8 @@
 type: "belief"
 title: "Release Verification: Dispatched-Agent Sandbox Command Execution"
 tags: ["release", "sandbox", "dispatch", "bash", "verification", "gotcha"]
+snapshot_at: "2026-08-27T16:13:28.430Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-this-delegated-agent-sandbox-denies-all-non-trivial-bash-commands-npm-npx-tsc-pi-0b9527c6.md","sha256":"164148b337ea8849e4f44afae3135c2aec7a4584a4b50503b0259e3df133dd20","size":12113},{"path":".agent_memory/packets/bug_fix-npm-test-prefix-mcp-and-node-e-npx-are-denied-by-this-sandboxs-command-approv-7d0edd52.md","sha256":"7cec27083ea82cef6372c7744f30bff2f6c648c793b8b0032dd75b3328d67d88","size":28128},{"path":".agent_memory/packets/bug_fix-in-this-delegated-agent-sandbox-bash-is-restricted-to-a-narrow-allowlist-npm-run-b7338847.md","sha256":"6daed113c1bfeaee33060a7ff675eabc9946f61c6973e10e2da75efdd3c7806f","size":13428},{"path":".agent_memory/packets/gotcha-hired-agents-can-run-npm-node-npx-the-earlier-sandbox-denies-commands-reading-wa-adfd2eb2.md","sha256":"94377b1e19a4b0598229e65bca935bd064bdf1bdcde1c101bcd6b96880004bc3","size":8752}]
 ---
 
 # Release Verification: Dispatched-Agent Sandbox Command Execution

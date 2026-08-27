@@ -2,6 +2,8 @@
 type: "belief"
 title: "Testing-infrastructure gotchas found via dogfooding and fast test fixtures"
 tags: ["testing", "dogfood", "gotcha", "vercel-ai", "flaky-tests", "node-http", "fixture-speed"]
+snapshot_at: "2026-08-27T16:13:28.413Z"
+citation_fingerprints: [{"path":".agent_memory/packets/gotcha-oss-dogfood-found-kage-edge-cases-on-vercel-ai-2ac73a43.md","sha256":"44e13b1bb80bf4826fcdd7da392f7ce469ff59d2ba97b755e947c8eb178f5e8c","size":8293},{"path":".agent_memory/packets/gotcha-vercel-ai-pr-test-failure-was-unrelated-codemod-timeout-1a15e315.md","sha256":"fce6ecb06f4a87d9333feba9f54ac17bc38fced20ffa29ca63b946f81168f705","size":6797},{"path":".agent_memory/packets/decision-comparing-gits-own-commit-date-output-ci-ct-second-precision-against-nodes-new-44e5fa5d.md","sha256":"618d37412761cbebcf009a02368dc030afc5aac818a3508d7a8fbea57b2d4a2a","size":16882},{"path":".agent_memory/packets/decision-nodes-global-fetch-undici-silently-drops-overwrites-an-explicit-host-header-it-b5647f5c.md","sha256":"734e56a37bb862d9896f49d199c034e76c3aa8854334158f198718ac13977ef3","size":24753}]
 ---
 
 # Testing-infrastructure gotchas found via dogfooding and fast test fixtures

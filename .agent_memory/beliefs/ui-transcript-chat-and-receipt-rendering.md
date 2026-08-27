@@ -2,6 +2,8 @@
 type: "belief"
 title: "Transcript, Chat, and Receipt Rendering Must Stay Honest"
 tags: ["transcript", "chat", "receipt", "claim", "verdict", "app-client", "honesty"]
+snapshot_at: "2026-08-27T16:13:28.462Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-renderhistoryturns-fallback-no-live-pty-transcript-and-rendertranscriptturns-pri-90224571.md","sha256":"bec4de3bbbde714a36c786f3ecb6f3dfd6086e1b52028d498eaa0d91acebc26f","size":11376},{"path":".agent_memory/packets/bug_fix-the-installed-claude-cli-2-1-235-sets-claude-code-child-session-1-on-every-child-0d8f4788.md","sha256":"a73dbb57d3f7d577b625490815dffe6446f307108efd8fec8ab7ad0bfd73c914","size":12171},{"path":".agent_memory/packets/bug_fix-the-gui-must-render-structured-claim-data-not-the-clis-text-card-and-must-never--a3a6dff9.md","sha256":"e197ee943bcf0c8f61f77df7f98d9315773ee20029d39c034627e80a7f3d6bdb","size":14814}]
 ---
 
 # Transcript, Chat, and Receipt Rendering Must Stay Honest

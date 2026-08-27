@@ -142,6 +142,20 @@ interface MemoryPathFingerprint {
   symbols?: MemorySymbolFingerprint[];
 }
 
+// A belief's snapshot of one cited packet's FILE, taken at the belief's own
+// draft/revision time (docs/design/BELIEF_MEMORY.md P1a). Deliberately just a stat+hash
+// of the packet file itself -- never a re-derivation of that packet's OWN downstream
+// citations (that two-hop recursion is what cascaded false-positive staleness from
+// monolithic hot files like kernel.ts onto nearly every belief). Compared against the
+// packet's CURRENT fingerprint on every recall (beliefStaleReason); the baseline itself
+// only moves when the belief is next (re)snapshotted, which is what ties belief
+// staleness to revision cadence, not live per-recall re-derivation from cited code.
+interface BeliefCitationFingerprint {
+  path: string;
+  sha256: string;
+  size: number;
+}
+
 export interface EngineeringMemoryContext {
   fact?: string;
   why?: string;
@@ -3959,9 +3973,16 @@ function fingerprintableMemoryPath(path: string): boolean {
 // repos with many packets. Content changes always re-hash (mtime/size moves).
 const fingerprintProcessCache = new Map<string, { mtimeMs: number; size: number; fingerprint: MemoryPathFingerprint }>();
 
-function memoryPathFingerprint(projectDir: string, path: string, cache?: Map<string, MemoryPathFingerprint | null>): MemoryPathFingerprint | null {
-  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!fingerprintableMemoryPath(normalized)) return null;
+// Stat+hash a path with no policy about WHETHER it should be fingerprinted -- callers
+// decide that. memoryPathFingerprint (below) is the gated wrapper code-citation
+// fingerprinting uses; beliefCitationFingerprint (§ BELIEFS) calls this directly
+// because it deliberately fingerprints files UNDER .agent_memory/ (the cited packet
+// files themselves), which fingerprintableMemoryPath excludes.
+function rawPathFingerprint(
+  projectDir: string,
+  normalized: string,
+  cache?: Map<string, MemoryPathFingerprint | null>,
+): MemoryPathFingerprint | null {
   const cacheKey = `${projectDir}\0${normalized}`;
   if (cache?.has(cacheKey)) return cache.get(cacheKey) ?? null;
   const absolutePath = join(projectDir, normalized);
@@ -3988,6 +4009,12 @@ function memoryPathFingerprint(projectDir: string, path: string, cache?: Map<str
     cache?.set(cacheKey, null);
     return null;
   }
+}
+
+function memoryPathFingerprint(projectDir: string, path: string, cache?: Map<string, MemoryPathFingerprint | null>): MemoryPathFingerprint | null {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!fingerprintableMemoryPath(normalized)) return null;
+  return rawPathFingerprint(projectDir, normalized, cache);
 }
 
 // Symbol-anchoring is only attempted where extractSymbols (the TS/JS parser) is
@@ -4871,6 +4898,10 @@ interface BeliefDoc {
   body: string;
   path: string;
   citedPacketPaths: string[];
+  // Snapshot taken at the belief's own draft/revision time (P1a below) — empty when
+  // the belief predates this field (falls back to a weaker check in beliefStaleReason).
+  citationFingerprints: BeliefCitationFingerprint[];
+  snapshotAt: string | null;
 }
 
 const BELIEF_PACKET_CITATION = /\.agent_memory\/packets\/[\w.\-]+\.md/g;
@@ -4881,11 +4912,32 @@ function parseBeliefFrontmatterField(frontmatter: string, key: string): string |
   return match ? match[1] : null;
 }
 
+function parseBeliefCitationFingerprints(frontmatter: string): BeliefCitationFingerprint[] {
+  const match = frontmatter.match(/^citation_fingerprints:\s*(\[.*\])\s*$/m);
+  if (!match) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((item): BeliefCitationFingerprint[] => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const path = typeof record.path === "string" ? record.path : "";
+    const sha256 = typeof record.sha256 === "string" ? record.sha256 : "";
+    const size = Number(record.size ?? 0);
+    if (!path || !sha256 || !Number.isFinite(size)) return [];
+    return [{ path, sha256, size }];
+  });
+}
+
 // Beliefs are OKF-conformant markdown (frontmatter + prose), not JSON like packets —
 // hand-parsed here rather than reusing readPacketFromDisk/okfConceptToPacket, since a
-// belief is deliberately NOT a MemoryPacket (no MEMORY_TYPES entry, no per-packet
-// freshness fingerprint of its own — its staleness derives from the packets it cites;
-// see beliefStaleReason below).
+// belief is deliberately NOT a MemoryPacket (no MEMORY_TYPES entry). Its staleness is
+// judged against citationFingerprints, a snapshot the belief itself carries — not
+// re-derived from the packets it cites on every recall; see beliefStaleReason below.
 function parseBeliefFile(absolutePath: string, relativePath: string): BeliefDoc | null {
   let raw: string;
   try {
@@ -4912,6 +4964,8 @@ function parseBeliefFile(absolutePath: string, relativePath: string): BeliefDoc 
     body,
     path: relativePath,
     citedPacketPaths: unique([...body.matchAll(BELIEF_PACKET_CITATION)].map((match) => match[0])),
+    citationFingerprints: parseBeliefCitationFingerprints(frontmatter),
+    snapshotAt: parseBeliefFrontmatterField(frontmatter, "snapshot_at"),
   };
 }
 
@@ -4927,42 +4981,110 @@ function loadBeliefs(projectDir: string): BeliefDoc[] {
     });
 }
 
+// Fingerprints a belief's citation the way a packet's own cited CODE is fingerprinted
+// (stat+hash), but deliberately WITHOUT memoryPathFingerprint's .agent_memory/ exclusion
+// — here the cited path IS a packet file under .agent_memory/packets/, and that file
+// itself (not its downstream citations) is what a belief's staleness is judged against.
+function beliefCitationFingerprint(
+  projectDir: string,
+  packetPath: string,
+  cache?: Map<string, MemoryPathFingerprint | null>,
+): MemoryPathFingerprint | null {
+  const normalized = packetPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  return rawPathFingerprint(projectDir, normalized, cache);
+}
+
+// Computes the citation-fingerprint snapshot for a belief's cited packets AT THIS
+// MOMENT (docs/design/BELIEF_MEMORY.md P1a) — the belief's own draft/revision time,
+// called by writeBeliefCitationSnapshot below and by the one-time backfill migration.
+// Each cited packet's OWN file is fingerprinted directly (stat+hash, no parsing, no
+// status check); its downstream cited code is never walked here, and never walked again
+// at recall time either (see beliefStaleReason) — that recursion into a packet's OWN
+// current citations is exactly what cascaded false-positive staleness from monolithic
+// hot files (kernel.ts, delegation/*.ts) onto nearly every belief on every recall,
+// regardless of whether the belief's actual claim still held.
+export function snapshotBeliefCitationFingerprints(projectDir: string, citedPacketPaths: string[]): BeliefCitationFingerprint[] {
+  const cache = new Map<string, MemoryPathFingerprint | null>();
+  return unique(citedPacketPaths).flatMap((packetPath): BeliefCitationFingerprint[] => {
+    const fingerprint = beliefCitationFingerprint(projectDir, packetPath, cache);
+    return fingerprint ? [{ path: fingerprint.path, sha256: fingerprint.sha256, size: fingerprint.size }] : [];
+  });
+}
+
+// Rewrites one belief file's frontmatter with a fresh citation-fingerprint snapshot,
+// leaving every other frontmatter field and the whole body untouched. This IS the sleep
+// cycle write path (docs/design/BELIEF_MEMORY.md P1a item 1) — call it whenever a belief
+// is drafted or revised — and it is also the one-time backfill for beliefs drafted before
+// this field existed (item 3): re-running it is always safe, since it always reflects the
+// belief's CURRENT citations, never a stale record of a prior draft.
+export function writeBeliefCitationSnapshot(projectDir: string, beliefRelPath: string): boolean {
+  const absolutePath = join(projectDir, beliefRelPath);
+  const belief = parseBeliefFile(absolutePath, beliefRelPath);
+  if (!belief) return false;
+  const raw = readFileSync(absolutePath, "utf8");
+  const frontmatterMatch = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!frontmatterMatch) return false;
+  const rest = raw.slice(frontmatterMatch[0].length);
+  const lines = frontmatterMatch[1]
+    .split("\n")
+    .filter((line) => !/^snapshot_at:/.test(line) && !/^citation_fingerprints:/.test(line));
+  const fingerprints = snapshotBeliefCitationFingerprints(projectDir, belief.citedPacketPaths);
+  lines.push(`snapshot_at: ${JSON.stringify(new Date().toISOString())}`);
+  lines.push(`citation_fingerprints: ${JSON.stringify(fingerprints)}`);
+  writeFileSync(absolutePath, `---\n${lines.join("\n")}\n---\n${rest}`, "utf8");
+  return true;
+}
+
 // "A belief that cites moved code goes stale like any packet" (docs/design/BELIEF_MEMORY.md
-// "What stays true"). A belief cites packets, not code directly, so the check is one hop:
-// run the SAME recallStaleReason gate packets already pass on every packet the belief
-// cites (catching that packet's own cited code having moved), plus the packet-citation
-// analogue of "all referenced paths are missing" — every cited packet deleted outright.
-// Any single stale or deleted-out-from-under-it citation withholds the whole belief:
-// unlike a packet's own soft/hard split, a belief is one holistic claim built on its
-// citations, so a single broken one is enough to stop serving it as settled.
-//
-// EXCEPT lineage status: a belief is a synthesis that deliberately cites historical
-// episodes, including ones later deprecated or superseded by newer packets -- citing
-// retired evidence is normal consolidation, not a sign the belief's claim is wrong.
-// recallStaleReason's terminal "packet status is deprecated/superseded" reason must
-// not withhold a belief the way it withholds the packet itself from recall. Force
-// the citation's status non-terminal before running the check, so the exact same
-// gate still catches a REAL grounding failure underneath (reports-stale flags,
-// expired freshness ttl, or the cited packet's own code having moved or been deleted).
+// "What stays true") — but P1a changes WHAT that check compares against. The prior one-hop
+// check ran recallStaleReason on each cited packet, which recurses into that packet's OWN
+// cited code paths; on a repo where nearly every merge touches a handful of monolithic hot
+// files (kernel.ts, delegation/*.ts), that cascaded false-positive staleness onto 49/61
+// beliefs regardless of whether the belief's actual claim was still true. Now: a belief's
+// own cited packet FILE is fingerprinted directly (never its downstream citations),
+// snapshotted once at (re)draft time (snapshotBeliefCitationFingerprints /
+// writeBeliefCitationSnapshot), and compared against that SAME frozen snapshot on every
+// later recall — so an edit to a packet's cited code, however and wherever it lands,
+// never itself moves the belief, on any recall, ever. Only two things can withhold a
+// belief now: a cited packet FILE gone outright, or that file's own bytes having
+// changed since the snapshot (e.g. the packet itself was re-verified or edited) — and
+// the baseline those are judged against only moves when the belief is next
+// (re)snapshotted, which is what ties belief staleness to revision cadence instead of
+// live per-recall re-derivation. Any single missing/changed citation withholds the
+// whole belief — a belief is one holistic claim, so a single broken citation is enough.
 function beliefStaleReason(projectDir: string, belief: BeliefDoc, cache?: Map<string, MemoryPathFingerprint | null>): string | null {
   if (!belief.citedPacketPaths.length) return null;
+
+  if (!belief.citationFingerprints.length) {
+    // Drafted before this field existed, or written by a path that skipped it (e.g. a
+    // test fixture): the only check that needs no snapshot to compare against is
+    // "gone outright." Content drift is caught starting at this belief's next revision,
+    // not re-derived live here.
+    const missing = belief.citedPacketPaths.filter((path) => !existsSync(join(projectDir, path)));
+    if (missing.length === belief.citedPacketPaths.length) {
+      return `all cited packets deleted since drafting: ${missing.slice(0, 4).join(", ")}`;
+    }
+    return null;
+  }
+
+  const bySnapshotPath = new Map(belief.citationFingerprints.map((fp) => [fp.path, fp]));
   const missing: string[] = [];
+  const changed: string[] = [];
   for (const packetPath of belief.citedPacketPaths) {
-    const absolutePath = join(projectDir, packetPath);
-    if (!existsSync(absolutePath)) {
+    const snapshot = bySnapshotPath.get(packetPath);
+    if (!snapshot) continue; // cited after the last snapshot; nothing to compare drift against yet
+    const current = beliefCitationFingerprint(projectDir, packetPath, cache);
+    if (!current) {
       missing.push(packetPath);
       continue;
     }
-    const packet = tryReadPacket(absolutePath);
-    if (!packet) continue;
-    const groundingPacket = (packet.status === "deprecated" || packet.status === "superseded")
-      ? { ...packet, status: "approved" as const }
-      : packet;
-    const reason = recallStaleReason(projectDir, groundingPacket, cache);
-    if (reason) return `cited packet ${packetPath} is stale: ${reason}`;
+    if (current.sha256 !== snapshot.sha256) changed.push(packetPath);
   }
   if (missing.length && missing.length === belief.citedPacketPaths.length) {
-    return `all cited packets deleted since drafting: ${missing.slice(0, 4).join(", ")}`;
+    return `all cited packets deleted since snapshot: ${missing.slice(0, 4).join(", ")}`;
+  }
+  if (changed.length) {
+    return `cited packet content changed since snapshot: ${changed.slice(0, 4).join(", ")}`;
   }
   return null;
 }

@@ -2,6 +2,8 @@
 type: "belief"
 title: "Code Graph Language and Framework Coverage"
 tags: ["code-graph", "multi-language", "frameworks", "routes", "confidence"]
+snapshot_at: "2026-08-27T16:13:28.388Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-generic-code-graph-calls-cover-non-typescript-repos-d48ba385.md","sha256":"9418d5f8e0f922e4564af9c1f3675e9da7d5ee66f4a78729650b6cdb89497793","size":4963},{"path":".agent_memory/packets/decision-python-framework-routes-in-code-graph-d95e4d76.md","sha256":"c19f2f9a25fb78e891be48313ec9e447b549cb92b77b2c15c5f92bdae189d515","size":5176},{"path":".agent_memory/packets/decision-mixed-language-framework-routes-in-code-graph-f80a59d6.md","sha256":"bcce828c8b09d4d48e15c2eba047e8ed07260e69928f94a7b19449e942732aef","size":5892},{"path":".agent_memory/packets/decision-code-graph-calls-carry-confidence-31c3b0f2.md","sha256":"d0952ad36822ec23447450bd9f25dc904b345da580534e4b959e3cad58c7c73e","size":6451},{"path":".agent_memory/packets/decision-tree-sitter-tier-sits-between-ts-ast-and-regex-extraction-c31c8f33.md","sha256":"ea430c13a856aef053087395fce66ca4809f685d6e7743362fd999633daab276","size":9566},{"path":".agent_memory/packets/gotcha-web-tree-sitter-must-pair-0-24-x-with-tree-sitter-wasms-and-init-once-b77339a8.md","sha256":"1eb13c05f60fc2174699f147a925f48d4349f018d7a7f13a558be55cdb8bf22b","size":5804}]
 ---
 
 # Code Graph Language and Framework Coverage

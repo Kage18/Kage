@@ -2,6 +2,8 @@
 type: "belief"
 title: "Viewer layout: bounded scroll regions and explicit navigation"
 tags: ["viewer", "portal", "layout", "scroll", "inspector", "ux-bugs"]
+snapshot_at: "2026-08-27T16:13:28.423Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-bug-fix-the-viewer-inspector-could-explode-the-page-height-when-a-selected-node--95f90fca.md","sha256":"80bdbe55ecb9f7bb8787da84c1c99458e7ce470ffdd59739750c692dc95a94ee","size":4460},{"path":".agent_memory/packets/bug_fix-bug-fix-inspector-connected-relation-sections-need-their-own-scroll-containers-92bf3faa.md","sha256":"58183bf599520724f387a0a67a5fdf7c7db61b797347a423bf28060b92be0a89","size":4593},{"path":".agent_memory/packets/bug_fix-viewer-memory-page-keeps-scrollable-content-bounded-9c94491d.md","sha256":"6b1341d407fa26a69af640976257a775adc1a8325faf8d31eca7f41e9cf9f3fb","size":5048},{"path":".agent_memory/packets/bug_fix-viewer-normal-pages-use-document-scroll-not-nested-workspace-scroll-4ed18571.md","sha256":"c456e3e7eef88d86effd90d6b545bd0a9df119640d82c609759ce0a934143fe4","size":3914},{"path":".agent_memory/packets/bug_fix-viewer-selection-should-not-imply-page-navigation-0e41beca.md","sha256":"22d85de6bca5e1712de9bc88c1028756a758f74da9fd2a251f2517f0ef1493f0","size":4083},{"path":".agent_memory/packets/bug_fix-viewer-qa-repairs-make-page-actions-visible-a307bede.md","sha256":"f7f938d8d2eb72e47e1516a61ab21b2cb4af486eac670dbc33df9b34b2947f40","size":4708}]
 ---
 
 # Viewer layout: bounded scroll regions and explicit navigation

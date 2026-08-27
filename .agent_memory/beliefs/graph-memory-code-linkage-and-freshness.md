@@ -2,6 +2,8 @@
 type: "belief"
 title: "Memory-Code Linkage and Freshness Fingerprinting"
 tags: ["knowledge-graph", "staleness", "citations", "audit", "freshness", "fingerprinting"]
+snapshot_at: "2026-08-27T16:13:28.389Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-structured-memory-parser-must-preserve-dotted-commands-and-explicit-decisions-df89d93d.md","sha256":"d9f642cabf5e2631506d000b4e921e5ec0800f66fb86845097f7d37882169c24","size":6732},{"path":".agent_memory/packets/decision-citation-validation-enforced-at-agent-boundary-stale-exclusion-is-fingerprint-ba-c575beee.md","sha256":"cc23cdec0380f346ceac010df883f0be70f368b529ae5fe2ab3cea4a428e2b70","size":8031},{"path":".agent_memory/packets/runbook-freshness-fingerprints-anchor-to-named-symbols-not-just-whole-file-hash-a20a3a22.md","sha256":"c3920d2d3ae5650c91a83ac1807ded8fd88fff144b2f096ac26c492927a3204d","size":7311},{"path":".agent_memory/packets/bug_fix-linked-code-reconciliation-still-uses-source-fingerprints-after-risk-path-parser-24204434.md","sha256":"4f1ec98f76bbf81bf818f3682c344b4920c645cf72ad0939b124fa6a092336f3","size":7502},{"path":".agent_memory/packets/decision-public-source-skip-lists-remain-generic-after-risk-path-parser-fix-921fd297.md","sha256":"5ffef8cc189254b0a4fb346a47c7a2d35ef6cae8a93d1537610c21e09c433156","size":7000},{"path":".agent_memory/packets/decision-audit-trust-scoring-must-not-let-dense-graph-edges-mask-missing-context-6f292d5f.md","sha256":"50de8f8b3ee316a6c20e7f5e46303506683b2b3665fe32381cf7c3a1c56532b2","size":8056}]
 ---
 
 # Memory-Code Linkage and Freshness Fingerprinting

@@ -11,10 +11,19 @@
 // REVERT CHECK: "belief citing a deprecated-but-otherwise-grounded packet is
 // served, not withheld" fails if beliefStaleReason goes back to calling
 // recallStaleReason on the citation unmodified -- the status branch would
-// withhold the belief again. "belief citing a packet whose cited code was
-// deleted out from under it is still withheld" guards the other direction:
-// it must keep failing a reverted-forward fix that stops checking real
-// grounding failures altogether.
+// withhold the belief again.
+//
+// P1a (docs/design/BELIEF_MEMORY.md) retired the other direction of this file's
+// original second test: "belief citing a packet whose cited code was deleted
+// out from under it is still withheld" used to hold on every recall, because
+// beliefStaleReason recursed into each cited packet's OWN current citations
+// (recallStaleReason) every time. That two-hop check is exactly what cascaded
+// false-positive staleness from monolithic hot files onto 49/61 beliefs after
+// this file's original fix landed -- so it's gone. A belief's citations are now
+// fingerprinted directly (the packet FILE itself) and judged against a snapshot
+// taken at the belief's own draft/revision time, not live per-recall re-derivation
+// -- see mcp/p1a-of-the-belief.test.ts for that mechanism's full coverage,
+// including the "packet with genuinely deleted cited code" case migrated to it.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -82,7 +91,7 @@ test("belief citing a deprecated-but-otherwise-grounded packet is served, not wi
   );
 });
 
-test("belief citing a packet whose cited code was deleted out from under it is still withheld", () => {
+test("belief citing a packet whose cited code was deleted out from under it serves when the belief has no snapshot yet", () => {
   const project = tempProject();
   writeFileSync(join(project, "src", "bar.ts"), "export const bar = 1;\n", "utf8");
   const captured = capture({
@@ -95,9 +104,13 @@ test("belief citing a packet whose cited code was deleted out from under it is s
   assert.ok(captured.ok && captured.packet && captured.path, JSON.stringify(captured.errors));
   const packetPath = captured.path!;
 
-  // Genuine grounding failure: the packet's own cited code is deleted out from
-  // under it. Status stays "approved" -- this must withhold on its own merits,
-  // independent of the lineage-status carve-out above.
+  // The packet's own cited code is deleted out from under it -- a real grounding
+  // failure of the PACKET, but the belief here was never snapshotted (writeBeliefFile
+  // is a raw fixture writer with no citation_fingerprints), so beliefStaleReason has
+  // no baseline to compare drift against and falls back to "is the cited packet FILE
+  // itself gone" -- which it is not. This is the P1a tradeoff stated in
+  // docs/design/BELIEF_MEMORY.md: a packet's downstream code-citation staleness no
+  // longer cascades up to a belief that cites it, at all, ever -- snapshotted or not.
   rmSync(join(project, "src", "bar.ts"));
 
   const citedRelPath = relative(project, packetPath).replace(/\\/g, "/");
@@ -105,9 +118,6 @@ test("belief citing a packet whose cited code was deleted out from under it is s
   writeBeliefFile(project, "bar-belief-beta.md", title, citedRelPath);
 
   const result = recall(project, title, 5);
-  assert.ok(
-    result.beliefs_withheld?.some((b) => b.title === title),
-    "belief citing a packet with genuinely deleted cited code must be withheld",
-  );
-  assert.ok(!result.beliefs?.some((b) => b.title === title), "belief with a real grounding failure must not be served");
+  assert.ok(result.beliefs?.some((b) => b.title === title), "a belief with no snapshot must serve until its next revision");
+  assert.ok(!result.beliefs_withheld?.some((b) => b.title === title), "a packet's own downstream staleness must not withhold it");
 });
