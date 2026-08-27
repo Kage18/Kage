@@ -2,6 +2,8 @@
 type: "belief"
 title: "OKF is Kage's standard on-disk and interchange memory format"
 tags: ["okf", "memory-format", "standard", "interchange", "markdown", "migration"]
+snapshot_at: "2026-08-27T16:13:28.413Z"
+citation_fingerprints: [{"path":".agent_memory/packets/code_explanation-okf-adoption-mcp-okf-ts-adapter-makes-okf-the-standard-memory-format-f5b1160c.md","sha256":"6ee50ebef734eb4ab543273c6a2d3fd03347c80e4447735833a584397dd5dff9","size":14778}]
 ---
 
 # OKF is Kage's standard on-disk and interchange memory format

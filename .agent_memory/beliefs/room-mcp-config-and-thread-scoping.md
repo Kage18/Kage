@@ -2,6 +2,8 @@
 type: "belief"
 title: "Room MCP Config and Thread Scoping"
 tags: ["room", "mcp-config", "threads", "sessions", "backward-compatibility"]
+snapshot_at: "2026-08-27T16:13:28.448Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-the-kage-room-1-env-var-that-gates-delegation-tool-behavior-at-the-mcp-server-pr-b5d1a436.md","sha256":"2ec72d0fca5f62966d46a56c34091dd62ac53f9df9b759c881cc7d4ef87fd832","size":19330},{"path":".agent_memory/packets/decision-room-threads-are-conversations-not-workspaces-and-the-default-thread-never-moves-712246c4.md","sha256":"1a432774de2c090b4eed012714b1fddc03ab47754e9f136e6fbb27f563f86b9c","size":11735}]
 ---
 
 # Room MCP Config and Thread Scoping

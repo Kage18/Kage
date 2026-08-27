@@ -2,6 +2,8 @@
 type: "belief"
 title: "Checks Passed Is Not Verified"
 tags: ["verification", "claimVerdict", "trust-gate", "autonomy", "merge-gate"]
+snapshot_at: "2026-08-27T16:13:28.463Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-claimverdict-verify-ts-is-now-consumed-by-three-call-sites-maybeautomerge-ratify-5b86bbe0.md","sha256":"2e46af3ed0fb9a9bd610be7afa7bf809487c9b808a17950911c118aa36214696","size":15207},{"path":".agent_memory/packets/negative_result-rejected-approach-finish-the-every-check-passed-is-not-verified-sweep-two-more-c-d1257a60.md","sha256":"4a413068ea740c858121c90efe58e5dbfe5d3b30c0773338c6ba67b594bf42ac","size":10272},{"path":".agent_memory/packets/runbook-the-fresh-repo-honesty-property-holds-end-to-end-acceptance-test-and-how-to-re-r-64194e4d.md","sha256":"53ebb56595e991bd65e355fcc06c32cc44a9d615c0b85e5881488823f482a6a6","size":11332},{"path":".agent_memory/packets/decision-trackrecord-tss-computetrackrecord-confidencefor-the-source-of-the-8-15-43-45-44-24c0e3d3.md","sha256":"fff3a4781356c87ecfbfca8a3b3e7eb0e99af8a7f0853d0f5c274b8495c7c3d4","size":5085},{"path":".agent_memory/packets/decision-withactivity-in-api-ts-computes-claim-summary-a-formatted-p-t-checks-string-for--0205ac42.md","sha256":"9bf6657f3cd9b13a12115951aa07c1116b13bf4659d6522b75c904847eaf6df8","size":20669},{"path":".agent_memory/packets/decision-kages-run-types-defaults-any-unspecified-unrecognized-run-type-to-chore-in-three-875d659a.md","sha256":"94f9c19545b2abb9c04c688d95f31a5a598c837fba34baa4a2af854f4dd418cd","size":4741}]
 ---
 
 # Checks Passed Is Not Verified

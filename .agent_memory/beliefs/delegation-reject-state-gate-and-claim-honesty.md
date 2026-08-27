@@ -2,6 +2,8 @@
 type: "belief"
 title: "Reject State Gate and Honest Rejection Reasons"
 tags: ["delegation", "reject", "state-transitions", "negative-result", "claim", "honesty"]
+snapshot_at: "2026-08-27T16:13:28.377Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-rejectruns-dropped-state-handling-relies-on-reaprun-projectdir-runid-contract-ts-b7987668.md","sha256":"173d3b6ce473c655b8121d7f637a2445745d7258a9cdc6561e07017466b83156","size":8230},{"path":".agent_memory/packets/bug_fix-the-base-state-of-mcp-delegation-ratify-ts-and-mcp-delegation-contract-ts-in-thi-864eb8f8.md","sha256":"d6c1c8d37139bde22050bc7e5a02a8f49f31e31483c45f3ce8adcb656ef05ec7","size":8156},{"path":".agent_memory/packets/negative_result-rejected-approach-fix-rejectruns-state-gate-in-mcp-delegation-ratify-ts-bug-a-st-d18c4294.md","sha256":"b3fef61b464ba81a645138f023a42d0a3457a3fe769b5a42ddc5412503ece919","size":8873},{"path":".agent_memory/packets/negative_result-rejected-approach-add-a-one-line-comment-to-readme-md-tiny-chore-test-dispatch-cae69976.md","sha256":"fa39aea050fe99b07f792b7552c278b7b7a4254b6dfbb2212b1c6dd0127843dc","size":3453},{"path":".agent_memory/packets/negative_result-rejected-approach-fix-the-last-dispatch-76d8a693.md","sha256":"1b43e6976d6f34c71702ea375a6bb277c431094b24783c4784612a4f4d6e849b","size":3583}]
 ---
 
 # Reject State Gate and Honest Rejection Reasons

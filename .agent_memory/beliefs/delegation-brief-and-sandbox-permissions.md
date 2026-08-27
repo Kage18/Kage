@@ -2,6 +2,8 @@
 type: "belief"
 title: "Brief Compilation and Hired-Agent Sandbox Permissions"
 tags: ["delegation", "brief", "preflight", "sandbox", "permissions", "hired-agent", "worktree"]
+snapshot_at: "2026-08-27T16:13:28.374Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-pre-flight-forecast-is-the-briefs-own-prediction-and-its-dependents-are-asked-of-9c2627c3.md","sha256":"48ad3632ec5c5a7ef0e14a40dfa36265268d8fabc4647af077482b91db02dce9","size":12898},{"path":".agent_memory/packets/decision-compilebrief-createrun-renderbrief-all-work-against-a-plain-tempdir-with-no-git--3c22fc39.md","sha256":"0b5e48fb01afaf03d3e01c80d1a85a26f587ff8c4bb4ecdc4dcb1d18fe3b6268","size":13081},{"path":".agent_memory/packets/gotcha-the-citation-extractor-is-so-eager-it-fails-the-run-that-describes-it-and-briefs-e1a8bbe2.md","sha256":"08ad26fce264aa4854d88fa6d5a0ea14038156bac95229e0209f20075b10542b","size":11171},{"path":".agent_memory/packets/negative_result-rejected-approach-mcp-delegation-brief-ts-renderbrief-must-tell-hired-agents-pla-61d0738d.md","sha256":"2212c6424fd98c95938a3466f39cbc33302753e569bc254cbb82b0bde0f4eafe","size":7775},{"path":".agent_memory/packets/bug_fix-hired-agents-could-not-run-any-command-acceptedits-without-allowedtools-denies-b-93c7a109.md","sha256":"3c8677d062b453c0b557efba4405c1bb2c268ac18c34c4b3e8131e156fb877f9","size":11165},{"path":".agent_memory/packets/bug_fix-the-hired-agent-spawn-paths-own-permission-gap-no-allowedtools-blocks-the-hired--c3653f2c.md","sha256":"8660578c68bea24dcd39f0dd5082139228619da814940966c4e467b598092cfe","size":14107}]
 ---
 
 # Brief Compilation and Hired-Agent Sandbox Permissions

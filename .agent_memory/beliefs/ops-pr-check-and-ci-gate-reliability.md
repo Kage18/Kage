@@ -2,6 +2,8 @@
 type: "belief"
 title: "PR-check gating and Kage's self-hosted CI reliability"
 tags: ["ci", "pr-check", "stale-memory", "kage-pr", "kage-sync", "workflow", "session-distillation"]
+snapshot_at: "2026-08-27T16:13:28.414Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-ci-kage-pr-check-must-block-only-on-hard-stale-memory-f9e2c269.md","sha256":"3b22b213fb6160e5ea511b08a3f78cb444536504d5d870272b92deeb071dbc9a","size":5381},{"path":".agent_memory/packets/bug_fix-ci-kage-pr-check-blocks-only-on-hard-stale-memory-still-true-in-v2-2-0-63f0c191.md","sha256":"5dd79292b7b86ff23902b3077e80848e1c2beff99c965220b6e03196bd44d0b6","size":5592},{"path":".agent_memory/packets/bug_fix-pr-check-should-ignore-superseded-stale-packets-f1e59b8a.md","sha256":"b4fe9a862a55b5e452dfa46d35bc7dc036bc08bf4e5f585afbfbbae72315d684","size":6565},{"path":".agent_memory/packets/decision-pr-checks-now-block-undistilled-session-learnings-bb54682d.md","sha256":"ef58fed6a50f29c7a0a35483a6e3b48325b53709f22de3437d588dea40c746ef","size":7193},{"path":".agent_memory/packets/bug_fix-fix-kage-pr-check-ci-max-turns-failure-f836cbf0.md","sha256":"5aa24f7a350814a322fbe1a0bc38fae7c197d7841192ffa87890026680aa5472","size":4675},{"path":".agent_memory/packets/bug_fix-kage-sync-rebase-needs-the-kage-sync-identity-fallback-ci-had-no-git-identity-3a43ed2b.md","sha256":"c9e5cd90b63cb4495ae35f70ab656d1119d2ea68eda460a02c609903c877dce0","size":6129},{"path":".agent_memory/packets/bug_fix-kage-sync-ci-fix-rebase-identity-fallback-self-healing-non-fast-forward-push-ret-53e8be25.md","sha256":"bff73feb60ec410db648e6ec2d467f1982ebd8c3359727e7e652df9086776e33","size":6534}]
 ---
 
 # PR-check gating and Kage's self-hosted CI reliability

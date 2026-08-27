@@ -2,6 +2,8 @@
 type: "belief"
 title: "Room Delegation-API Seams"
 tags: ["room", "delegation-api", "dependency-injection", "testing", "seams"]
+snapshot_at: "2026-08-27T16:13:28.446Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-delegationapicontext-mcp-delegation-api-ts-has-no-injectable-seam-for-askroomsup-d4b9a082.md","sha256":"ce20378803d405b009f3ba56ccba8ae068417c1112d693f480de343c4daea38a","size":10613},{"path":".agent_memory/packets/bug_fix-existing-test-mcp-room-unified-session-test-tss-resolveroomreply-routes-a-messag-7ba291b7.md","sha256":"44a5a0d4f91a1f6352606130f404a59e5aeceea9a4473fe5f36f141e7af84614","size":11302},{"path":".agent_memory/packets/decision-mcp-delegation-api-test-tss-delegationapicontext-test-seam-has-no-built-in-way-t-7c6ad5ca.md","sha256":"075b1f62d40f52c5371723cb618c565219688fc01b5fde2bcfcf30cae7c5be84","size":13413},{"path":".agent_memory/packets/decision-manager-orchestration-test-tss-settlerun-tempproject-inroom-helpers-are-the-righ-50c67b58.md","sha256":"d543c23937c58bb65d76e584a4282bd48b783a6505b4a2f50e8eb33a7e5bd0db","size":7270}]
 ---
 
 # Room Delegation-API Seams

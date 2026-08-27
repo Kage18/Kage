@@ -2,6 +2,8 @@
 type: "belief"
 title: "Memory Store Backend Correctness (JSON/SQLite Port)"
 tags: ["store", "sqlite", "json-backend", "upsert", "rebuild", "fts"]
+snapshot_at: "2026-08-27T16:13:28.395Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-jsonstorebackends-structural-knowledge-graph-methods-files-json-symbols-json-imp-f462b7e1.md","sha256":"3ac898997cb4227468e480153cd84eecceeced9b867e7c32a662369205319350","size":21884},{"path":".agent_memory/packets/decision-sqlitestorebackends-queryvectorcandidates-scope-originally-used-a-join-against-p-12c7a947.md","sha256":"2ead846616316a7bb8a3d40557449c0a0ff71bb3df6775743c5ca8d2308d5b77","size":18545},{"path":".agent_memory/packets/decision-mcp-store-rebuild-tss-loaddocschunks-m1-code-keyed-docs-fts-upsert-ids-as-bare-d-d849aff3.md","sha256":"549153d3255db51f363553b5185c9fe09076267d8eff7d7425cdd936e24b34cb","size":20155},{"path":".agent_memory/packets/decision-the-store-doc-test-ts-guard-for-a-design-docs-rollout-phases-works-best-as-two-p-66d367cf.md","sha256":"fc58a3c2909b9ca53f126a947d4ed885418f289cd2cec827b59378b2e98e000b","size":15657},{"path":".agent_memory/packets/decision-docs-design-memory-store-md-already-states-the-derived-rebuildable-framing-for-i-b1e6e8cd.md","sha256":"792ad41c453fcdef3198da08dcf20e2227c10c996b3a5a65970bdf198c69255d","size":12328},{"path":".agent_memory/packets/decision-packet-paths-and-packet-symbols-need-unique-packet-id-path-unique-packet-id-symb-7fa93da8.md","sha256":"7d6ce12d89716e54da9e5da52eb218e16bc5aa5687821436a7864f75f2134498","size":18347},{"path":".agent_memory/packets/runbook-run-kage-mcp-tests-9b98df67.md","sha256":"0a58cf27dee8ee35c195d0282b25aa24660161710ae190c2d3ac8185ac252b79","size":6374}]
 ---
 
 # Memory Store Backend Correctness (JSON/SQLite Port)

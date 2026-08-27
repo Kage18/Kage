@@ -2,6 +2,8 @@
 type: "belief"
 title: "Merge-Ratification Flywheel"
 tags: ["delegation", "merge", "ratify", "auto-merge", "autonomy", "claim-verdict", "flywheel", "memory"]
+snapshot_at: "2026-08-27T16:13:28.376Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-auto-merge-must-require-an-executed-command-not-just-all-checks-pass-every-check-cf168ab0.md","sha256":"dfd7ec0ae43d1c2dc6ba3d0ba17ca62433cd9da60f9742009984af723c8905eb","size":12723},{"path":".agent_memory/packets/decision-a-dispatched-run-whose-configured-test-command-fails-lands-in-state-failed-not-r-37ee8ffa.md","sha256":"f949d57b6139ed3bd0519b94bf9087c88ae26d7d56242f44601a9a284337ed86","size":15531},{"path":".agent_memory/packets/decision-the-flywheel-is-recorded-at-write-time-and-rendered-as-navigation-brief-memory-i-9920b969.md","sha256":"fda751a8b95c4679c631becaab789b45529adcb5f99c968859c9ebc13a8ba272","size":12907},{"path":".agent_memory/packets/convention-hired-agents-must-never-kill-processes-they-did-not-spawn-a-run-killed-another-r-685ab5ff.md","sha256":"6baa029b6f458f112858423e21308f3aa35529c9750571011bbcf3b5889a42cd","size":9292},{"path":".agent_memory/packets/decision-under-that-kind-of-contention-real-subprocess-timing-based-tests-dispatch-durabi-1367b15a.md","sha256":"13e1080d1aef77b74021b291bc2c7f78ebe442d981cdbac7124404ed9a0ca3a4","size":5306},{"path":".agent_memory/packets/decision-dispatchrun-stubadapter-delegation-test-tss-pattern-is-enough-to-build-a-real-re-172f6345.md","sha256":"1b0db84595fff93b8f5e9281c367902deb9993a31bfb0a0bbcdd0f25c5a83f32","size":12889}]
 ---
 
 # Merge-Ratification Flywheel

@@ -2,6 +2,8 @@
 type: "belief"
 title: "The Value/Gains Receipts Ledger"
 tags: ["value-ledger", "receipts", "discovery-tokens", "gains", "viewer"]
+snapshot_at: "2026-08-27T16:13:28.471Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-value-ledger-records-recall-stale-withheld-and-caller-answered-receipts-e4e651f1.md","sha256":"6fec635a8a6108d32bddb19c8ca08f18e7d20776df9d7a55de493e31e1004621","size":10019},{"path":".agent_memory/packets/decision-value-ledger-recall-stale-withheld-caller-answered-replay-receipts-v2-2-0-b5e59596.md","sha256":"27f04ed09751ef2210b21ad6871f17743bc1386fb5a62004ee7121459b9ca579","size":5844},{"path":".agent_memory/packets/decision-value-ledger-events-replay-receipts-verified-v2-2-1-3a89a884.md","sha256":"0867108fe52ebd513a4472d6ade3b2718d5294ada496a40a8c745ffe49311c66","size":4586},{"path":".agent_memory/packets/workflow-discovery-tokens-and-file-context-where-the-receipts-math-and-pretooluse-read-in-f1a4d4a3.md","sha256":"a22230b3d51758ef31123f26f19ead8ea16b9d577ef6bd5510d51442cd9b6631","size":9864},{"path":".agent_memory/packets/decision-viewer-v2-receipts-theme-value-param-gains-tab-theme-aware-canvas-17b84cfa.md","sha256":"b710559e7b3179fd6ba5603dd4389e9489c8511d15d726ff55de46bcc6b1416f","size":6268}]
 ---
 
 # The Value/Gains Receipts Ledger

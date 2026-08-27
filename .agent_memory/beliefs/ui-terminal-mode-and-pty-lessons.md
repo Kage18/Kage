@@ -2,6 +2,8 @@
 type: "belief"
 title: "Terminal Mode and PTY Take-Over Lessons"
 tags: ["terminal", "node-pty", "xterm", "room-pty", "run-pty", "take-over", "debugging", "tui", "kage-ui"]
+snapshot_at: "2026-08-27T16:13:28.462Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-terminal-mode-four-stacked-bugs-behind-one-blank-pane-and-the-debugging-lesson-819616ce.md","sha256":"a3c7e0f6bacc031e260ecd3cd0fd289b2d95b9a0bfdfb718a153879ff458ca45","size":19047},{"path":".agent_memory/packets/bug_fix-mcp-delegation-api-tss-pty-identity-poll-timeout-ms-was-still-5000ms-at-the-star-0c260155.md","sha256":"10dd53fc43fd4de922806fe4b3e9f18978995c8efc085d84350377a7e3fa6cae","size":9352},{"path":".agent_memory/packets/decision-owner-decision-full-ao-conductor-interaction-parity-including-per-run-terminal-t-b09abd2c.md","sha256":"065357829f934cbaf3c1a9b416d2529e72b63f701e295ba0f33c44a5e49fa96f","size":9542},{"path":".agent_memory/packets/decision-ptylike-onexits-exit-code-parameter-was-dead-plumbing-neither-term-onexits-handl-fd4f987f.md","sha256":"a8fc07b20eb0182de931dff56644ddcb9150fbc10f10336363b82aeb3336e45a","size":10714},{"path":".agent_memory/packets/decision-the-run-detail-pane-run-detail-had-to-be-restructured-from-a-single-class-id-div-418994d5.md","sha256":"6f2690a429c640c984a4b0e9af2ad6269bfff2646c095f3003e629536f31cb50","size":14214},{"path":".agent_memory/packets/gotcha-tui-rendering-laws-erase-per-line-never-the-last-column-split-key-chunks-8ddc9892.md","sha256":"76526d674269d9ef014300a809e5f2ae7b2f4943ee051f2ab1898a2950a39841","size":11476}]
 ---
 
 # Terminal Mode and PTY Take-Over Lessons

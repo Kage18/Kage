@@ -2,6 +2,8 @@
 type: "belief"
 title: "Risk Assessment Stays Memory-First"
 tags: ["risk", "code-graph", "git-history", "viewer", "ux"]
+snapshot_at: "2026-08-27T16:13:28.456Z"
+citation_fingerprints: [{"path":".agent_memory/packets/decision-risk-assessment-stays-memory-first-bf561a88.md","sha256":"d6331ddd06e2957e41255f18923aeef9188e6753c179d322d67e5e87acca543e","size":5101},{"path":".agent_memory/packets/decision-before-you-edit-risk-page-must-explain-why-and-what-to-do-first-41b900df.md","sha256":"8c7877efaa8b8fdd6a01b986580b6e5739654d8bc086224d9d6cec668ec31e00","size":8743}]
 ---
 
 # Risk Assessment Stays Memory-First

@@ -2,6 +2,8 @@
 type: "belief"
 title: "Release: Version Lockstep and the Burned npm Lineage"
 tags: ["release", "version-lockstep", "npm", "mcp", "regression-test", "gotcha"]
+snapshot_at: "2026-08-27T16:13:28.432Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-mcp-release-test-tss-version-lockstep-test-reads-every-manifest-path-relative-to-caff67dd.md","sha256":"f038fe3024ec79e4513248e2dfe5276e4752c1ca22d0fe70393d748b218e5a8f","size":13016},{"path":".agent_memory/packets/decision-mcp-release-test-tss-distribution-manifests-stay-in-version-lockstep-test-reads--9e1465ad.md","sha256":"46f493de98d70da031a975acd768d57b452f4bbb3375b29bcfce20cf5badda6b","size":7384},{"path":".agent_memory/packets/decision-mcp-release-test-tss-version-lockstep-test-only-compares-version-fields-and-pack-5c26d569.md","sha256":"552164ed0da582b606e9e94c8fe85f52c8318bb3f43b188c6fc0b9902a6b2278","size":16818},{"path":".agent_memory/packets/decision-no-file-in-the-repo-contains-a-literal-kage-3-2-0-or-version-embedded-artifact-f-60bb1099.md","sha256":"fd7ad010a97364c976693565d07c7747b01f43eccf56d95ff0091a6356bf56ed","size":7503},{"path":".agent_memory/packets/gotcha-mcp-version-skew-launcher-mcp-config-pins-vendored-claude-kage-mcp-overriding-al-e6178d3c.md","sha256":"e24c221cb68fdc1d508159a8b7e2a6b375347075842702e6b19e416970e93d18","size":6992},{"path":".agent_memory/packets/gotcha-social-sites-mangle-scoped-npm-commands-use-unscoped-alias-kage-graph-mcp-in-all-b69bc9d6.md","sha256":"8ad4d2a36e3377cfbcdca075194f53623161c9e41db3582bb0005e4ea36f4d83","size":5510}]
 ---
 
 # Release: Version Lockstep and the Burned npm Lineage

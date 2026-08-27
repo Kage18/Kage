@@ -2,6 +2,8 @@
 type: "belief"
 title: "Self: What This Harness Manages, Where It's Heading, and What It Doesn't Yet Know"
 tags: ["kage", "self-model", "wave-1", "the-first-sleep"]
+snapshot_at: "2026-08-27T16:13:28.458Z"
+citation_fingerprints: []
 ---
 
 # Self: What This Harness Manages, Where It's Heading, and What It Doesn't Yet Know

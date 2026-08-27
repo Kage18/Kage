@@ -2,6 +2,8 @@
 type: "belief"
 title: "MCP Tool Response Budget Discipline"
 tags: ["mcp", "context-budget", "response-size", "kage-refresh", "kage-pr-check"]
+snapshot_at: "2026-08-27T16:13:28.453Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-refreshprojects-full-option-kernel-ts-already-existed-but-controls-forcing-a-ful-cd61ae61.md","sha256":"b6495dcb7dd073102a09e2710f5fd8edcc6cfc1bfb944b702fed579f77c8b7dd","size":14590},{"path":".agent_memory/packets/decision-kernel-tss-prcheck-builds-its-top-level-warnings-field-as-validation-warnings-ee101401.md","sha256":"3bb35dea47fddd43a1e8809f6d73217e7e10ed21a8db9a2cfff446a816473952","size":16916},{"path":".agent_memory/packets/gotcha-kage-refresh-returns-150kb-per-call-177-stale-packets-and-78-warnings-dumped-in--d42c8a6e.md","sha256":"392ddc8e65bccd7d8b7e01d0975179274a299a169956756f1973f902fe483d71","size":10307}]
 ---
 
 # MCP Tool Response Budget Discipline

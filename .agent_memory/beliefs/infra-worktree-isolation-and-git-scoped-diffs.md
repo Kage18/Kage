@@ -2,6 +2,8 @@
 type: "belief"
 title: "Worktree Isolation and Git-Scoped Diffs"
 tags: ["worktree", "git", "isolation", "diff", "build-escape"]
+snapshot_at: "2026-08-27T16:13:28.397Z"
+citation_fingerprints: [{"path":".agent_memory/packets/bug_fix-a-real-git-worktree-add-checkout-has-its-own-index-even-when-nested-inside-the-m-480d8309.md","sha256":"bde33181af36f39ec4e4994e5e78f013f2e827adb029e8688e66ae782ba1c242","size":21455},{"path":".agent_memory/packets/bug_fix-git-diff-ref-a-single-ref-no-cached-compares-that-ref-straight-against-the-w-c38319df.md","sha256":"e9acc3d4e85138476cb9888d0d42ca909150f3bf54cfc577ac772596c8e13df2","size":20816},{"path":".agent_memory/packets/gotcha-a-runs-build-can-escape-its-worktree-into-the-main-checkouts-dist-and-a-supervis-f601e41c.md","sha256":"b92e8249f96e4e3726c783bd5726ecadb4b4595cac3a1d16fde9b5d7cdaa0650","size":14908}]
 ---
 
 # Worktree Isolation and Git-Scoped Diffs
